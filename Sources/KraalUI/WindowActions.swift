@@ -26,6 +26,7 @@ public final class WindowActions {
     public private(set) var commandPaletteCount = 0
     public private(set) var shortcutsCount = 0
     public private(set) var machinesCount = 0
+    public private(set) var debugInfoCount = 0
 
     public init() {}
 
@@ -34,4 +35,5 @@ public final class WindowActions {
     public func showCommandPalette() { commandPaletteCount += 1 }
     public func showShortcuts() { shortcutsCount += 1 }
     public func showMachines() { machinesCount += 1 }
+    public func showDebugInfo() { debugInfoCount += 1 }
 }

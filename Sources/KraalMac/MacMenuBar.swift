@@ -34,6 +34,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         var showCommands: () -> Void = {}
         var showShortcuts: () -> Void = {}
         var showMachines: () -> Void = {}
+        var showDebugInfo: () -> Void = {}
     }
 
     init(store: AppStore, actions: MenuActions) {
@@ -49,6 +50,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         mainMenu.addItem(submenu(title: "Edit", build: editMenu))
         mainMenu.addItem(submenu(title: "View", build: viewMenu))
         mainMenu.addItem(submenu(title: "Window", build: windowMenu))
+        mainMenu.addItem(submenu(title: "Help", build: helpMenu))
         NSApplication.shared.mainMenu = mainMenu
         kraalLog("menu: installed \(mainMenu.items.count) top-level menus")
     }
@@ -192,10 +194,49 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         NSApplication.shared.windowsMenu = menu
     }
 
+
+    private func helpMenu(_ menu: NSMenu) {
+        let debugMenu = NSMenu(title: "Debug")
+        let showInfo = NSMenuItem(
+            title: "Show Debug Info…",
+            action: #selector(showDebugInfo),
+            keyEquivalent: ""
+        )
+        // F12 via AppKit private-use scalar (same pattern as arrow keys in MenuShortcuts).
+        if let scalar = UnicodeScalar(NSF12FunctionKey) {
+            showInfo.keyEquivalent = String(Character(scalar))
+            showInfo.keyEquivalentModifierMask = []
+        }
+        showInfo.target = self
+        debugMenu.addItem(showInfo)
+
+        let toggleLog = NSMenuItem(
+            title: "Toggle Verbose Logging",
+            action: #selector(toggleVerboseLogging),
+            keyEquivalent: ""
+        )
+        toggleLog.target = self
+        toggleLog.state = KraalLog.shared.isEnabled ? .on : .off
+        debugMenu.addItem(toggleLog)
+
+        let debugItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+        debugItem.submenu = debugMenu
+        menu.addItem(debugItem)
+    }
+
     // MARK: - Actions
 
     @objc private func showCommandPalette() { actions.showCommands() }
     @objc private func showShortcuts() { actions.showShortcuts() }
+    @objc private func showDebugInfo() { actions.showDebugInfo() }
+
+    @objc private func toggleVerboseLogging(_ sender: NSMenuItem) {
+        let next = !KraalLog.shared.isEnabled
+        KraalLog.shared.setEnabled(next)
+        sender.state = next ? .on : .off
+        let state = next ? "on" : "off"
+        kraalLog("debug: verbose logging \(state)")
+    }
     @objc private func reloadConfig() {
         store?.reloadServerConfig()
     }
@@ -253,6 +294,10 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
     /// silently on click. Pane items need a pane, tab items a tab, and the
     /// move-tab pair needs somewhere to move to.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleVerboseLogging) {
+            item.state = KraalLog.shared.isEnabled ? .on : .off
+            return true
+        }
         guard let raw = item.representedObject as? String,
               let command = AppCommand(rawValue: raw) else { return true }
         guard let store else { return false }

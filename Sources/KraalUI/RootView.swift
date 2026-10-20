@@ -18,6 +18,7 @@ public struct RootView: View {
     @State private var showConnection = false
     @State private var showShortcuts = false
     @State private var showMachines = false
+    @State private var showDebugInfo = false
     @State private var sidebarVisible = true
     @State private var statusBarVisible = true
 
@@ -87,6 +88,10 @@ public struct RootView: View {
         .sheet(isPresented: $showMachines) {
             MachinesPanel { showMachines = false }
         }
+        .sheet(isPresented: $showDebugInfo) {
+            DebugInfoView()
+                .environment(store)
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -137,5 +142,6 @@ public struct RootView: View {
         .onChange(of: windowActions.commandPaletteCount) { showCommands = true }
         .onChange(of: windowActions.shortcutsCount) { showShortcuts = true }
         .onChange(of: windowActions.machinesCount) { showMachines = true }
+        .onChange(of: windowActions.debugInfoCount) { showDebugInfo = true }
     }
 }

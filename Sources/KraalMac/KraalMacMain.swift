@@ -108,7 +108,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 toggleStatusBar: { [windowActions] in windowActions.toggleStatusBar() },
                 showCommands: { [windowActions] in windowActions.showCommandPalette() },
                 showShortcuts: { [windowActions] in windowActions.showShortcuts() },
-                showMachines: { [windowActions] in windowActions.showMachines() }
+                showMachines: { [windowActions] in windowActions.showMachines() },
+                showDebugInfo: { [windowActions] in windowActions.showDebugInfo() }
             )
         )
         menu.install()
