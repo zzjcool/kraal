@@ -171,11 +171,22 @@ struct PaneLayoutView: View {
             )
             .onHover { hovering in
                 if hovering {
-                    NSCursor.resizeLeftRight.push()
+                    Self.splitCursor(for: split.direction).push()
                 } else {
                     NSCursor.pop()
                 }
             }
+    }
+
+    /// The resize cursor matching a split direction.
+    ///
+    /// Thin AppKit adapter over ``PaneSplitAxis``, which holds the readable part
+    /// of the rule and is what the tests assert on.
+    static func splitCursor(for direction: PaneSurfaceSplitDirection) -> NSCursor {
+        switch PaneSplitAxis(direction) {
+        case .verticalDrag: .resizeUpDown
+        case .horizontalDrag: .resizeLeftRight
+        }
     }
 
     /// Converts a drag into the ratio the daemon expects: the divider's new
@@ -191,14 +202,42 @@ struct PaneLayoutView: View {
             * CGFloat(surface.frame.width)
         let translatedY = drag.translation.height / max(grid.height, 1)
             * CGFloat(surface.frame.height)
+        return Self.splitRatio(
+            direction: split.direction,
+            position: split.position,
+            area: area,
+            translatedX: translatedX,
+            translatedY: translatedY
+        )
+    }
 
-        switch split.direction {
-        case .horizontal:
-            let base = Double(split.position - area.originY)
+    /// The new divider offset, as a ratio of the split's own area.
+    ///
+    /// The daemon names a split after the divider *line*, and the drag axis is
+    /// perpendicular to that: a `.vertical` divider is a horizontal line between
+    /// panes stacked top to bottom, so it moves along Y; a `.horizontal` divider
+    /// is a vertical line between panes side by side, so it moves along X.
+    ///
+    /// `position` is already measured along that same axis — confirmed against a
+    /// live daemon, where a `.vertical` split in a 120×40 area reported
+    /// `position` 10 and 30 for ratios 0.25 and 0.75. Reading the ratio off the
+    /// other axis therefore both misplaces the divider and drags it backwards.
+    ///
+    /// Clamped to 0.1…0.9 so a pane cannot be dragged to nothing.
+    static func splitRatio(
+        direction: PaneSurfaceSplitDirection,
+        position: UInt16,
+        area: SurfaceRect,
+        translatedX: CGFloat,
+        translatedY: CGFloat
+    ) -> Double {
+        switch direction {
+        case .vertical:
+            let base = Double(position - area.originY)
             let moved = base + Double(translatedY)
             return min(max(moved / Double(max(area.height, 1)), 0.1), 0.9)
-        case .vertical:
-            let base = Double(split.position - area.originX)
+        case .horizontal:
+            let base = Double(position - area.originX)
             let moved = base + Double(translatedX)
             return min(max(moved / Double(max(area.width, 1)), 0.1), 0.9)
         }
@@ -243,6 +282,42 @@ public enum PaneFrameMath {
             width: pane.width,
             height: pane.height
         )
+    }
+}
+
+/// Which way a split divider moves.
+///
+/// The daemon names a split after the divider *line*, and the drag axis is
+/// perpendicular to that name. The two names therefore read backwards to anyone
+/// thinking about where the panes go, and that is the whole bug this type exists
+/// to make explicit:
+///
+/// * `.vertical` — a vertical line — leaves panes stacked top to bottom, which
+///   the UI offers as "Split Down". The divider moves **up and down**.
+/// * `.horizontal` — a horizontal line — leaves panes side by side, offered as
+///   "Split Right". The divider moves **left and right**.
+///
+/// Verified against a live daemon: a `direction: down` split came back as
+/// `.vertical` with a 120×2 hit rect in a 120×40 area (a wide, thin, horizontal
+/// strip), and its `position` tracked the row axis.
+public enum PaneSplitAxis: Sendable {
+    /// The divider moves along Y; the resize cursor is the up-down arrows.
+    case verticalDrag
+    /// The divider moves along X; the resize cursor is the left-right arrows.
+    case horizontalDrag
+
+    public init(_ direction: PaneSurfaceSplitDirection) {
+        switch direction {
+        case .vertical: self = .verticalDrag
+        case .horizontal: self = .horizontalDrag
+        }
+    }
+
+    public var direction: PaneSurfaceSplitDirection {
+        switch self {
+        case .verticalDrag: .vertical
+        case .horizontalDrag: .horizontal
+        }
     }
 }
 
