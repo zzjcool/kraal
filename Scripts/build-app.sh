@@ -1,0 +1,102 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
+#
+# Builds Kraal.app from the SwiftPM executable.
+#
+# A bare SwiftPM executable cannot be a proper macOS app: without an Info.plist
+# and a bundle it has no identifier, so windows do not restore, AppKit refuses
+# some services, and the Dock shows a generic icon. This script assembles a real
+# .app around the already-built binary — no Xcode project required.
+#
+#   ./Scripts/build-app.sh            # debug
+#   ./Scripts/build-app.sh release    # release, ad-hoc signed
+#
+# Output: build/Kraal.app
+
+set -euo pipefail
+
+CONFIGURATION="${1:-debug}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+APP_NAME="Kraal"
+PRODUCT="KraalMac"
+BUILD_DIR="$ROOT/build"
+APP="$BUILD_DIR/$APP_NAME.app"
+BUNDLE_ID="cool.zzj.kraal"
+VERSION="0.1.0"
+
+echo "==> Building $PRODUCT ($CONFIGURATION)"
+SWIFT_FLAGS=(-c "$CONFIGURATION")
+swift build --product "$PRODUCT" "${SWIFT_FLAGS[@]}"
+
+# SwiftPM writes to .build/out for Xcode-backed toolchains and .build/debug
+# otherwise; resolve whichever exists.
+BIN=""
+for candidate in \
+    "$ROOT/.build/out/Products/$(echo "$CONFIGURATION" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')/$PRODUCT" \
+    "$ROOT/.build/$CONFIGURATION/$PRODUCT" \
+    "$ROOT/.build/arm64-apple-macosx/$CONFIGURATION/$PRODUCT"
+do
+    if [ -x "$candidate" ]; then BIN="$candidate"; break; fi
+done
+
+if [ -z "$BIN" ]; then
+    echo "error: built binary not found for configuration $CONFIGURATION" >&2
+    exit 1
+fi
+echo "    binary: $BIN"
+
+echo "==> Assembling $APP"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+cp "$BIN" "$APP/Contents/MacOS/$PRODUCT"
+
+# SwiftPM resource bundles sit next to the binary; Ghostty's resources live in
+# one of them, so they must be copied or the terminal cannot find terminfo.
+for bundle in "$(dirname "$BIN")"/*.bundle; do
+    [ -e "$bundle" ] || continue
+    cp -R "$bundle" "$APP/Contents/Resources/"
+done
+
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleExecutable</key>
+    <string>$PRODUCT</string>
+    <key>CFBundleIdentifier</key>
+    <string>$BUNDLE_ID</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$VERSION</string>
+    <key>CFBundleVersion</key>
+    <string>$VERSION</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Apache-2.0. Herdr is a trademark of Herdr, Inc.; Kraal is an independent client.</string>
+</dict>
+</plist>
+PLIST
+
+# Ad-hoc signature: enough for local use and for TCC to keep a stable identity.
+echo "==> Signing (ad-hoc)"
+codesign --force --deep --sign - "$APP" 2>/dev/null || \
+    echo "    warning: ad-hoc signing failed; the app still runs unsigned"
+
+touch "$APP"
+echo "==> Done: $APP"

@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
+#
+# Kraal mirrors the Herdr wire contract field-for-field, so protocol structs
+# keep upstream's short names (`x`, `y`, `f`) — renaming them would make every
+# definition harder to diff against `herdr-protocol/src/wire.rs`. Everything
+# outside the protocol kernel still follows the usual 3-character minimum.
+
+included:
+  - Sources
+  - Tests
+
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - force_unwrapping
+  - redundant_nil_coalescing
+  - toggle_bool
+  - unneeded_parentheses_in_closure_argument
+
+disabled_rules:
+  - todo
+  - trailing_comma
+
+identifier_name:
+  max_length:
+    warning: 48
+    error: 64
+  excluded:
+    - id
+
+line_length:
+  warning: 120
+  error: 160
+
+type_body_length:
+  warning: 400
+  error: 700
+
+file_length:
+  warning: 900
+  error: 1400
+
+function_body_length:
+  warning: 80
+  error: 120
+
+cyclomatic_complexity:
+  warning: 20
+  error: 40
