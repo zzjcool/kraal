@@ -1,4 +1,4 @@
-# HerdKit 技术设计文档
+# iHerdr 技术设计文档
 
 > 原生 iOS / macOS Herdr 客户端 · 基于 herdr endpoint 协议 + Ghostty 渲染
 >
@@ -868,42 +868,42 @@ final class PaneModel: ObservableObject {
 ## 9. 目录结构
 
 ```
-HerdKit/
+iHerdr/
 ├── Package.swift
 ├── Sources/
-│   ├── HerdrProtocol/              # 纯协议层，零 UI 依赖，可单测
+│   ├── iHerdrProtocol/              # 纯协议层，零 UI 依赖，可单测
 │   │   ├── Wire.swift              # 21+21 枚举、所有 struct
 │   │   ├── Bincode.swift           # varint + 编解码
 │   │   ├── Frame.swift             # u32 长度帧
 │   │   ├── Surface.swift           # PaneSurfaceFrame / Patch 校验
 │   │   └── Endpoint.swift          # hello / welcome
-│   ├── HerdrTransport/             # SSH + 连接管理
+│   ├── iHerdrTransport/            # SSH + 连接管理
 │   │   ├── SSHClient.swift
 │   │   ├── BridgeChannel.swift
 │   │   ├── TerminalChannel.swift
 │   │   └── ReconnectPolicy.swift
-│   ├── HerdrClient/                # 高层客户端
-│   │   ├── HerdrConnection.swift   # 状态机
-│   │   ├── ProtocolClient.swift    # actor
+│   ├── iHerdrClient/               # 高层客户端
+│   │   ├── ConnectionManager.swift  # 状态机
+│   │   ├── ProtocolClient.swift   # actor
 │   │   ├── SnapshotStore.swift
-│   │   └── APIRequest.swift        # 40 个方法
-│   ├── HerdrSidebar/               # 侧边栏引擎
+│   │   └── APIRequest.swift       # 40 个方法
+│   ├── iHerdrSidebar/              # 侧边栏引擎
 │   │   ├── SidebarSpec.swift       # 数据模型
 │   │   ├── TOMLParser.swift        # config.toml
 │   │   ├── TokenResolver.swift     # token → 文本
 │   │   └── StyleRules.swift
-│   └── HerdrUI/                    # SwiftUI
+│   └── iHerdrUI/                   # SwiftUI
 │       ├── SidebarView.swift
 │       ├── TabBarView.swift
 │       ├── PaneLayoutView.swift
 │       ├── PaneView.swift          # ghostty 包装
 │       └── CommandPalette.swift
 ├── Tests/
-│   ├── HerdrProtocolTests/
+│   ├── iHerdrProtocolTests/
 │   │   ├── BincodeTests.swift
 │   │   ├── FrameDecodeTests.swift  # 用真实抓包做 fixture
 │   │   └── SurfacePatchTests.swift
-│   └── HerdrSidebarTests/
+│   └── iHerdrSidebarTests/
 │       └── TOMLParserTests.swift
 └── Fixtures/
     ├── welcome.json                # 真实 welcome
@@ -912,7 +912,7 @@ HerdKit/
     └── captured.ansi               # 真实 ANSI 帧
 ```
 
-**关键设计**：`HerdrProtocol` 零依赖，可以在 Linux CI 上跑测试。`HerdrUI` 只依赖 `HerdrClient` 和 GhosttyKit。
+**关键设计**：`iHerdrProtocol` 零依赖，可以在 Linux CI 上跑测试。`iHerdrUI` 只依赖 `iHerdrClient` 和 GhosttyKit。
 
 ---
 

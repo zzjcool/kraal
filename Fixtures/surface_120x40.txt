@@ -1,4 +1,4 @@
-HerdKit fixture
+iHerdr fixture
 colors: red green bold
 box: ┌───┐ │ └───┘
 wide: 中文测试 ＡＢＣ
