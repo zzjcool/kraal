@@ -40,6 +40,17 @@ public enum SurfaceGeometry {
         incomingRevision < previousRevision
     }
 
+    /// Whether a frame has to be parked because the terminal has no grid yet.
+    ///
+    /// Ghostty attaches its surface asynchronously. A frame that arrives before
+    /// that has no grid to be laid out in, so writing it is useless and the pane
+    /// is left blank — which is what made a tab switch show an empty pane until
+    /// something printed again. Such a frame must be held and painted when the
+    /// grid appears.
+    public static func needsParkingUntilGridIsKnown(hasGrid: Bool) -> Bool {
+        !hasGrid
+    }
+
     /// Whether a frame must be painted even though its revision is unchanged.
     ///
     /// A pane's content revision only moves when its *content* changes, so it

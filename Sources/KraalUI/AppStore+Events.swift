@@ -23,6 +23,7 @@ extension AppStore {
         if phase != .live {
             phase = .live
         }
+        surfaceIsStale = false
     }
 
     func handleSnapshot(_ snapshot: ClientShellSnapshot) {
@@ -33,8 +34,22 @@ extension AppStore {
         let focusedTabChanged = self.snapshot?.focusedTabId != snapshot.focusedTabId
         self.snapshot = snapshot
         guard bootChanged || focusedTabChanged else { return }
-        // The surface we hold describes the previously focused tab.
-        surface = nil
+        // Keep the previous frame on screen while the daemon re-projects.
+        //
+        // Clearing it here is what produced the black flash on a tab switch: the
+        // pane views are torn down, `PaneLayoutView` has nothing to draw but its
+        // background, and the new projection lands tens of milliseconds later.
+        // The old frame is stale in the sense that it shows another tab, but a
+        // stale frame that is replaced ~30 ms later reads as a smooth switch,
+        // while a blank rectangle reads as a crash. The new surface replaces it
+        // wholesale in `handleSurface`.
+        if bootChanged {
+            // A new boot id means the old frame belongs to a dead daemon; there is
+            // nothing meaningful to keep.
+            surface = nil
+        } else {
+            kraalLog("snapshot: tab changed, holding previous frame until re-projection")
+        }
         if supportsSurfaceInterest {
             // Claiming interest makes the daemon stream the new tab's projection.
             requestSurfaceInterest()
@@ -49,7 +64,11 @@ extension AppStore {
     func handleSurface(_ surface: PaneSurfaceFrame) {
         if let current = self.surface,
            current.surfaceRevision > surface.surfaceRevision,
-           current.bootId == surface.bootId {
+           current.bootId == surface.bootId,
+           current.projectionRevision == surface.projectionRevision {
+            // Only comparable within one projection: two projections number their
+            // frames independently, so a held-over frame from the previous tab
+            // must not veto the first frame of the new one.
             return
         }
         if let snapshot, surface.projectionRevision != snapshot.revision {
@@ -73,6 +92,7 @@ extension AppStore {
             + "rev=\(surface.surfaceRevision)")
         let previousPanes = Set(self.surface?.panes.map(\.paneId) ?? [])
         self.surface = surface
+        surfaceIsStale = false
         let paneIds = Set(surface.panes.map(\.paneId))
         if paneIds != previousPanes {
             onPaneSetChanged?(paneIds)

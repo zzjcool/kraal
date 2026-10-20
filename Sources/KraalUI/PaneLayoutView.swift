@@ -78,6 +78,11 @@ struct PaneLayoutView: View {
                                         .allowsHitTesting(false)
                                 }
                             }
+                            // A frame held across a dropped connection is not
+                            // current state. Dimming it says so without throwing
+                            // away a picture that will very likely be replaced by
+                            // the same content seconds later.
+                            .opacity(store.surfaceIsStale ? 0.45 : 1)
                     }
 
                     ForEach(Array(surface.splits.enumerated()), id: \.offset) { _, split in

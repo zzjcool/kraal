@@ -14,7 +14,11 @@ import KraalTransport
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
-    @State private var selection: Selection = .agents
+    // Spaces is the default: it is the unit you navigate by, and it stays
+    // meaningful with plain shells. Agents only fills in once the daemon
+    // detects a coding agent, so opening there shows a fallback pane list
+    // instead — with one workspace, every row repeats the same name.
+    @State private var selection: Selection = .workspaces
 
     enum Selection: Hashable {
         case workspaces
@@ -297,7 +301,7 @@ private struct PaneRowView: View {
             pane: pane
         )
         VStack(alignment: .leading, spacing: CGFloat(layout.agentsRowGap)) {
-            ForEach(Array(layout.agentsRows.enumerated()), id: \.offset) { _, row in
+            ForEach(Array(layout.paneRows.enumerated()), id: \.offset) { _, row in
                 let resolved = SidebarTokenResolver.resolve(row: row, context: context)
                 if !resolved.tokens.isEmpty {
                     HStack(spacing: 5) {

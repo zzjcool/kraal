@@ -405,4 +405,42 @@ struct MouseMappingTests {
             currentGrid: (111, 35)
         ))
     }
+
+    @Test("the no-agent pane rows tell sibling panes apart")
+    func paneRowsAreDistinct() throws {
+        // Two panes of one tab, no agents: with the agent layout the agent token
+        // resolves to nothing and both rows came out as "· w2 #2" — identical,
+        // so the sidebar could not be used to pick a pane.
+        let tab = try JSONDecoder().decode(ClientShellTab.self, from: Data("""
+        {"tab_id":"w2:t2","workspace_id":"w2","number":2,"label":"2"}
+        """.utf8))
+        let context = { (paneId: String) throws -> SidebarRowContext in
+            let pane = try JSONDecoder().decode(ClientShellPane.self, from: Data("""
+            {"pane_id":"\(paneId)","workspace_id":"w2","tab_id":"w2:t2"}
+            """.utf8))
+            return SidebarRowContext(tab: tab, pane: pane)
+        }
+
+        func render(_ rowContext: SidebarRowContext) -> String {
+            SidebarLayout().paneRows.map { row in
+                SidebarTokenResolver.resolve(row: row, context: rowContext)
+                    .tokens.map(\.text).joined(separator: " ")
+            }.joined(separator: " | ")
+        }
+
+        let leftPane = render(try context("w2:p2"))
+        let rightPane = render(try context("w2:p3"))
+        #expect(leftPane != rightPane)
+        #expect(leftPane.contains("w2:p2"))
+        #expect(rightPane.contains("w2:p3"))
+    }
+
+    @Test("a frame that arrives before the terminal has a grid is parked")
+    func parkFrameUntilGridIsKnown() {
+        // Ghostty attaches asynchronously. Writing before that both wastes the
+        // frame and leaves the pane blank, which is exactly what a tab switch
+        // looked like: an empty pane until something printed again.
+        #expect(SurfaceGeometry.needsParkingUntilGridIsKnown(hasGrid: false))
+        #expect(!SurfaceGeometry.needsParkingUntilGridIsKnown(hasGrid: true))
+    }
 }

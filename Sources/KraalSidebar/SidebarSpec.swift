@@ -206,6 +206,13 @@ public enum SidebarKind: Sendable {
 public struct SidebarLayout: Equatable, Sendable {
     public var spacesRows: [SidebarRowSpec]
     public var agentsRows: [SidebarRowSpec]
+    /// Rows for panes that are not running a coding agent.
+    ///
+    /// Not `agentsRows`: those name the agent on their second row, so with no
+    /// agent the second row resolves to nothing and two panes of the same tab
+    /// render as identical rows. The pane is the only thing that tells them
+    /// apart, so it has to be in the row.
+    public var paneRows: [SidebarRowSpec]
     /// Per-agent overrides from `ui.sidebar.agents.rows_by_agent`.
     public var agentOverrides: [String: [SidebarRowSpec]]
     public var spacesRowGap: Int
@@ -214,12 +221,14 @@ public struct SidebarLayout: Equatable, Sendable {
     public init(
         spacesRows: [SidebarRowSpec] = SidebarLayout.defaultSpacesRows,
         agentsRows: [SidebarRowSpec] = SidebarLayout.defaultAgentsRows,
+        paneRows: [SidebarRowSpec] = SidebarLayout.defaultPaneRows,
         agentOverrides: [String: [SidebarRowSpec]] = [:],
         spacesRowGap: Int = 0,
         agentsRowGap: Int = 0
     ) {
         self.spacesRows = spacesRows
         self.agentsRows = agentsRows
+        self.paneRows = paneRows
         self.agentOverrides = agentOverrides
         self.spacesRowGap = spacesRowGap
         self.agentsRowGap = agentsRowGap
@@ -247,6 +256,15 @@ public struct SidebarLayout: Equatable, Sendable {
         ]),
         SidebarRowSpec(tokens: [
             SidebarTokenSpec(kind: .agent),
+        ]),
+    ]
+
+    /// The no-agent fallback: each row must identify one pane uniquely.
+    public static let defaultPaneRows = [
+        SidebarRowSpec(tokens: [
+            SidebarTokenSpec(kind: .stateIcon),
+            SidebarTokenSpec(kind: .tab),
+            SidebarTokenSpec(kind: .pane),
         ]),
     ]
 

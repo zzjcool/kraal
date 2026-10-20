@@ -41,6 +41,8 @@ public final class PaneTerminalModel {
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
+    /// A frame that arrived before Ghostty's surface existed.
+    private var pendingFrame: FrameData?
 
     /// Clears the visible screen and the scrollback, then homes the cursor.
     ///
@@ -115,8 +117,20 @@ public final class PaneTerminalModel {
         // would wrap every row and push the overflow into scrollback, leaving a
         // permanently skewed screen. Repaint from a clean slate in that case and
         // let the next apply land on a grid that matches.
-        if let grid = state.surfaceSize,
-           grid.columns != frame.width || grid.rows != frame.height {
+        // No surface yet: the view has been mounted but Ghostty has not finished
+        // attaching, so `surfaceSize` is nil and anything written is queued
+        // without a grid to lay it out in. Remember the frame and paint it when
+        // the surface reports a size; writing now both wastes the frame and
+        // leaves the pane blank even though the terminal later becomes ready.
+        guard let grid = state.surfaceSize else {
+            pendingFrame = frame
+            lastRevision = 0
+            frameGrid = nil
+            return
+        }
+        pendingFrame = nil
+
+        if grid.columns != frame.width || grid.rows != frame.height {
             let all = surface.panes.map {
                 "\($0.paneId)=\($0.innerRect.width)x\($0.innerRect.height)"
             }
@@ -158,9 +172,46 @@ public final class PaneTerminalModel {
         ))
     }
 
+    /// Paints a frame that arrived before the terminal was able to accept it.
+    ///
+    /// Called when the surface reports a grid: at that point the queued frame can
+    /// finally be laid out. Without this the pane stays blank after a tab switch,
+    /// because the only frame for that tab was dropped while the view was still
+    /// being attached.
+    func flushPendingFrame() {
+        guard let frame = pendingFrame else { return }
+        pendingFrame = nil
+        lastRevision = 0
+        frameGrid = nil
+        renderer.reset()
+        session.receive(Data(clearScreenSequence.utf8))
+        session.receive(renderer.render(frame))
+        lastRevision = 0
+        frameGrid = frame
+    }
+
+    /// Prepares for a terminal view that has never painted anything.
+    ///
+    /// The renderer tracks what it already drew so later frames can be deltas.
+    /// That state belongs to the *terminal*, not to this model: SwiftUI tears the
+    /// view down when a tab switch changes the pane set, and the new view starts
+    /// with an empty screen. Keeping the renderer's memory then makes the next
+    /// apply emit only the rows that changed, which is nothing — the terminal
+    /// holds the content but never repaints it, so the pane looks blank until
+    /// something writes again. Dropping the memory forces the next apply to send
+    /// the whole frame.
+    func prepareForNewTerminalView() {
+        renderer.reset()
+        lastRevision = 0
+        frameGrid = nil
+        pendingFrame = nil
+        needsCleanRepaint = false
+    }
+
     func reset() {
         renderer.reset()
         lastRevision = 0
+        frameGrid = nil
     }
 
     /// Crops the composited tab surface down to this pane's content area.
@@ -283,7 +334,19 @@ public struct GhosttyPaneView: View {
                 }
             }
             .onAppear {
+                // A freshly mounted terminal view has an empty screen, so the
+                // model's memory of what it already drew is a lie. Forget it and
+                // let this apply paint the whole frame.
+                model.prepareForNewTerminalView()
                 model.apply(surface: surface)
+            }
+            // Ghostty attaches its surface asynchronously, so an apply that ran in
+            // `onAppear` found no grid and parked its frame. The grid appearing is
+            // the signal that the terminal can finally accept it.
+            .onChange(of: model.state.surfaceSize) { old, new in
+                if old == nil, new != nil {
+                    model.flushPendingFrame()
+                }
             }
             .onChange(of: surface.surfaceRevision) { _, _ in
                 model.apply(surface: surface)

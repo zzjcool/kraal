@@ -168,4 +168,62 @@ swift test      # 60 个测试
 与 [penso/herdr-gpui](https://github.com/penso/herdr-gpui)（均为 Apache-2.0）。
 归属声明见 [NOTICE](NOTICE)；贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+---
+
+## 致谢
+
+Kraal 的实现参考了以下开源项目。它们的作者在同样没有官方客户端文档的情况下，
+把这些协议与渲染问题想清楚并写了下来，读它们的代码省下了大量试错。
+
+### [penso/herdr-gpui](https://github.com/penso/herdr-gpui)（Apache-2.0）
+
+一个 Rust + GPUI 的 herdr 桌面客户端，是我们最接近的先行者。
+
+切 tab / 切 workspace 的画面处理方式直接受它启发。它把「客户端认为的当前状态」
+（`LiveState.surface`）与「屏幕上正画的那一帧」（`Presentation`）分成两层：
+切换焦点时前者立刻置空，后者保留旧帧直到新投影到达。`presentation.rs` 的模块注释
+写得比多数文档都清楚：
+
+> *Painting nothing in those gaps flashes the empty background between two pictures;
+> a multiplexer redrawing a cell grid never blanks between them.*
+
+同一份注释里还有一条约束我们照做了：*「Retained cells are presentation only.
+Hit testing, input routing, and IME placement keep reading `LiveState::surface`」*
+——保留的帧只用于显示，命中测试与输入路由必须继续读真实状态，否则点击会打到
+已经离开的 pane。Kraal 的 `paneViewFrames` 由 pane 视图自报、与渲染同步，
+结构上避免了这种错位，但这条原则是照它确立的。
+
+断连时保留画面并置灰（`Presentation::hold`）、`boot_id` 变化时才丢弃帧、
+以及「`projection_revision` 必须与 snapshot `revision` 精确相等才算当前投影」
+这几条判定，也都对齐了它的做法。
+
+### [kitknox/rootshell](https://github.com/kitknox/rootshell)（MIT）
+
+一个同样基于 libghostty 的 Apple 平台终端（iOS / iPadOS / visionOS / Mac Catalyst）。
+和我们用同一套引擎，所以它的坑就是我们的坑。
+
+它处理切 tab 的方式比「保留旧帧」更进一步：可见性跟着一个**滞后**的
+`displayedTabID` 走，而不是跟着当前选中的 tab；并且要等新 tab 的渲染层真的
+画出第一帧（`IOSurfaceLayer.contents != nil`，靠 `CADisplayLink` 轮询）才切换，
+超时 600 ms 失败开放。那条注释说得很直白：
+
+> *Visibility keys off the lagging displayedTabID (not the selection) so a freshly
+> opened tab stays hidden, and the previous tab stays on screen, until its renderer
+> has presented a first frame.*
+
+命中测试仍然是跟着选中的 tab 而不是显示中的 tab，和 herdr-gpui 那条
+「保留的帧只用于显示」是同一个原则。
+
+它还把自己踩过的坑写进了更新日志（1.0.9-116 *"Fixed Frozen, Blank Tabs When
+Switching"*），并记录了根因：surface 卡在 `flags.visible == false` 会让渲染线程
+硬停，表现为永久冻结。Kraal 没有这道开关，但「可见性状态必须与实际显示一致」
+这条教训我们记下了。
+
+Kraal 目前等的是「新投影到达」而不是「渲染层画出第一帧」——`InMemoryTerminalSession`
+没有暴露首帧已呈现的信号，所以这是能达到的上界。副作用是极端情况下仍可能
+有一帧空白，靠我们自己的超时兜底。
+
+两个项目的许可分别是 Apache-2.0 与 MIT。这里记录的是思路与协议理解上的参考；
+Kraal 的代码为独立实现，未复制上述项目的源码。
+
 Apache License 2.0 不授予商标权。

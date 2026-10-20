@@ -32,6 +32,8 @@ public final class AppStore {
     public internal(set) var welcome: EndpointServerWelcome?
     public internal(set) var snapshot: ClientShellSnapshot?
     public internal(set) var surface: PaneSurfaceFrame?
+    /// True while the frame on screen belongs to a connection that has dropped.
+    public internal(set) var surfaceIsStale = false
     public internal(set) var lastError: String?
     public private(set) var reconnectedAt: Date?
 
@@ -247,11 +249,26 @@ public final class AppStore {
             lastError = message
         case let .serverShutdown(reason):
             self.surface = nil
+            surfaceIsStale = false
             phase = .failed(reason ?? "The daemon shut down.")
         case let .disconnected(reason):
-            surface = nil
-            if intentionalStop { return }
+            // Keep the last frame up while the reconnect runs. A dropped
+            // connection does not invalidate what was on screen a moment ago, and
+            // replacing a working picture with an empty background turns a blip
+            // into what looks like a crash. The frame is marked stale so the view
+            // can dim it rather than pass it off as current.
+            surfaceIsStale = surface != nil
+            if intentionalStop {
+                surface = nil
+                surfaceIsStale = false
+                return
+            }
             if case .failed = phase { return }
+            if surfaceIsStale {
+                kraalLog("disconnected: holding last frame (stale)")
+            } else {
+                surface = nil
+            }
             lastError = reason
             scheduleReconnect()
         default:

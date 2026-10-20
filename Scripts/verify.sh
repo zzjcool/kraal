@@ -32,15 +32,22 @@ section "tests"
 swift test 2>&1 | grep -E "✔ Test run|✘|error:" | tail -8
 check "${PIPESTATUS[0]}" "swift test"
 
+# Scratch files go under a per-user directory. A fixed /tmp name collides across
+# users (and with leftovers from a root debug run), and the failed redirect then
+# surfaces as a lint or bundle failure instead of a permission problem.
+SCRATCH="${TMPDIR:-/tmp}/kraal-verify-$(id -u)"
+mkdir -p "$SCRATCH"
+
 section "lint"
 # pi-lens installs SwiftLint outside the default PATH.
 export PATH="$HOME/.pi-lens/bin:$PATH"
 if command -v swiftlint >/dev/null 2>&1; then
-    swiftlint --quiet --reporter json Sources Tests > /tmp/kraal-lint.json 2>/dev/null
-    VIOLATIONS=$(python3 - <<'PY'
+    swiftlint --quiet --reporter json Sources Tests > "${SCRATCH}/lint.json" 2>/dev/null
+    VIOLATIONS=$(LINT_JSON="${SCRATCH}/lint.json" python3 - <<'PY'
 import json
+import os
 try:
-    raw = open('/tmp/kraal-lint.json').read()
+    raw = open(os.environ['LINT_JSON']).read()
     start = raw.find('[')
     data = json.loads(raw[start:raw.rindex(']') + 1]) if start >= 0 else []
     print(len(data))
@@ -60,9 +67,9 @@ fi
 
 if [ "${1:-}" != "--fast" ]; then
     section "app bundle"
-    ./Scripts/build-app.sh > /tmp/kraal-app-build.log 2>&1
+    ./Scripts/build-app.sh > "$SCRATCH/app-build.log" 2>&1
     TAIL=$?
-    tail -2 /tmp/kraal-app-build.log
+    tail -2 "$SCRATCH/app-build.log"
     check "$TAIL" "Kraal.app"
 fi
 
