@@ -140,6 +140,14 @@ public final class PaneTerminalModel {
             needsCleanRepaint = true
             lastRevision = 0
             frameGrid = nil
+            // Keep the frame instead of dropping it. Resizing a window re-renders
+            // the tab at a new grid, but Ghostty's own surface still reports the
+            // *previous* grid for a moment, so this check fails on the frame that
+            // carries the new size. Dropping it left the pane with nothing to
+            // paint and no later trigger: revisions only advance when the
+            // program prints, so a still screen stayed frozen at the old size
+            // forever. Parking it lets the grid arriving below repaint it.
+            pendingFrame = frame
             return
         }
 
@@ -180,6 +188,14 @@ public final class PaneTerminalModel {
     /// being attached.
     func flushPendingFrame() {
         guard let frame = pendingFrame else { return }
+        // Only paint once the terminal's grid actually matches the frame. A parked
+        // frame can now also come from the grid-mismatch path above, where the
+        // terminal has not caught up with the new window size yet; painting then
+        // would wrap every row. Leaving it parked is correct — another grid report
+        // follows.
+        guard let grid = state.surfaceSize,
+              grid.columns == frame.width,
+              grid.rows == frame.height else { return }
         pendingFrame = nil
         lastRevision = 0
         frameGrid = nil
@@ -342,13 +358,29 @@ public struct GhosttyPaneView: View {
             }
             // Ghostty attaches its surface asynchronously, so an apply that ran in
             // `onAppear` found no grid and parked its frame. The grid appearing is
-            // the signal that the terminal can finally accept it.
-            .onChange(of: model.state.surfaceSize) { old, new in
-                if old == nil, new != nil {
+            // the signal that the terminal can finally accept it — and it is also
+            // how a pane resized by a window drag catches up, since the new grid
+            // arrives *after* the frame that asked for it.
+            .onChange(of: model.state.surfaceSize) { _, new in
+                if new != nil {
                     model.flushPendingFrame()
                 }
             }
             .onChange(of: surface.surfaceRevision) { _, _ in
+                model.apply(surface: surface)
+            }
+            // A reconnect restarts the surface revision counter from 1, so a
+            // resize that lands on the same revision as the frame already on
+            // screen produces no `surfaceRevision` change at all: the daemon has
+            // re-rendered the tab at a new grid, the view is handed the new
+            // surface, and nothing repaints it. That is why dragging a window
+            // left the pane frozen at the old size.
+            //
+            // The revision cannot be relied on across a reconnect, but the grid
+            // can: `apply` already treats a changed frame grid as "repaint the
+            // whole frame", so keying the trigger on the pane's own grid closes
+            // the gap without adding a second notion of size.
+            .onChange(of: geometry.innerRect) { _, _ in
                 model.apply(surface: surface)
             }
             // Give the focused pane the keyboard. `requestFocus` hops the runloop

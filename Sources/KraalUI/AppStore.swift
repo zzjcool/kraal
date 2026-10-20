@@ -66,9 +66,9 @@ public final class AppStore {
     ///
     /// A change here is a *resize*, not a new session: it is pushed onto the live
     /// connection with `client_shell_resize` (see `resizeSurface`). Reconnecting
-    /// instead — which is what this used to do — made every step of a window drag
-    /// a fresh handshake, so the pane sat on a stale surface for the length of a
-    /// TCP/handshake round-trip and the chrome never followed the window.
+    /// instead made every step of a window drag a fresh handshake, so the pane sat
+    /// on a stale surface for the length of a round-trip and the chrome never
+    /// followed the window.
     public var surfaceSize = ClientSurfaceSize(cols: 120, rows: 40)
 
     @ObservationIgnored var connection: EndpointConnection?
@@ -137,6 +137,7 @@ public final class AppStore {
         surface = nil
     }
 
+    /// Opens a connection and adopts its welcome/snapshot.
     private func startConnection() {
         kraalLog("connect: target=\(target.name) transport=\(target.transport.rawValue) "
             + "session=\(target.session) surface=\(surfaceSize.cols)x\(surfaceSize.rows)")
@@ -185,8 +186,13 @@ public final class AppStore {
         }
     }
 
-    /// Exponential backoff capped at 30 s, as the design calls for: the daemon
-    /// has no transparent resume, so a reconnect is always a fresh handshake.
+    /// Reconnects after the connection was lost, with exponential backoff capped
+    /// at 30 s: the daemon has no transparent resume, so a reconnect is always a
+    /// fresh handshake.
+    ///
+    /// A window resize deliberately does *not* take this path. Changing the grid
+    /// is a resize of the current surface, not a new session, and it travels on
+    /// the live connection as a `client_shell_resize` (see `resizeSurface`).
     func scheduleReconnect(resetBackoff: Bool = false) {
         guard !intentionalStop else { return }
         if resetBackoff {
@@ -195,6 +201,7 @@ public final class AppStore {
             connection = nil
             Task { await established?.stop() }
         }
+
         reconnectAttempt += 1
         let delay = min(pow(2.0, Double(reconnectAttempt - 1)), 30)
         let retryAt = Date().addingTimeInterval(delay)
