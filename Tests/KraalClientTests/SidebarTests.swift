@@ -254,6 +254,25 @@ struct SurfaceGeometryTests {
         #expect(cells.rows == 2)
     }
 
+    @Test("the fallback cell size is in the same unit as measured metrics")
+    func fallbackUnit() {
+        // Regression: the fallback was written in points while measured metrics
+        // are device pixels, so the very first handshake asked for roughly twice
+        // the columns that fit and the daemon rendered panes wider than the view.
+        let fallback = SurfaceGeometry.fallbackCellSize
+        #expect(fallback.width == SurfaceGeometry.fallbackCellPoints.width
+            * SurfaceGeometry.backingScale)
+        #expect(fallback.height == SurfaceGeometry.fallbackCellPoints.height
+            * SurfaceGeometry.backingScale)
+    }
+
+    @Test("points are recovered from pixel metrics for layout")
+    func pointsRoundTrip() {
+        let points = SurfaceGeometry.points(for: CGSize(width: 17, height: 37))
+        #expect(points.width == 17 / SurfaceGeometry.backingScale)
+        #expect(points.height == 37 / SurfaceGeometry.backingScale)
+    }
+
     @Test("a zero cell size cannot divide by zero")
     func zeroCell() {
         let cells = SurfaceGeometry.cells(
@@ -263,6 +282,43 @@ struct SurfaceGeometryTests {
         )
         #expect(cells.cols > 0)
         #expect(cells.rows > 0)
+    }
+}
+
+@Suite("Pane hit-testing rectangles")
+struct PaneFrameMathTests {
+    @Test("side-by-side panes report distinct rectangles")
+    func distinctPanes() {
+        // Regression: both panes used to report the container's rect, so the
+        // mouse monitor always resolved to whichever pane came first.
+        let container = CGRect(x: 221, y: 25, width: 959, height: 652)
+        let left = PaneFrameMath.rect(
+            container: container,
+            pane: CGRect(x: 0, y: 0, width: 450, height: 610),
+            contentHeight: 760
+        )
+        let right = PaneFrameMath.rect(
+            container: container,
+            pane: CGRect(x: 476, y: 0, width: 450, height: 610),
+            contentHeight: 760
+        )
+        #expect(left != right)
+        #expect(left.minX == 221)
+        #expect(right.minX == 697)
+        #expect(left.width == 450)
+    }
+
+    @Test("the origin is flipped to match the surface grid")
+    func topDownOrigin() {
+        // AppKit counts from the bottom, the surface grid from the top. A pane at
+        // the top of a 760 pt content view must report a small y.
+        let rect = PaneFrameMath.rect(
+            container: CGRect(x: 0, y: 0, width: 959, height: 652),
+            pane: CGRect(x: 0, y: 566, width: 959, height: 86),
+            contentHeight: 760
+        )
+        // pane.maxY is 566 + 86 = 652, so the top-down y is 760 - 652 = 108.
+        #expect(rect.minY == 108)
     }
 }
 

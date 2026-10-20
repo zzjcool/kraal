@@ -219,6 +219,25 @@ struct PaneLayoutView: View {
     }
 }
 
+/// The arithmetic behind a pane's hit-testing rectangle.
+///
+/// Kept apart from the reporter because getting it wrong is silent: the mouse
+/// monitor simply stops matching panes, with no error anywhere. Two concrete
+/// mistakes it guards against are stacking the pane offset twice (once in the
+/// SwiftUI host, once in the conversion) and leaving the origin at the bottom
+/// while the surface grid counts from the top.
+public enum PaneFrameMath {
+    /// A pane's rectangle in content-view coordinates, top-left origin.
+    public static func rect(container: CGRect, pane: CGRect, contentHeight: CGFloat) -> CGRect {
+        CGRect(
+            x: container.minX + pane.minX,
+            y: contentHeight - (container.minY + pane.maxY),
+            width: pane.width,
+            height: pane.height
+        )
+    }
+}
+
 /// Publishes a pane's rectangle for hit testing.
 ///
 /// Uses `NSView` geometry rather than SwiftUI's coordinate spaces because the
@@ -282,14 +301,11 @@ private struct PaneFrameReporter: NSViewRepresentable {
             // container. The container's rect plus the pane's offset inside it is
             // the pane's real rectangle.
             let container = contentView.convert(bounds, from: self)
-            // Convert to a top-left origin to match the surface grid.
-            let topDown = CGRect(
-                x: container.minX + paneFrame.minX,
-                y: contentView.bounds.height - (container.minY + paneFrame.maxY),
-                width: paneFrame.width,
-                height: paneFrame.height
+            store.paneViewFrames[paneId] = PaneFrameMath.rect(
+                container: container,
+                pane: paneFrame,
+                contentHeight: contentView.bounds.height
             )
-            store.paneViewFrames[paneId] = topDown
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
