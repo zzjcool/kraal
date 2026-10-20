@@ -101,6 +101,16 @@ public struct RootView: View {
                     .keyboardShortcut("k", modifiers: .command)
                 Button("") { sidebarVisible.toggle() }
                     .keyboardShortcut("b", modifiers: .command)
+                // Tabs do not have to be clicked: cycling with the keyboard is
+                // how a multiplexer is normally driven, and it is the only path
+                // that reaches `focus(tabId:)` without pointer coordinates.
+                ForEach(1...9, id: \.self) { number in
+                    Button("") { store.focusTab(number: number - 1) }
+                        .keyboardShortcut(
+                            KeyEquivalent(Character("\(number)")),
+                            modifiers: .command
+                        )
+                }
             }
             .opacity(0)
             .frame(width: 0, height: 0)

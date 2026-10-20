@@ -25,6 +25,7 @@ struct Options {
     var method: String?
     var params: [String: Any] = [:]
     var rawParams: String?
+    var showMethods = false
     var paneId: String?
     var target: String?
     var text: String?
@@ -123,6 +124,8 @@ func parse() -> Options {
             if parts.count == 2 {
                 options.params[parts[0]] = parts[1]
             }
+        case "--methods":
+            options.showMethods = true
         case "--json":
             // A literal object, for the many requests whose fields are not
             // strings (splits take `[bool]` paths, ratios take `f32`).

@@ -28,10 +28,10 @@ public final class AppStore {
         public var isLive: Bool { self == .live }
     }
 
-    public private(set) var phase: Phase = .idle
-    public private(set) var welcome: EndpointServerWelcome?
-    public private(set) var snapshot: ClientShellSnapshot?
-    public private(set) var surface: PaneSurfaceFrame?
+    public internal(set) var phase: Phase = .idle
+    public internal(set) var welcome: EndpointServerWelcome?
+    public internal(set) var snapshot: ClientShellSnapshot?
+    public internal(set) var surface: PaneSurfaceFrame?
     public internal(set) var lastError: String?
     public private(set) var reconnectedAt: Date?
 
@@ -72,7 +72,7 @@ public final class AppStore {
     @ObservationIgnored private var healthTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored private var inputDecoders: [String: TerminalInputDecoder] = [:]
-    @ObservationIgnored private var intentionalStop = false
+    @ObservationIgnored var intentionalStop = false
 
     public init(target: ConnectionSettings = .local) {
         self.target = target
@@ -209,7 +209,7 @@ public final class AppStore {
 
     /// Exponential backoff capped at 30 s, as the design calls for: the daemon
     /// has no transparent resume, so a reconnect is always a fresh handshake.
-    private func scheduleReconnect(resetBackoff: Bool = false) {
+    func scheduleReconnect(resetBackoff: Bool = false) {
         guard !intentionalStop else { return }
         if resetBackoff {
             reconnectAttempt = 0
@@ -236,77 +236,24 @@ public final class AppStore {
     private func apply(_ event: ConnectionEvent) {
         switch event {
         case let .connected(welcome):
-            kraalLog("welcome: \(welcome.serverVersion) gen=\(welcome.generation)")
-            self.welcome = welcome
-            if phase != .live {
-                phase = .live
-            }
-
+            handleWelcome(welcome)
         case let .snapshot(snapshot):
-            kraalLog("snapshot: ws=\(snapshot.workspaces.count) tabs=\(snapshot.tabs.count) "
-                + "panes=\(snapshot.panes.count) agents=\(snapshot.agents.count)")
-            // A newer boot id invalidates every surface we hold.
-            let bootChanged = self.snapshot?.bootId != snapshot.bootId
-            let focusedTabChanged = self.snapshot?.focusedTabId != snapshot.focusedTabId
-            self.snapshot = snapshot
-            if bootChanged || focusedTabChanged {
-                // The surface we hold describes the previously focused tab.
-                surface = nil
-            }
-            // Claiming surface interest is what makes the daemon stream the
-            // focused tab's projection; without it the surface we get stays the
-            // one for whichever tab was focused when the connection opened.
-            requestSurfaceInterest()
-
+            handleSnapshot(snapshot)
         case let .surface(surface):
-            if let current = self.surface,
-               current.surfaceRevision > surface.surfaceRevision,
-               current.bootId == surface.bootId {
-                return
-            }
-            if let snapshot, surface.projectionRevision != snapshot.revision {
-                // The daemon streamed a projection for a tab we are no longer
-                // focused on; it is authoritative for that tab, not for ours.
-                kraalLog("surface: stale projection \(surface.projectionRevision) "
-                    + "!= revision \(snapshot.revision), ignored")
-                return
-            }
-            kraalLog("surface: \(surface.frame.width)x\(surface.frame.height) "
-                + "panes=\(surface.panes.map(\.paneId).joined(separator: ",")) "
-                + "rev=\(surface.surfaceRevision)")
-            let previousPanes = Set(self.surface?.panes.map(\.paneId) ?? [])
-            self.surface = surface
-            let paneIds = Set(surface.panes.map(\.paneId))
-            if paneIds != previousPanes {
-                onPaneSetChanged?(paneIds)
-            }
-
+            handleSurface(surface)
         case let .surfacePatch(patch):
-            guard var current = surface, current.bootId == patch.bootId else { return }
-            guard patch.projectionRevision == current.projectionRevision else { return }
-            do {
-                try current.apply(patch)
-                surface = current
-            } catch {
-                // A rejected patch means our baseline diverged; ask for a fresh
-                // surface rather than showing a corrupt screen.
-                lastError = "surface patch rejected: \(error)"
-            }
-
+            handleSurfacePatch(patch)
         case let .error(message):
             lastError = message
-
         case let .serverShutdown(reason):
             self.surface = nil
             phase = .failed(reason ?? "The daemon shut down.")
-
         case let .disconnected(reason):
             surface = nil
             if intentionalStop { return }
             if case .failed = phase { return }
             lastError = reason
             scheduleReconnect()
-
         default:
             break
         }
@@ -315,11 +262,26 @@ public final class AppStore {
     // MARK: - Actions
 
     public func focus(workspaceId: String) {
-        Task { await call("workspace.focus", ["workspace_id": workspaceId]) }
+        Task {
+            await call("workspace.focus", ["workspace_id": workspaceId])
+            await reprojectSurface()
+        }
+    }
+
+    /// Focuses a tab by its position in the visible tab list.
+    public func focusTab(number index: Int) {
+        guard visibleTabs.indices.contains(index) else { return }
+        focus(tabId: visibleTabs[index].tabId)
     }
 
     public func focus(tabId: String) {
-        Task { await call("tab.focus", ["tab_id": tabId]) }
+        Task {
+            await call("tab.focus", ["tab_id": tabId])
+            // Daemons without surface interest never announce the new focus, so
+            // ask for the projection explicitly instead of waiting for a snapshot
+            // that will not come.
+            await reprojectSurface()
+        }
     }
 
     public func focus(paneId: String) {
@@ -388,6 +350,11 @@ public final class AppStore {
 
     /// In-flight `client_shell.surface.set` request, coalesced by tab switches.
     var surfaceInterestTask: Task<Void, Never>?
+    /// Set while a connection is being replaced to pick up a new focus, so the
+    /// stale surface that is still arriving does not trigger another restart.
+    @ObservationIgnored var resyncPending = false
+    /// Guards `reprojectSurface` against overlapping toggles.
+    @ObservationIgnored var reprojectInFlight = false
 
     public func resizeSurface(cols: UInt16, rows: UInt16) {
         guard cols > 0, rows > 0 else { return }

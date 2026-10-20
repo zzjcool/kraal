@@ -56,7 +56,6 @@ struct PaneLayoutView: View {
                             // shrink it made Ghostty compute a narrower grid
                             // than the cells it was sent, and every row wrapped.
                             .frame(width: frame.width, height: frame.height)
-                            .fixedSize()
                             // `position`, not `offset`: offset is a rendering
                             // transform applied after layout, so the pane's real
                             // NSView never moves and reports the wrong rectangle
