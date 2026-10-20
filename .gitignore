@@ -11,6 +11,9 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 
+# xcodegen 生成物（project.yml 是唯一事实源）
+*.xcodeproj
+
 # macOS
 .DS_Store
 
