@@ -65,9 +65,20 @@ public final class AppStore {
     /// The geometry the daemon renders for us, in cells.
     public var surfaceSize = ClientSurfaceSize(cols: 120, rows: 40) {
         didSet {
-            if surfaceSize != oldValue { scheduleReconnect(resetBackoff: true) }
+            // A grid change is the window being resized. The reconnect it needs
+            // is silent: see `scheduleReconnect(quiet:)`.
+            if surfaceSize != oldValue { scheduleReconnect(resetBackoff: true, quiet: true) }
         }
     }
+
+    /// A reconnect caused by something other than losing the connection.
+    ///
+    /// Resizing the window changes the cell grid, and the daemon renders one
+    /// grid per connection, so the only way to adopt a new size is a fresh
+    /// handshake. That is an expected, local, immediate event — not a fault. It
+    /// must not surface as “reconnecting” in the UI, because from the user's
+    /// point of view they dragged a window edge and nothing was lost.
+    @ObservationIgnored public private(set) var isQuietReconnect = false
 
     @ObservationIgnored var connection: EndpointConnection?
     @ObservationIgnored private var connectTask: Task<Void, Never>?
@@ -130,7 +141,13 @@ public final class AppStore {
         surface = nil
     }
 
-    private func startConnection() {
+    /// Opens a connection and adopts its welcome/snapshot.
+    ///
+    /// `quiet` keeps the visible phase untouched for the duration of the
+    /// handshake: a resize reconnect re-does the handshake on a connection that
+    /// never failed, and flipping the sidebar to “Connecting…” for it would be a
+    /// lie about what the user just did.
+    private func startConnection(quiet: Bool = false) {
         kraalLog("connect: target=\(target.name) transport=\(target.transport.rawValue) "
             + "session=\(target.session) surface=\(surfaceSize.cols)x\(surfaceSize.rows)")
         connectTask?.cancel()
@@ -142,8 +159,8 @@ public final class AppStore {
             return
         }
 
-        phase = .connecting
-        lastError = nil
+        phase = quiet ? phase : .connecting
+        lastError = quiet ? lastError : nil
 
         connectTask = Task { [weak self] in
             guard let self else { return }
@@ -161,11 +178,20 @@ public final class AppStore {
                 self.phase = .live
                 self.reconnectedAt = Date()
                 self.reconnectAttempt = 0
+                // Cleared only after a successful handshake: until the new
+                // connection is up, the teardown of the old one is still in
+                // flight and its disconnect must stay ignored. Leaving this set
+                // any longer would start swallowing genuine drops.
+                self.isQuietReconnect = false
                 kraalLog("connected: daemon=\(self.welcome?.serverVersion ?? "?")")
             } catch {
                 kraalLog("connect failed: \(error)")
                 await connection.stop()
                 guard !Task.isCancelled else { return }
+                // A quiet reconnect that fails is no longer quiet: the user's
+                // pane really is not coming back without help, so hand over to
+                // the normal backoff path and let the UI say so.
+                self.isQuietReconnect = false
                 self.phase = .failed("\(error)")
                 self.lastError = "\(error)"
                 self.scheduleReconnect()
@@ -173,9 +199,17 @@ public final class AppStore {
         }
     }
 
-    /// Exponential backoff capped at 30 s, as the design calls for: the daemon
-    /// has no transparent resume, so a reconnect is always a fresh handshake.
-    func scheduleReconnect(resetBackoff: Bool = false) {
+    /// Reconnects after the connection was lost, with exponential backoff capped
+    /// at 30 s: the daemon has no transparent resume, so a reconnect is always a
+    /// fresh handshake.
+    ///
+    /// `quiet` marks a reconnect the user did not cause by breaking anything —
+    /// currently only a grid change from resizing the window. A quiet reconnect
+    /// keeps `phase` at `.live` and keeps the last frame, so the UI shows neither
+    /// a spinner nor a “reconnecting” label for what is, to the user, just a drag
+    /// of the window edge. Showing recovery UI for a self-inflicted reconnect
+    /// trains people to ignore the one that matters.
+    func scheduleReconnect(resetBackoff: Bool = false, quiet: Bool = false) {
         guard !intentionalStop else { return }
         if resetBackoff {
             reconnectAttempt = 0
@@ -183,6 +217,21 @@ public final class AppStore {
             connection = nil
             Task { await established?.stop() }
         }
+
+        if quiet {
+            isQuietReconnect = true
+            // No backoff: a resize is not a failing endpoint, and waiting would
+            // leave the pane at the old grid for no reason. One attempt, now.
+            reconnectAttempt = 0
+            connectTask?.cancel()
+            connectTask = Task { [weak self] in
+                guard let self, !self.intentionalStop else { return }
+                self.startConnection(quiet: true)
+            }
+            return
+        }
+
+        isQuietReconnect = false
         reconnectAttempt += 1
         let delay = min(pow(2.0, Double(reconnectAttempt - 1)), 30)
         let retryAt = Date().addingTimeInterval(delay)
@@ -216,6 +265,21 @@ public final class AppStore {
             surfaceIsStale = false
             phase = .failed(reason ?? "The daemon shut down.")
         case let .disconnected(reason):
+            // A quiet reconnect tears down its own connection on purpose, and the
+            // stop reports itself as a disconnect. Treating that as a failure
+            // would schedule a second, non-quiet reconnect and put “Reconnecting”
+            // on screen — exactly the label a resize must not produce. The frame
+            // also stays current rather than dimming: nothing was lost.
+            //
+            // The `connection == nil` guard keeps this narrow: `scheduleReconnect`
+            // clears the slot before stopping the old connection, so a disconnect
+            // arriving with no connection installed is the teardown we asked for.
+            // If a real drop races in, the slot is still populated and this is
+            // treated as a genuine failure.
+            if isQuietReconnect, connection == nil {
+                kraalLog("disconnected: during quiet reconnect, ignored")
+                return
+            }
             // Keep the last frame up while the reconnect runs. A dropped
             // connection does not invalidate what was on screen a moment ago, and
             // replacing a working picture with an empty background turns a blip
