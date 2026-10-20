@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """04 · ANSI 与权威 cell 网格的一致性校验（整个方案的地基）。
 
 核心假设：herdr 通过 `terminal attach` 输出的 ANSI 是标准 VT 序列，

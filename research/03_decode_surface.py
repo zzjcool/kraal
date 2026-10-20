@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """03 · 解码 PaneSurface（cell 网格 + 分屏几何）。
 
 这是"自己画 cell"路线所需的全部数据。它也提供 pane 的 inner_rect，

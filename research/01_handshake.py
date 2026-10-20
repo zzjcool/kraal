@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """01 · 握手：连接本机 herdr-client.sock，完成 endpoint.hello.v1 → welcome。
 
 验证：服务端返回 endpoint.welcome.v1，且 generation 为 1。

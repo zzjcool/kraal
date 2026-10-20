@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """06 · 抓取真实协议 fixture（供 Swift 单测用）。
 
 产出到 Fixtures/：

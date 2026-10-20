@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """Herdr endpoint 协议的最小客户端实现（Python 版，仅用于调研）。
 
 对应 Swift 实现里的 HerdrProtocol 包：bincode varint 编解码 + u32 长度帧。

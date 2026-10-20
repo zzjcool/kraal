@@ -1,4 +1,14 @@
+iHerdr
+Copyright 2026 zzjcool
+
+本项目以 Apache License, Version 2.0 发布，许可证全文见同目录 LICENSE。
+SPDX-License-Identifier: Apache-2.0
+
+
 # 第三方归属
+
+本产品包含衍生自以下项目的材料。以下归属声明依 Apache License 2.0
+第 4(d) 条保留并随分发传递。
 
 ## herdr
 
@@ -32,8 +42,8 @@ bincode 位置编码要求枚举变体顺序逐字保持，因此本仓库的协
 Ghostty 上游的 shell-integration 脚本是 GPLv3；libghostty-spm 特意自带
 MIT 授权的等价实现，选用时需确认具体版本。
 
-## 本项目
 
-设计文档与研究脚本：MIT（见 LICENSE）。
+# 商标
 
-本项目与 Herdr 官方无关，未获其背书。
+Apache License 2.0 第 6 条不授予商标权。本项目与 Herdr 官方无关，
+未获其背书。「Herdr」相关名称与标识归其各自权利人所有。

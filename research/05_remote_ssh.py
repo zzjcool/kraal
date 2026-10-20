@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """05 · 远程（SSH）直连 herdr。
 
 iOS 上没有本机 herdr，所有连接都是远程的。这条脚本证明：SSH exec 一条命令，

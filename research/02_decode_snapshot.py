@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 zzjcool
 """02 · 解码 shell.snapshot.v1（侧边栏数据）。
 
 这是侧边栏 UI 的全部数据来源：workspaces / tabs / panes / agents / commands。

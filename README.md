@@ -77,8 +77,8 @@ python3 -m venv .venv && .venv/bin/pip install pyte
 
 ## 许可证
 
-本仓库的设计文档与脚本为 MIT。
+本仓库以 **Apache License, Version 2.0** 发布，全文见 [LICENSE](LICENSE)。
 
-协议类型的结构定义衍生自 [herdrdev/herdr](https://github.com/herdrdev/herdr)（Apache-2.0）与 [penso/herdr-gpui](https://github.com/penso/herdr-gpui)（Apache-2.0）。归属声明见 [NOTICE](NOTICE)。
+协议类型的结构定义衍生自 [herdrdev/herdr](https://github.com/herdrdev/herdr)（Apache-2.0）与 [penso/herdr-gpui](https://github.com/penso/herdr-gpui)（Apache-2.0）。归属声明见 [NOTICE](NOTICE)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-本项目与 Herdr 官方无关，未获其背书。
+Apache License 2.0 不授予商标权。本项目与 Herdr 官方无关，未获其背书。
