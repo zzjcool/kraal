@@ -69,6 +69,47 @@ public enum SurfaceGeometry {
             || previousGrid.height != currentGrid.height
     }
 
+    /// Whether the cells changed, ignoring the cursor.
+    ///
+    /// The two are deliberately separate. A cursor move is the single most
+    /// frequent thing a terminal does — every keystroke, every line an app
+    /// prints — and it needs nothing more than a reposition. The *cells* did not
+    /// change, so nothing on screen has to be erased and redrawn.
+    ///
+    /// Treating "the frame differs" and "the cells differ" as the same question
+    /// is what made pressing Return flash: the cursor dropped one row, the
+    /// frames compared unequal, and the whole screen was wiped and repainted for
+    /// a change that was one escape sequence wide.
+    public static func cellsChanged(previous: FrameData?, current: FrameData) -> Bool {
+        guard let previous else { return true }
+        guard previous.width == current.width, previous.height == current.height else {
+            return true
+        }
+        return previous.cells != current.cells
+    }
+
+    /// Whether a frame needs the screen erased before it can be painted.
+    ///
+    /// Erasing (and dropping scrollback) is only required when the *cell grid*
+    /// cannot be trusted any more: the terminal's width or height changed, or the
+    /// delta stream restarted and the renderer's idea of the screen refers to a
+    /// stream that no longer exists. A cursor-only move, or even new text inside
+    /// an unchanged grid, is expressible as a delta and must not trigger it.
+    ///
+    /// Note what is *not* a reason to erase: the cells differing. That is the
+    /// normal case — every frame that prints anything differs — and the renderer
+    /// already emits just the rows that changed for it.
+    public static func needsScreenReset(
+        deltaStreamRestarted: Bool,
+        previousGrid: (width: Int, height: Int)?,
+        currentGrid: (width: Int, height: Int)
+    ) -> Bool {
+        if deltaStreamRestarted { return true }
+        guard let previousGrid else { return true }
+        return previousGrid.width != currentGrid.width
+            || previousGrid.height != currentGrid.height
+    }
+
     /// Rough metrics for a 13 pt monospaced font, in points, used before any
     /// surface has reported its real cell size.
     ///

@@ -95,15 +95,28 @@ public final class PaneTerminalModel {
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
             currentGrid: (width: Int(frame.width), height: Int(frame.height))
         ) else { return }
-        if SurfaceGeometry.deltaStreamRestarted(
-            previousRevision: lastRevision,
-            incomingRevision: geometry.contentRevision
-        ) || frameGrid != frame {
+        if SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
+                previousRevision: lastRevision,
+                incomingRevision: geometry.contentRevision
+            ),
+            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
+            currentGrid: (width: Int(frame.width), height: Int(frame.height))
+        ) {
             // Revisions going backwards means this pane's delta stream restarted:
             // the daemon began a fresh projection (a tab switch, a reconnect, a
             // new boot) and renumbered from scratch. The renderer still holds the
             // old stream's state, so a delta would paint onto a baseline that no
             // longer exists. Wipe and take this frame whole.
+            //
+            // A changed *grid* lands here too, and only a changed grid. This used
+            // to be `frameGrid != frame`, a whole-frame comparison that also
+            // included the cursor: dropping the cursor one row made the frames
+            // unequal, so pressing Return erased the screen and scrollback and
+            // repainted every row — the visible flicker. Comparing sizes keeps
+            // the reset for the case that actually needs it (the old rows are the
+            // wrong width, so incremental repainting would leave them behind) and
+            // lets a cursor move or fresh text go out as a delta.
             renderer.reset()
             session.receive(Data(clearScreenSequence.utf8))
             needsCleanRepaint = false

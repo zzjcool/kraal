@@ -219,3 +219,90 @@ struct LiveResizeTests {
         #expect(store.surfaceSize == before)
     }
 }
+
+@Suite("Screen reset scope")
+struct ScreenResetScopeTests {
+    /// Frames that differ only in the cursor are not a reason to erase anything.
+    ///
+    /// This is the flicker: pressing Return drops the cursor one row, the frames
+    /// compare unequal, and the pane used to be cleared and fully repainted. The
+    /// cells never changed, so a reset would do nothing but show a blank screen
+    /// for a moment.
+    @Test("a cursor-only move does not need a screen reset")
+    func cursorOnlyMoveNeedsNoReset() {
+        let needs = SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 111, height: 35)
+        )
+
+        #expect(!needs)
+    }
+
+    /// New text inside an unchanged grid is a delta, not a reset. Every frame that
+    /// prints anything differs from the last, so treating "cells differ" as a
+    /// reason to erase would reset on every keystroke.
+    @Test("changed cells in an unchanged grid do not need a screen reset")
+    func cellsChangeNeedsNoReset() {
+        let needs = SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 80, height: 24),
+            currentGrid: (width: 80, height: 24)
+        )
+
+        #expect(!needs)
+    }
+
+    /// A new grid must reset: rows written at the old width are still in the
+    /// scrollback, and an incremental repaint only revisits rows that changed.
+    @Test("a grid change does need a screen reset")
+    func gridChangeNeedsReset() {
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 119, height: 40),
+            currentGrid: (width: 111, height: 35)
+        ))
+        // Rows only, so a check that compared columns alone would miss it.
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 111, height: 40),
+            currentGrid: (width: 111, height: 35)
+        ))
+    }
+
+    /// A restarted delta stream refers to a baseline that no longer exists, so it
+    /// must reset even at the same grid.
+    @Test("a restarted delta stream needs a screen reset")
+    func restartedStreamNeedsReset() {
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: true,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 111, height: 35)
+        ))
+    }
+
+    /// Until a frame has been painted there is nothing incremental to paint onto.
+    @Test("the first frame needs a screen reset")
+    func firstFrameNeedsReset() {
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: nil,
+            currentGrid: (width: 111, height: 35)
+        ))
+    }
+
+    /// The guard has to hold for the exact shape of a Return press: same grid,
+    /// cursor one row lower. Pinned as a pair because the two answers together are
+    /// what the fix is — reset only when the grid moves, and never when only the
+    /// cursor does.
+    @Test("a Return press is a cursor move, not a screen reset")
+    func returnPressIsNotAReset() {
+        let grid = (width: 111, height: 35)
+
+        #expect(!SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: grid,
+            currentGrid: grid
+        ))
+    }
+}
