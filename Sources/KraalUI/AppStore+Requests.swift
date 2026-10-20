@@ -57,8 +57,15 @@ extension AppStore {
     }
 
     /// Issues an endpoint request, reporting failures through `lastError`.
+    ///
+    /// A request issued before the snapshot lands has no boot id to address the
+    /// daemon with, and the connection rejects it. That is not a failure — it is
+    /// the handshake still opening — so it is skipped rather than surfaced.
+    /// Reporting it left `lastError` stuck on `no snapshot yet: boot id unknown`
+    /// after switching machines, which the UI showed as a permanent error even
+    /// though the connection was live and correct.
     func call(_ method: String, _ params: [String: Any]) async {
-        guard let connection else { return }
+        guard let connection, await connection.currentBootId != nil else { return }
         do {
             _ = try await connection.request(method, params: params)
         } catch {

@@ -77,6 +77,16 @@ public final class AppStore {
     @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored var inputDecoders: [String: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
+    /// Bumped every time a connection is started or abandoned on purpose.
+    ///
+    /// A superseded connection tears itself down asynchronously, so its
+    /// `.disconnected` arrives *after* the replacement is already connecting. The
+    /// event carries no connection identity, and treating that late report as a
+    /// dropped link scheduled a second reconnect on top of the one in flight —
+    /// which is what made switching to this Mac never settle: the new handshake
+    /// was torn down moments after it went live. Events captured under an older
+    /// epoch are reports about a connection nobody is listening to any more.
+    @ObservationIgnored var connectionEpoch = 0
     /// In-flight `client_shell_resize` sender, so a drag coalesces.
     @ObservationIgnored var resizeTask: Task<Void, Never>?
     /// Set when a grid still has to be pushed, so a request that arrives while a
@@ -150,6 +160,11 @@ public final class AppStore {
             return
         }
 
+        // A new attempt supersedes whatever the previous connection still has to
+        // say. Bumping here — not on failure — also silences a handshake that was
+        // *replaced*, which is the case a target switch produces.
+        connectionEpoch &+= 1
+        let epoch = connectionEpoch
         phase = .connecting
         lastError = nil
 
@@ -160,7 +175,7 @@ public final class AppStore {
                 surfaceSize: surfaceSize
             ) { [weak self] event in
                 Task { @MainActor [weak self] in
-                    self?.apply(event)
+                    self?.apply(event, epoch: epoch)
                 }
             }
             self.connection = connection
@@ -218,7 +233,22 @@ public final class AppStore {
 
     // MARK: - Events
 
-    private func apply(_ event: ConnectionEvent) {
+    /// Whether an event stamped with `epoch` still describes the connection the
+    /// store is using.
+    ///
+    /// Split out as a pure function so the rule is testable without a daemon: the
+    /// interesting case is a *superseded* connection reporting a disconnect after
+    /// its replacement has already started.
+    nonisolated static func eventIsCurrent(epoch: Int, currentEpoch: Int) -> Bool {
+        epoch == currentEpoch
+    }
+
+    private func apply(_ event: ConnectionEvent, epoch: Int) {
+        guard Self.eventIsCurrent(epoch: epoch, currentEpoch: connectionEpoch) else {
+            kraalLog("event ignored: from superseded connection (epoch \(epoch), "
+                + "current \(connectionEpoch))")
+            return
+        }
         switch event {
         case let .connected(welcome):
             handleWelcome(welcome)

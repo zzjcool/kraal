@@ -90,9 +90,18 @@ struct ConnectionSheet: View {
             Divider()
 
             HStack {
+                // Switches the connection, not just the form. This used to assign
+                // `draft = .local` and nothing else: pressing it moved the picker
+                // but left the old host connected, so the button looked broken —
+                // there was no feedback at all unless you worked out that you
+                // still had to press Connect afterwards.
                 Button("Use This Mac") {
                     draft = .local
+                    store.target = .local
+                    store.connect()
+                    dismiss()
                 }
+                .disabled(store.target.transport == .local && store.phase.isLive)
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
