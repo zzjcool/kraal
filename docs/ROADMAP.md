@@ -6,7 +6,7 @@ SPDX-FileCopyrightText: 2026 zzjcool
 # 实施路线：macOS 优先
 
 > 决策：2026-10-20 · 先做 macOS，基础功能跑通后再回到 iOS
-> 更新：2026-10-20 · **M0–M3 已完成并接入真实 daemon**
+> 更新：2026-10-20 · **M0–M8 完成；M7 鼠标、M9 打磨待收敛**
 
 本文档是 [DESIGN.md](DESIGN.md) §10 实施计划的执行版本。
 iOS 阶段计划保留在 DESIGN.md，进入时再细化。
@@ -74,20 +74,28 @@ iOS 阶段计划保留在 DESIGN.md，进入时再细化。
 ### M5 · 多 pane 布局 ✅
 
 `PaneLayoutView.swift` 按 `innerRect` 比例摆放；分隔条可拖动并调用
-`layout.set_split_ratio`（在远端 3-pane 分屏上验证了几何解码）。
+`layout.set_split_ratio`。
+
+**实测修正**：布局必须按真实 cell 尺寸摆放，不能用容器宽度拉伸 pane。
+容器宽度和「列数 × cell 宽」差几个点时 Ghostty 会按较窄的网格重排，于是每行
+都换行。现在 pane 用 `.frame` 精确到 cell 网格尺寸再 `.position` 居中；
+网格尺寸与 pane 帧不一致时清屏重绘，避免错误宽度写下的行留在 scrollback 里。
 
 ### M6 · 侧边栏 + 标签栏 ✅
 
 `SidebarView.swift`、`TabBarView.swift`、`StatusBarView.swift`。
 agent 列表为空时回退为 pane 列表（纯 shell 环境下不显示空白侧栏）。
 
-### M7 · 输入 ✅（键盘）/ ⏳（鼠标）
+### M7 · 输入 ✅（键盘、鼠标）/ ⏳（滚轮精度）
 
 - 键盘：`TerminalInputDecoder` 把 Ghostty 的字节翻译成语义事件，覆盖控制字符、
   方向键、F1–F20、xterm 修饰符、跨包拆分的 UTF-8 与转义序列、单个 Esc。
 - 焦点：由 `TerminalViewState.requestFocus()` 接管，不拦截点击
   （拦截会让 Ghostty 拿不到第一响应者，键盘就永远进不去）。
-- 鼠标合成、右键、滚轮：协议编码已就绪，UI 手势待接。
+- 鼠标：`MouseForwarder` 用 `NSEvent.addLocalMonitorForEvents` 观察（不消费）
+  事件，按 pane 命中矩形换算成 cell 坐标，再按 daemon 的 `mouseReporting` /
+  `sgrPixelMouse` 决定是否转发。实测 `cat -v` 能收到列号递增的 SGR 序列。
+- 滚轮沿用同一路径（`scrollUp`/`scrollDown`），尚未针对大 scrollback 压测。
 
 ### M8 · 侧边栏配置引擎 ✅
 
@@ -98,8 +106,14 @@ token 样式与 `rules`（`equals`/`contains`/`starts_with`/`gt`/`lt`，含 ASCI
 
 ### M9 · 打磨 ⏳
 
-已做：健康检查、指数退避重连、窗口几何协商、窗口越界复位、`~/Library/Logs/Kraal.log`。
-待做：主题（`theme.custom.*`）、滚动性能、大 surface 压测、鼠标手势。
+已做：健康检查、指数退避重连、窗口几何协商、窗口越界复位、
+`~/Library/Logs/Kraal.log`、`⌘1..⌘9` 切 tab、`⌘K` 命令面板、`⌘B` 侧栏。
+
+**兼容性修正**：0.9.1 这类 daemon 不会因为别的连接切 tab 而推新 snapshot。
+切 tab / 切 workspace 后主动用 `client_shell.surface.set`（`false` → `true`）
+要求重投影；没有 `surface_interest` 的 daemon 则重连。
+
+待做：主题（`theme.custom.*`）、滚动性能、大 surface 压测。
 
 ---
 
