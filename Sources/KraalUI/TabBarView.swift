@@ -16,6 +16,7 @@ import KraalTransport
 
 struct TabBarView: View {
     @Environment(AppStore.self) private var store
+    @State private var prompt: CommandPrompt?
 
     var body: some View {
         HStack(spacing: 2) {
@@ -35,9 +36,10 @@ struct TabBarView: View {
             .buttonStyle(.borderless)
             .help("New tab")
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, KraalTheme.Space.snug)
         .frame(height: KraalTheme.tabBarHeight)
-        .background(.thinMaterial)
+        .glassChrome(.bar, rim: false)
+        .renamePrompt($prompt)
     }
 
     private func tabButton(_ tab: ClientShellTab) -> some View {
@@ -47,23 +49,37 @@ struct TabBarView: View {
             HStack(spacing: 4) {
                 StatusDot(status: tab.agentStatus, size: 6)
                 Text(tab.label.isEmpty ? "#\(tab.number)" : tab.label)
-                    .font(.system(size: 11, weight: tab.focused ? .semibold : .regular))
+                    .font(tab.focused ? KraalTheme.Font.barLabel : KraalTheme.Font.rowTitle)
                     .lineLimit(1)
                 if tab.zoomed {
                     Image(systemName: "rectangle.expand.vertical")
-                        .font(.system(size: 8))
+                        .font(KraalTheme.Font.micro)
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, KraalTheme.Space.base)
+            .padding(.vertical, KraalTheme.Space.tight)
             .background {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(tab.focused ? Color.accentColor.opacity(0.25) : .clear)
+                // The focused tab reads as a lit pill on the bar's glass. A plain
+                // accent fill at 25% looked muddy over the material, so the pill
+                // is a raised surface with an accent hairline instead.
+                RoundedRectangle(cornerRadius: KraalTheme.Radius.control, style: .continuous)
+                    .fill(tab.focused
+                        ? AnyShapeStyle(.selection)
+                        : AnyShapeStyle(Color.clear))
+                    .overlay {
+                        if tab.focused {
+                            RoundedRectangle(
+                                cornerRadius: KraalTheme.Radius.control,
+                                style: .continuous
+                            )
+                            .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                        }
+                    }
             }
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Close Tab", role: .destructive) { store.close(tabId: tab.tabId) }
+            TabContextMenu(prompt: $prompt, tab: tab)
         }
     }
 }
@@ -126,8 +142,8 @@ struct StatusBarView: View {
             .buttonStyle(.borderless)
             .help("Command palette (⌘K)")
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, KraalTheme.Space.base)
         .frame(height: KraalTheme.statusBarHeight)
-        .background(.thinMaterial)
+        .glassChrome(.bar, rim: false)
     }
 }

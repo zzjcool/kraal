@@ -1,0 +1,16 @@
+==================================================================
+ Kraal Task 3 — live vibrancy tree (captured from the running app)
+==================================================================
+
+$ grep -E 'vibrancy|window chrome' ~/Library/Logs/Kraal.log
+[00:10:05.379] window chrome: isOpaque=false backgroundColor=0.0 titlebarTransparent=true fullSizeContent=true
+[00:10:07.916] vibrancy: 3 NSVisualEffectView(s) -> 10/behind/follows/959x24 | 10/behind/follows/959x32 | 7/behind/follows/220x722
+
+Reading the dump: <material.rawValue>/<blending>/<state>/<w>x<h>
+  rawValue 7  = .sidebar             -> sidebar, 220 wide x 722 tall
+  rawValue 10 = .headerView          -> tab bar 959x32 and status bar 959x24
+  'behind'    = blends with what is behind the WINDOW (the desktop)
+  'follows'   = dims when the window loses focus (system behaviour)
+
+If the window were opaque these three views would render as flat grey;
+they are the mechanical proof that the chrome is real vibrancy.

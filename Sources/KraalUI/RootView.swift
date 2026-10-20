@@ -11,11 +11,19 @@ import SwiftUI
 import KraalSidebar
 import KraalTransport
 
+@MainActor
 public struct RootView: View {
     @State private var store: AppStore
     @State private var showCommands = false
     @State private var showConnection = false
+    @State private var showShortcuts = false
+    @State private var showMachines = false
     @State private var sidebarVisible = true
+    @State private var statusBarVisible = true
+
+    /// Window-level intents raised by the AppKit menu bar. Optional so previews
+    /// and tests can build the view without an AppKit host.
+    private let windowActions: WindowActions
 
     /// The terminal renderer, injected by the app target so this file stays
     /// buildable (and previewable) without the Ghostty framework.
@@ -23,14 +31,15 @@ public struct RootView: View {
 
     public init(
         store: AppStore,
+        windowActions: WindowActions? = nil,
         paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView
     ) {
         _store = State(initialValue: store)
+        self.windowActions = windowActions ?? WindowActions()
         self.paneContent = paneContent
     }
 
-    public var body: some View {
-        @Bindable var store = store
+    private var content: some View {
         HStack(spacing: 0) {
             if sidebarVisible {
                 SidebarView()
@@ -52,17 +61,31 @@ public struct RootView: View {
                     .environment(store)
                     Divider()
                 }
-                StatusBarView { showCommands = true }
-                    .environment(store)
+                if statusBarVisible {
+                    StatusBarView { showCommands = true }
+                        .environment(store)
+                }
             }
         }
         .frame(minWidth: 720, minHeight: 420)
-        .sheet(isPresented: $showCommands) {
+    }
+
+    public var body: some View {
+        // Kept in small named pieces: a single expression this size made the
+        // type checker time out after the menu gained its extra modifiers.
+        content
+            .sheet(isPresented: $showCommands) {
             CommandPalette()
                 .environment(store)
         }
         .sheet(isPresented: $showConnection) {
             ConnectionSheet(store: store)
+        }
+        .sheet(isPresented: $showShortcuts) {
+            ShortcutsView()
+        }
+        .sheet(isPresented: $showMachines) {
+            MachinesPanel { showMachines = false }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -94,26 +117,25 @@ public struct RootView: View {
                 store.connect()
             }
         }
+        // The menu bar owns the keyboard shortcuts now: AppKit gives a menu item's
+        // key equivalent first refusal, so registering the same chord here as a
+        // hidden button would fire the action twice. Only shortcuts the menu does
+        // not carry stay in this block.
         .background {
-            // Keyboard shortcuts that are not tied to a visible control.
             Group {
-                Button("") { showCommands = true }
-                    .keyboardShortcut("k", modifiers: .command)
-                Button("") { sidebarVisible.toggle() }
-                    .keyboardShortcut("b", modifiers: .command)
-                // Tabs do not have to be clicked: cycling with the keyboard is
-                // how a multiplexer is normally driven, and it is the only path
-                // that reaches `focus(tabId:)` without pointer coordinates.
-                ForEach(1...9, id: \.self) { number in
-                    Button("") { store.focusTab(number: number - 1) }
-                        .keyboardShortcut(
-                            KeyEquivalent(Character("\(number)")),
-                            modifiers: .command
-                        )
-                }
+                // Escape dismisses an open sheet; no menu item competes with it.
+                Button("") { showCommands = false }
+                    .keyboardShortcut(.escape, modifiers: [])
             }
             .opacity(0)
             .frame(width: 0, height: 0)
         }
+        // Watching counters instead of booleans: two clicks in the menu are two
+        // toggles, even if SwiftUI has not re-rendered in between.
+        .onChange(of: windowActions.sidebarToggleCount) { sidebarVisible.toggle() }
+        .onChange(of: windowActions.statusBarToggleCount) { statusBarVisible.toggle() }
+        .onChange(of: windowActions.commandPaletteCount) { showCommands = true }
+        .onChange(of: windowActions.shortcutsCount) { showShortcuts = true }
+        .onChange(of: windowActions.machinesCount) { showMachines = true }
     }
 }

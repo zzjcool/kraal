@@ -1,0 +1,264 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 zzjcool
+//
+// Talking to `herdr machine …`.
+//
+// Why a subprocess and not the daemon: machine profiles are a *client-side*
+// concern. They live in the Herdr CLI's own config, describe how to reach other
+// Herdr servers over SSH, and are read/written before any server connection
+// exists. The daemon's protocol has no `machine.*` method at all — its 102
+// methods cover workspaces, tabs, panes, agents, plugins, integrations and
+// worktrees, and nothing about saved hosts. So the only honest implementation is
+// to drive the same CLI the user would type.
+//
+// `--json` is used wherever the CLI offers it. Text scraping of a table whose
+// columns are separated by tabs would break the moment a label contains a tab;
+// `herdr machine list --json` gives real fields.
+
+import Foundation
+
+/// One saved SSH machine, as `herdr machine list --json` reports it.
+public struct HerdrMachine: Codable, Identifiable, Hashable, Sendable {
+    public var id: String
+    public var label: String
+    public var target: String
+    public var session: String?
+    public var enabled: Bool
+    /// True for the machine Herdr currently treats as the default destination.
+    public var selected: Bool?
+
+    public init(
+        id: String,
+        label: String,
+        target: String,
+        session: String? = nil,
+        enabled: Bool,
+        selected: Bool? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.target = target
+        self.session = session
+        self.enabled = enabled
+        self.selected = selected
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case target
+        case session
+        case enabled
+        case selected
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        target = try container.decode(String.self, forKey: .target)
+        session = try container.decodeIfPresent(String.self, forKey: .session)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        selected = try container.decodeIfPresent(Bool.self, forKey: .selected)
+    }
+
+    /// What to show when a label is absent — the profile id is ugly but truthful.
+    public var displayLabel: String {
+        label.isEmpty ? id : label
+    }
+}
+
+// MARK: - Errors
+
+public enum HerdrMachineError: Error, CustomStringConvertible, Sendable {
+    /// The `herdr` executable could not be found on this machine.
+    case executableNotFound
+    case launchFailed(String)
+    case failed(status: Int32, message: String)
+    case undecodable(String)
+
+    public var description: String {
+        switch self {
+        case .executableNotFound:
+            return "herdr not found. Install it, or set KRAAL_HERDR_BIN to its path."
+        case .launchFailed(let message):
+            return "Could not start herdr: \(message)"
+        case .failed(_, let message):
+            return message
+        case .undecodable(let message):
+            return "Unexpected output from herdr: \(message)"
+        }
+    }
+}
+
+// MARK: - Client
+
+/// Runs `herdr machine …` and returns parsed results.
+///
+/// Every method is synchronous and meant to be called off the main actor: `herdr
+/// machine add` performs an SSH round trip and can take seconds, so blocking a
+/// UI thread on it would freeze the window.
+public struct HerdrMachineClient: Sendable {
+    /// Absolute path to the `herdr` executable, resolved once at init.
+    public let executable: URL
+
+    public init(executable: URL) {
+        self.executable = executable
+    }
+
+    /// Resolves `herdr` from the environment, then from the usual install spots.
+    ///
+    /// A GUI app launched from Finder does not inherit the shell's PATH, so
+    /// relying on PATH alone would make machine management mysteriously missing
+    /// in the packaged app while working in a terminal.
+    public static func discover(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> HerdrMachineClient? {
+        if let override = environment["KRAAL_HERDR_BIN"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            if FileManager.default.isExecutableFile(atPath: url.path) {
+                return HerdrMachineClient(executable: url)
+            }
+        }
+
+        var candidates: [String] = []
+        if let path = environment["PATH"] {
+            for directory in path.split(separator: ":") {
+                candidates.append(String(directory) + "/herdr")
+            }
+        }
+        let home = environment["HOME"] ?? NSHomeDirectory()
+        candidates.append(contentsOf: [
+            home + "/.local/bin/herdr",
+            "/opt/homebrew/bin/herdr",
+            "/usr/local/bin/herdr",
+            "/usr/bin/herdr",
+        ])
+
+        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
+            return HerdrMachineClient(executable: URL(fileURLWithPath: candidate))
+        }
+        return nil
+    }
+
+    // MARK: Reads
+
+    /// All saved machines.
+    public func list() throws -> [HerdrMachine] {
+        let data = try run(["machine", "list", "--json"])
+        // An empty profile list prints `[]`; a missing config prints nothing at
+        // all on some versions, which is the same thing to a caller.
+        let blank = data.allSatisfy { $0 == UInt8(ascii: "\n") || $0 == UInt8(ascii: " ") }
+        guard !blank else { return [] }
+        do {
+            return try JSONDecoder().decode([HerdrMachine].self, from: data)
+        } catch {
+            throw HerdrMachineError.undecodable(Self.text(data, limit: 200))
+        }
+    }
+
+    /// Connectivity of one machine (or all, when `labelOrId` is nil).
+    ///
+    /// Runs without prompting for authentication — this is the non-blocking
+    /// check, unlike `reconnect`.
+    public func status(_ labelOrId: String? = nil) throws -> String {
+        var arguments = ["machine", "status", "--json"]
+        if let labelOrId, !labelOrId.isEmpty {
+            arguments.append(labelOrId)
+        }
+        return Self.text(try run(arguments))
+    }
+
+    // MARK: Writes
+
+    /// Saves a machine, preparing the remote Herdr server first.
+    ///
+    /// This is slow by nature: it opens SSH, checks the remote server, and may
+    /// start one. Callers must not hold the main actor while it runs.
+    @discardableResult
+    public func add(target: String, label: String?, remoteSession: String?) throws -> String {
+        var arguments = ["machine", "add", target]
+        if let label, !label.isEmpty {
+            arguments.append(contentsOf: ["--label", label])
+        }
+        if let remoteSession, !remoteSession.isEmpty {
+            arguments.append(contentsOf: ["--remote-session", remoteSession])
+        }
+        return Self.text(try run(arguments))
+    }
+
+    /// Renames a machine.
+    ///
+    /// Argument order is `<profile-id> --label <label>`, which is *not* what
+    /// `herdr machine rename --help` prints (it advertises
+    /// `--label <LABEL> <PROFILE_ID>`). The help text is wrong; the parser takes
+    /// the positional first and rejects the other order with a usage message.
+    /// Verified against herdr 0.9.5.
+    public func rename(id: String, label: String) throws {
+        try run(["machine", "rename", id, "--label", label])
+    }
+
+    public func remove(id: String) throws {
+        try run(["machine", "remove", id])
+    }
+
+    public func setEnabled(id: String, enabled: Bool) throws {
+        try run(["machine", enabled ? "enable" : "disable", id])
+    }
+
+    // MARK: Process plumbing
+
+    /// UTF-8 view of CLI output. Lossy on invalid bytes on purpose: a warning
+    /// printed in some other encoding should not turn into a decode failure that
+    /// hides the real result.
+    private static func text(_ data: Data, limit: Int? = nil) -> String {
+        let slice = limit.map { Data(data.prefix($0)) } ?? data
+        // Invalid UTF-8 falls back to an empty string rather than throwing: a
+        // stray byte in a warning must not mask the real result.
+        return String(bytes: slice, encoding: .utf8) ?? ""
+    }
+
+    /// Runs the CLI and returns stdout, throwing on a non-zero exit.
+    ///
+    /// stderr is folded into the thrown message because that is where `herdr`
+    /// reports every user-facing failure ("no such profile", ssh errors), and a
+    /// bare exit code would leave the UI with nothing to show.
+    private func run(_ arguments: [String]) throws -> Data {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        // A GUI process may have no HOME-derived config path set up the way a
+        // shell does; passing the environment through unchanged keeps `herdr`
+        // reading the same config the user's terminal would.
+        process.environment = ProcessInfo.processInfo.environment
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        // Some prompts read from the terminal; with no stdin they would hang.
+        process.standardInput = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            throw HerdrMachineError.launchFailed(error.localizedDescription)
+        }
+
+        // Read both pipes before waiting: a full pipe buffer deadlocks a child
+        // that is still writing while the parent sits in waitUntilExit.
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let message = Self.text(stderrData)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw HerdrMachineError.failed(
+                status: process.terminationStatus,
+                message: message.isEmpty ? "herdr exited with status \(process.terminationStatus)" : message
+            )
+        }
+        return stdoutData
+    }
+}

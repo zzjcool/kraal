@@ -73,8 +73,12 @@ struct PaneLayoutView: View {
                             }
                             .overlay {
                                 if pane.focused {
+                                    // A crisp 1pt accent outline. Kept outside the
+                                    // blur on purpose: this is the only chrome that
+                                    // touches terminal content, so it must not add
+                                    // any translucency over the glyphs.
                                     Rectangle()
-                                        .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1)
+                                        .strokeBorder(Color.accentColor.opacity(0.65), lineWidth: 1)
                                         .allowsHitTesting(false)
                                 }
                             }

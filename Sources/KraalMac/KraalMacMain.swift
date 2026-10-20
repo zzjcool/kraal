@@ -20,6 +20,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private let store = AppStore(target: KraalAppDelegate.initialTarget)
     private var mouseForwarder: MouseForwarder?
+    private let windowActions = WindowActions()
+    private var menuBar: MacMenuBar?
 
     /// The daemon to open on launch.
     ///
@@ -57,7 +59,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let root = RootView(store: store) { store, paneId, geometry in
+        let root = RootView(store: store, windowActions: windowActions) { store, paneId, geometry in
             guard let surface = store.surface else {
                 return AnyView(Color(nsColor: .textBackgroundColor))
             }
@@ -78,6 +80,51 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        let window = makeWindow(root: root)
+        self.window = window
+
+        // Keep the pool in sync with the store: drop terminals for closed panes
+        // so their Ghostty surfaces are released.
+        store.onPaneSetChanged = { [weak self] paneIds in
+            _ = self
+            pool.prune(keeping: paneIds)
+        }
+
+        // Mouse events are observed, not intercepted: Ghostty keeps its own
+        // selection and scroll behaviour, and panes that asked for mouse
+        // reporting additionally get semantic events on the daemon connection.
+        let forwarder = MouseForwarder(store: store)
+        forwarder.attach(to: window)
+        mouseForwarder = forwarder
+
+        // The menu bar is installed after the window exists so validation can
+        // consult a live store; a bare NSApplication has no main menu at all, so
+        // without this there is no ⌘Q, no Edit menu and no way to reach New Tab
+        // except the tab bar's "+" button.
+        let menu = MacMenuBar(
+            store: store,
+            actions: MacMenuBar.MenuActions(
+                toggleSidebar: { [windowActions] in windowActions.toggleSidebar() },
+                toggleStatusBar: { [windowActions] in windowActions.toggleStatusBar() },
+                showCommands: { [windowActions] in windowActions.showCommandPalette() },
+                showShortcuts: { [windowActions] in windowActions.showShortcuts() },
+                showMachines: { [windowActions] in windowActions.showMachines() }
+            )
+        )
+        menu.install()
+        menuBar = menu
+
+        store.loadDefaultSidebarConfig()
+        store.connect()
+        openPanelsRequestedByEnvironment(windowActions: windowActions)
+    }
+
+    /// Builds and shows the main window.
+    ///
+    /// Split out of `applicationDidFinishLaunching` for length. The window has no
+    /// nib and no SwiftUI scene, so every attribute — frame restoration, on-screen
+    /// clamping, titlebar style — is set by hand here.
+    private func makeWindow(root: RootView) -> NSWindow {
         let hosting = NSHostingView(rootView: root)
         hosting.frame = NSRect(x: 0, y: 0, width: 1180, height: 760)
 
@@ -89,6 +136,27 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "Kraal"
         window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        // Vibrancy detail that is easy to miss: an `NSVisualEffectView` with
+        // `blendingMode = .behindWindow` samples what is behind the *window*. If the
+        // window is opaque, AppKit composites the effect over the window's own
+        // background colour and the blur never reaches the desktop — which is
+        // exactly why the chrome looked flat before this change. The window has to
+        // be non-opaque with a clear background for real translucency.
+        //
+        // Safe here because every region is covered: the sidebar and both bars draw
+        // their own material, and the terminal area paints an opaque background
+        // (`PaneLayoutView` uses `.textBackgroundColor`) so glyph contrast is
+        // untouched.
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        // A transparent window has no surface to composite the titlebar against,
+        // so the standard titlebar strip would paint its own opaque grey over the
+        // sidebar's material. Hiding it leaves one continuous glass surface from
+        // the traffic lights down, which is the look the rest of this change aims
+        // at. The traffic lights stay; only the bar behind them goes away.
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
         window.contentView = hosting
         window.setContentSize(NSSize(width: 1180, height: 760))
         window.minSize = NSSize(width: 720, height: 420)
@@ -116,26 +184,55 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             kraalLog("window: moved on-screen to \(frame)")
         }
         kraalLog("window frame after layout: \(window.frame)")
+        // Recorded because translucency is invisible in a screenshot assertion:
+        // an opaque window silently downgrades every `.behindWindow` material to
+        // a flat colour, and that failure looks identical to "the material works"
+        // in pixel tests. Logging the flag makes the difference checkable in CI.
+        // Dump the mounted vibrancy views shortly after launch. A screenshot
+        // cannot prove a material exists (an opaque window renders it as flat
+        // grey and looks "fine"), so the live view tree is the real evidence that
+        // the chrome is backed by NSVisualEffectView and not a Material view.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak window] in
+            guard let window else { return }
+            Self.logVibrancyTree(in: window)
+        }
+        kraalLog("window chrome: isOpaque=\(window.isOpaque) "
+            + "backgroundColor=\(window.backgroundColor.alphaComponent) "
+            + "titlebarTransparent=\(window.titlebarAppearsTransparent) "
+            + "fullSizeContent=\(window.styleMask.contains(.fullSizeContentView))")
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
-        self.window = window
+        return window
+    }
 
-        // Keep the pool in sync with the store: drop terminals for closed panes
-        // so their Ghostty surfaces are released.
-        store.onPaneSetChanged = { [weak self] paneIds in
-            _ = self
-            pool.prune(keeping: paneIds)
+    /// Logs every `NSVisualEffectView` in the window, with the properties that
+    /// decide whether it actually blurs the desktop.
+    private static func logVibrancyTree(in window: NSWindow) {
+        var found: [String] = []
+        var stack: [NSView] = window.contentView.map { [$0] } ?? []
+        while let view = stack.popLast() {
+            if let effect = view as? NSVisualEffectView {
+                let blending = effect.blendingMode == .behindWindow ? "behind" : "within"
+                let state = effect.state == .followsWindowActiveState ? "follows" : "always"
+                found.append("\(effect.material.rawValue)/\(blending)/\(state)"
+                    + "/\(Int(effect.bounds.width))x\(Int(effect.bounds.height))")
+            }
+            stack.append(contentsOf: view.subviews)
         }
+        kraalLog("vibrancy: \(found.count) NSVisualEffectView(s) -> "
+            + (found.isEmpty ? "NONE (chrome is flat!)" : found.joined(separator: " | ")))
+    }
 
-        // Mouse events are observed, not intercepted: Ghostty keeps its own
-        // selection and scroll behaviour, and panes that asked for mouse
-        // reporting additionally get semantic events on the daemon connection.
-        let forwarder = MouseForwarder(store: store)
-        forwarder.attach(to: window)
-        mouseForwarder = forwarder
-
-        store.loadDefaultSidebarConfig()
-        store.connect()
+    /// Opens panels on launch when the environment asks for one.
+    ///
+    /// `KRAAL_SHOW_MACHINES=1` exists because a bare `NSApplication` exposes no
+    /// accessible menu hierarchy, so a script cannot click File ▸ Machines…. The
+    /// flag drives the same `WindowActions` counter the menu item drives, so it is
+    /// a handle for automated verification rather than a second code path.
+    private func openPanelsRequestedByEnvironment(windowActions: WindowActions) {
+        if ProcessInfo.processInfo.environment["KRAAL_SHOW_MACHINES"] == "1" {
+            windowActions.showMachines()
+        }
     }
 
     /// The frame from the previous session, if it was saved.

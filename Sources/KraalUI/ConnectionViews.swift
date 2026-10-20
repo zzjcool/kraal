@@ -105,8 +105,9 @@ struct ConnectionSheet: View {
                 .disabled(!canConnect)
             }
         }
-        .padding(18)
+        .padding(KraalTheme.Space.loose)
         .frame(width: 460)
+        .glassChrome(.sheet, rim: false)
     }
 
     private var canConnect: Bool {

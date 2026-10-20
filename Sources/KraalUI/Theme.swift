@@ -14,10 +14,47 @@ import KraalTransport
 
 public enum KraalTheme {
     public static let sidebarWidth: CGFloat = 220
-    public static let tabBarHeight: CGFloat = 30
+    public static let tabBarHeight: CGFloat = 32
     public static let statusBarHeight: CGFloat = 24
     public static let rowSpacing: CGFloat = 1
     public static let cornerRadius: CGFloat = 6
+
+    /// Corner radii, in three sizes so a bar, a row and an overlay read as one
+    /// family instead of three hand-picked numbers.
+    public enum Radius {
+        /// Selection pills inside bars and rows.
+        public static let control: CGFloat = 6
+        /// Floating overlays (command palette, HUDs).
+        public static let overlay: CGFloat = 12
+        /// Sheets and panels.
+        public static let panel: CGFloat = 10
+    }
+
+    /// Spacing scale. Values are multiples of 2 so vertical rhythm stays even
+    /// across bars, list rows and sheet headers.
+    public enum Space {
+        public static let hairline: CGFloat = 2
+        public static let tight: CGFloat = 4
+        public static let snug: CGFloat = 6
+        public static let base: CGFloat = 8
+        public static let roomy: CGFloat = 12
+        public static let loose: CGFloat = 16
+        public static let section: CGFloat = 20
+    }
+
+    /// Text sizes used by the chrome.
+    ///
+    /// The terminal picks its own font from cell metrics and is intentionally not
+    /// part of this scale — chrome text is UI, terminal text is content.
+    public enum Font {
+        public static let barLabel = SwiftUI.Font.system(size: 11, weight: .medium)
+        public static let rowTitle = SwiftUI.Font.system(size: 12)
+        public static let rowTitleFocused = SwiftUI.Font.system(size: 12, weight: .semibold)
+        public static let rowDetail = SwiftUI.Font.system(size: 10)
+        public static let sectionHeader = SwiftUI.Font.system(size: 10, weight: .semibold)
+        public static let caption = SwiftUI.Font.system(size: 10)
+        public static let micro = SwiftUI.Font.system(size: 9)
+    }
 }
 
 /// Resolves a `config.toml` color name or hex literal.

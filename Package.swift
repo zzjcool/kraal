@@ -80,6 +80,11 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
+            name: "KraalTransportTests",
+            dependencies: ["KraalTransport"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
             name: "KraalClientTests",
             dependencies: ["KraalClient", "KraalSidebar", "KraalUI"],
             swiftSettings: [.swiftLanguageMode(.v5)]

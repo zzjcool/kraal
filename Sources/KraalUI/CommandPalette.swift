@@ -24,7 +24,7 @@ struct CommandPalette: View {
             TextField("Run a command…", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
-                .padding(10)
+                .padding(KraalTheme.Space.roomy)
                 .onSubmit { run(items[safe: highlighted] ?? items.first) }
 
             Divider()
@@ -35,12 +35,12 @@ struct CommandPalette: View {
                         Button {
                             run(item)
                         } label: {
-                            HStack(spacing: 8) {
+                            HStack(spacing: KraalTheme.Space.base) {
                                 Image(systemName: item.symbol)
                                     .frame(width: 14)
                                     .foregroundStyle(.secondary)
                                 Text(item.title)
-                                    .font(.system(size: 12))
+                                    .font(KraalTheme.Font.rowTitle)
                                 Spacer()
                                 if let hint = item.hint {
                                     Text(hint)
@@ -48,13 +48,16 @@ struct CommandPalette: View {
                                         .foregroundStyle(.tertiary)
                                 }
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
+                            .padding(.horizontal, KraalTheme.Space.base)
+                            .padding(.vertical, KraalTheme.Space.snug)
                             .contentShape(Rectangle())
                             .background {
                                 if index == highlighted {
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .fill(Color.accentColor.opacity(0.22))
+                                    RoundedRectangle(
+                                        cornerRadius: KraalTheme.Radius.control,
+                                        style: .continuous
+                                    )
+                                    .fill(.selection)
                                 }
                             }
                         }
@@ -76,7 +79,11 @@ struct CommandPalette: View {
             .frame(maxHeight: 320)
         }
         .frame(width: 460)
-        .background(.regularMaterial)
+        // The palette floats over the terminal, so it gets the HUD material:
+        // the most legible of the system blurs, which a quick keyboard overlay
+        // needs. Rounded and rimmed so it reads as a pane of glass on top of the
+        // window rather than a second sheet.
+        .glassPanel(.hud, radius: KraalTheme.Radius.overlay)
         .onChange(of: query) { _, _ in highlighted = 0 }
     }
 

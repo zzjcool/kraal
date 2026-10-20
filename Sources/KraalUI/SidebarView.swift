@@ -19,6 +19,7 @@ struct SidebarView: View {
     // detects a coding agent, so opening there shows a fallback pane list
     // instead — with one workspace, every row repeats the same name.
     @State private var selection: Selection = .workspaces
+    @State private var prompt: CommandPrompt?
 
     enum Selection: Hashable {
         case workspaces
@@ -36,15 +37,20 @@ struct SidebarView: View {
                     case .agents: agentsSection
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.horizontal, KraalTheme.Space.base)
+                .padding(.vertical, KraalTheme.Space.snug)
             }
             Spacer(minLength: 0)
             Divider().opacity(0.4)
             footer
         }
         .frame(width: KraalTheme.sidebarWidth)
-        .background(.thinMaterial)
+        // A real `NSVisualEffectView` sidebar, not SwiftUI's `.thinMaterial`: the
+        // latter samples sibling views, so inside this opaque window it rendered a
+        // flat grey (measured 0.125 before the change). This one reaches the
+        // desktop and follows window-active state and Reduce Transparency.
+        .glassChrome(.sidebar, rim: false)
+        .renamePrompt($prompt)
     }
 
     // MARK: - Sections
@@ -67,8 +73,8 @@ struct SidebarView: View {
             .buttonStyle(.borderless)
             .help("New workspace")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.horizontal, KraalTheme.Space.base)
+        .padding(.vertical, KraalTheme.Space.snug)
     }
 
     private var workspacesSection: some View {
@@ -80,10 +86,7 @@ struct SidebarView: View {
             .contentShape(Rectangle())
             .onTapGesture { store.focus(workspaceId: workspace.workspaceId) }
             .contextMenu {
-                Button("Rename…") {}
-                Button("Close Workspace", role: .destructive) {
-                    store.close(workspaceId: workspace.workspaceId)
-                }
+                WorkspaceContextMenu(prompt: $prompt, workspace: workspace)
             }
         }
     }
@@ -103,13 +106,7 @@ struct SidebarView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { store.focus(paneId: agent.paneId) }
                     .contextMenu {
-                        Button("Focus Pane") { store.focus(paneId: agent.paneId) }
-                        Button("Split Right") { store.splitPane(paneId: agent.paneId) }
-                        Button("Zoom") { store.toggleZoom(paneId: agent.paneId) }
-                        Divider()
-                        Button("Close Pane", role: .destructive) {
-                            store.close(paneId: agent.paneId)
-                        }
+                        PaneContextMenu(prompt: $prompt, paneId: agent.paneId)
                     }
                 }
             } else if !store.panes.isEmpty {
@@ -129,13 +126,7 @@ struct SidebarView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { store.focus(paneId: pane.paneId) }
                     .contextMenu {
-                        Button("Focus Pane") { store.focus(paneId: pane.paneId) }
-                        Button("Split Right") { store.splitPane(paneId: pane.paneId) }
-                        Button("Zoom") { store.toggleZoom(paneId: pane.paneId) }
-                        Divider()
-                        Button("Close Pane", role: .destructive) {
-                            store.close(paneId: pane.paneId)
-                        }
+                        PaneContextMenu(prompt: $prompt, paneId: pane.paneId)
                     }
                 }
             } else {
@@ -164,8 +155,8 @@ struct SidebarView: View {
                     .help("Layout from \(config)")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, KraalTheme.Space.base)
+        .padding(.vertical, KraalTheme.Space.tight)
     }
 
     private var statusText: String {

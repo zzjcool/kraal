@@ -1,0 +1,19 @@
+# Machines panel -> herdr CLI (real runs, 2026-10-20 23:49)
+
+## A. Panel opened on the developer's own HOME (read-only list of real machines)
+[23:49:12.223] machines: list via /Users/zzj/.local/bin/herdr
+[23:49:12.601] machines: loaded 6 -> nj-mac[191645f4], devcloud[0b5ecacd], nj-hw[7bfb921a], nj-host[413b9711], GPU机器[8048d128], host-workspace[6f165f05]
+
+## B. Panel driving rename / disable / enable through its own buttons
+   (isolated HOME=/tmp/kraal-home-ui, one temp profile seeded)
+[23:49:40.905] machines: list via /Users/zzj/.local/bin/herdr
+[23:49:41.226] machines: loaded 1 -> kraal-task2-temp[4fb15a78]
+[23:49:42.062] machines: mutation via /Users/zzj/.local/bin/herdr
+[23:49:42.090] machines: list via /Users/zzj/.local/bin/herdr
+[23:49:42.100] machines: loaded 1 -> kraal-task2-temp-renamed[4fb15a78]
+[23:49:45.258] machines: mutation via /Users/zzj/.local/bin/herdr
+[23:49:45.277] machines: list via /Users/zzj/.local/bin/herdr
+[23:49:45.285] machines: loaded 1 -> kraal-task2-temp-renamed[4fb15a78]
+[23:49:48.444] machines: mutation via /Users/zzj/.local/bin/herdr
+[23:49:48.490] machines: list via /Users/zzj/.local/bin/herdr
+[23:49:48.506] machines: loaded 1 -> kraal-task2-temp-renamed[4fb15a78]
