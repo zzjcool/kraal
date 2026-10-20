@@ -91,9 +91,20 @@ swift build --product kraal
 ssh devcloud 'docker run -d --name kraal-herdr \
   -v /tmp/kraal-herdr:/root/.config/herdr pi-herdr-sandbox:latest bash -lc "herdr server"'
 
-# 把它的 unix socket 映射到本机，然后
-./.build/out/Products/Debug/kraal --socket /tmp/kraal-dev/herdr-client.sock
+# 把它的 unix socket 映射到本机
+sudo -u zzj ssh -N -L /tmp/kraal-dev/herdr-client.sock:/tmp/kraal-herdr/herdr-client.sock devcloud
 ```
+
+`KRAAL_HERDR_SOCKET` 指定要连哪个 daemon，app 和 CLI 都认：
+
+```bash
+KRAAL_HERDR_SOCKET=/tmp/kraal-dev/herdr-client.sock \
+  ./.build/out/Products/Debug/kraal screenshot
+```
+
+debug 包里的 `Kraal.app` 由 `Scripts/build-app.sh` 自动带上这个变量，默认就指向
+沙箱；release 包不带，连本机。这一点很要紧：GUI 调试如果连到正在用的 daemon，
+分屏、打字、关 pane 都会落在真实会话里。
 
 ---
 
