@@ -86,7 +86,7 @@ public struct RootView: View {
             ShortcutsView()
         }
         .sheet(isPresented: $showMachines) {
-            MachinesPanel { showMachines = false }
+            MachinesPanel(target: store.target) { showMachines = false }
         }
         .sheet(isPresented: $showDebugInfo) {
             DebugInfoView()

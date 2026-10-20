@@ -24,7 +24,7 @@ import SwiftUI
 @MainActor
 @Observable
 public final class MachinesStore {
-    public private(set) var machines: [HerdrMachine] = []
+    public private(set) var machines: [MachineEntry] = []
     public private(set) var isLoading = false
     public private(set) var error: String?
     /// Set while a write is in flight; the UI disables its controls with this.
@@ -34,15 +34,31 @@ public final class MachinesStore {
     public private(set) var available: Bool
 
     private let client: HerdrMachineClient?
+    /// How this Mac is labelled and reached. Held here so the roster always has
+    /// a local row even when the CLI is missing or the remote list fails.
+    private let local: LocalMachineDescriptor
 
-    public init(client: HerdrMachineClient? = HerdrMachineClient.discover()) {
+    public init(
+        client: HerdrMachineClient? = HerdrMachineClient.discover(),
+        local: LocalMachineDescriptor = .resolve()
+    ) {
         self.client = client
+        self.local = local
         self.available = client != nil
+        // Seed the roster with this Mac immediately. `herdr machine list` only
+        // returns SSH profiles — the local daemon is implicit and never appears
+        // in it — so without this seed the panel's first frame, and every frame
+        // when herdr is not installed, shows a machine list with this Mac
+        // missing. Seeding also means a failed `list` cannot drop it.
+        self.machines = [.local(local)]
     }
 
     public func reload() {
         guard let client else {
             available = false
+            // Keep this Mac visible: it is reachable without the CLI, and it is
+            // the one entry a user can always connect to.
+            machines = MachineRoster.compose(local: local, remote: [])
             kraalLog("machines: herdr CLI not found")
             return
         }
@@ -54,23 +70,41 @@ public final class MachinesStore {
                 let loaded = try await Task.detached(priority: .userInitiated) {
                     try client.list()
                 }.value
-                self.machines = loaded.sorted { lhs, rhs in
+                let sorted = loaded.sorted { lhs, rhs in
                     if (lhs.selected ?? false) != (rhs.selected ?? false) {
                         return lhs.selected ?? false
                     }
                     return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
                 }
+                self.machines = MachineRoster.compose(local: self.local, remote: sorted)
                 self.isLoading = false
                 // Proves the UI holds real CLI data, not a stub: label + id of
-                // every machine the panel is showing.
-                kraalLog("machines: loaded \(loaded.count) -> "
-                    + loaded.map { "\($0.label)[\($0.id.prefix(8))]" }.joined(separator: ", "))
+                // every machine the panel is showing, local row included.
+                kraalLog("machines: loaded \(loaded.count) remote + 1 local -> "
+                    + self.machines.map { "\($0.displayLabel)[\($0.id.prefix(8))]" }
+                        .joined(separator: ", "))
             } catch {
                 self.error = String(describing: error)
+                // The local row survives a failed read, so the panel never
+                // claims there are zero machines when this Mac is right here.
+                self.machines = MachineRoster.compose(local: self.local, remote: [])
                 self.isLoading = false
                 kraalLog("machines: list failed \(error)")
             }
         }
+    }
+
+    /// Footer text: how many entries the roster has, and where they come from.
+    ///
+    /// The local row is described separately because it is not a saved profile and
+    /// is not managed by the CLI — saying "6 saved · managed by the herdr CLI" while
+    /// showing 7 rows was the visible half of this bug.
+    public var footerSummary: String {
+        let saved = machines.filter { !$0.isLocal }.count
+        let hasLocal = machines.contains(where: \.isLocal)
+        let savedText = saved == 1 ? "1 saved machine" : "\(saved) saved machines"
+        guard hasLocal else { return "\(savedText) · managed by the herdr CLI" }
+        return "This Mac + \(savedText) · managed by the herdr CLI"
     }
 
     public func add(target: String, label: String, remoteSession: String, done: @escaping (Bool) -> Void) {
@@ -145,7 +179,7 @@ public final class MachinesStore {
 // MARK: - Panel
 
 public struct MachinesPanel: View {
-    @State private var store = MachinesStore()
+    @State private var store: MachinesStore
     @State private var showingAdd = false
     @State private var didRunDemo = false
     @State private var renaming: HerdrMachine?
@@ -154,8 +188,16 @@ public struct MachinesPanel: View {
 
     private let onClose: () -> Void
 
-    public init(onClose: @escaping () -> Void) {
+    /// `target` is the connection the app is actually on, so the local row shows
+    /// the same name the sidebar does. Defaulting to `.local` here instead would
+    /// label a sandbox connection "This Mac" while the sidebar called it
+    /// "sandbox" — one machine, two names, which is how this panel drifted from
+    /// the sidebar in the first place.
+    public init(target: ConnectionSettings = .local, onClose: @escaping () -> Void) {
         self.onClose = onClose
+        _store = State(initialValue: MachinesStore(
+            local: LocalMachineDescriptor.resolve(settings: target)
+        ))
     }
 
     public var body: some View {
@@ -232,10 +274,13 @@ public struct MachinesPanel: View {
         Task {
             try? await Task.sleep(nanoseconds: 800_000_000)
             await MainActor.run {
-                let label = store.machines.first?.label ?? "(none)"
+                let label = store.machines.first?.displayLabel ?? "(none)"
                 kraalLog("machines-demo: visible=\(store.machines.count) first=\(label)")
             }
-            guard let machine = await MainActor.run(body: { store.machines.first }) else {
+            // The demo drives the write controls, which this Mac does not have, so
+            // it targets the first saved profile rather than the first roster row.
+            guard let machine = await MainActor.run(body: { store.machines.compactMap(\.machine).first })
+            else {
                 await MainActor.run { kraalLog("machines-demo: nothing to operate on") }
                 return
             }
@@ -245,25 +290,25 @@ public struct MachinesPanel: View {
             }
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             await MainActor.run {
-                let now = store.machines.first?.label ?? "(none)"
+                let now = store.machines.compactMap(\.machine).first?.label ?? "(none)"
                 kraalLog("machines-demo: after rename first=\(now)")
-                if let current = store.machines.first {
+                if let current = store.machines.compactMap(\.machine).first {
                     kraalLog("machines-demo: disable \(current.label)")
                     store.setEnabled(current, enabled: false)
                 }
             }
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             await MainActor.run {
-                let enabled = store.machines.first?.enabled ?? false
+                let enabled = store.machines.compactMap(\.machine).first?.enabled ?? false
                 kraalLog("machines-demo: after disable enabled=\(enabled)")
-                if let current = store.machines.first {
+                if let current = store.machines.compactMap(\.machine).first {
                     kraalLog("machines-demo: enable \(current.label)")
                     store.setEnabled(current, enabled: true)
                 }
             }
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             await MainActor.run {
-                let enabled = store.machines.first?.enabled ?? false
+                let enabled = store.machines.compactMap(\.machine).first?.enabled ?? false
                 kraalLog("machines-demo: after enable enabled=\(enabled) — leaving profile in place")
                 kraalLog("machines-demo: done")
             }
@@ -326,19 +371,20 @@ public struct MachinesPanel: View {
                         .foregroundStyle(.secondary)
                         .padding(14)
                 }
-                ForEach(store.machines) { machine in
+                ForEach(store.machines) { entry in
                     MachineRow(
-                        machine: machine,
+                        entry: entry,
                         busy: store.isBusy,
-                        onRename: { renaming = machine },
+                        onRename: { if let machine = entry.machine { renaming = machine } },
                         onToggleEnabled: {
+                            guard let machine = entry.machine else { return }
                             if machine.enabled {
                                 confirmingDisable = machine
                             } else {
                                 store.setEnabled(machine, enabled: true)
                             }
                         },
-                        onRemove: { confirmingRemove = machine }
+                        onRemove: { if let machine = entry.machine { confirmingRemove = machine } }
                     )
                     Divider().opacity(0.3)
                 }
@@ -385,7 +431,9 @@ public struct MachinesPanel: View {
 
     private var footer: some View {
         HStack {
-            Text("\(store.machines.count) saved · managed by the herdr CLI")
+            // Counts the whole roster, not just the saved profiles: "1 saved"
+            // next to a visible this-Mac row would read as a contradiction.
+            Text(store.footerSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -400,41 +448,55 @@ public struct MachinesPanel: View {
 // MARK: - Row
 
 private struct MachineRow: View {
-    let machine: HerdrMachine
+    let entry: MachineEntry
     let busy: Bool
     let onRename: () -> Void
     let onToggleEnabled: () -> Void
     let onRemove: () -> Void
 
     var body: some View {
+        // This Mac is not a saved profile, so it gets no write controls: there is
+        // no `herdr machine` command that could rename, disable or remove it, and
+        // showing buttons that would fail is worse than showing none. It keeps the
+        // same row shape so the roster reads as one list.
+        let machine = entry.machine
+
         HStack(spacing: 10) {
-            Image(systemName: machine.enabled ? "desktopcomputer" : "desktopcomputer.trianglebadge.exclamationmark")
-                .foregroundStyle(machine.enabled ? Color.secondary : Color.orange)
+            Image(systemName: entry.isLocal
+                ? "laptopcomputer"
+                : (entry.enabled ? "desktopcomputer" : "desktopcomputer.trianglebadge.exclamationmark"))
+                .foregroundStyle(entry.isLocal ? Color.accentColor : (entry.enabled ? Color.secondary : Color.orange))
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(machine.displayLabel)
+                    Text(entry.displayLabel)
                         .font(KraalTheme.Font.rowTitle)
                         .fontWeight(.medium)
-                    if machine.selected == true {
+                    if entry.isLocal {
+                        Text("this Mac")
+                            .font(KraalTheme.Font.micro)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(.selection, in: Capsule())
+                    } else if machine?.selected == true {
                         Text("default")
                             .font(KraalTheme.Font.micro)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
                             .background(.selection, in: Capsule())
                     }
-                    if !machine.enabled {
+                    if !entry.enabled {
                         Text("disabled")
                             .font(KraalTheme.Font.micro)
                             .foregroundStyle(.orange)
                     }
                 }
-                Text(machine.target)
+                Text(entry.targetDescription)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
-                if let session = machine.session, !session.isEmpty, session != "default" {
+                if let session = machine?.session, !session.isEmpty, session != "default" {
                     Text("session \(session)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -443,33 +505,41 @@ private struct MachineRow: View {
 
             Spacer()
 
-            Toggle("", isOn: Binding(
-                get: { machine.enabled },
-                set: { _ in onToggleEnabled() }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .disabled(busy)
-            .help(machine.enabled ? "Disable this machine" : "Enable this machine")
+            if entry.isLocal {
+                Text("local")
+                    .font(KraalTheme.Font.micro)
+                    .foregroundStyle(.secondary)
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { entry.enabled },
+                    set: { _ in onToggleEnabled() }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .disabled(busy)
+                .help(entry.enabled ? "Disable this machine" : "Enable this machine")
 
-            Button("Rename", action: onRename)
-                .buttonStyle(.borderless)
-                .disabled(busy)
-            Button("Remove", action: onRemove)
-                .buttonStyle(.borderless)
-                .foregroundStyle(.red)
-                .disabled(busy)
+                Button("Rename", action: onRename)
+                    .buttonStyle(.borderless)
+                    .disabled(busy)
+                Button("Remove", action: onRemove)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.red)
+                    .disabled(busy)
+            }
         }
         .padding(.horizontal, KraalTheme.Space.roomy)
         .padding(.vertical, KraalTheme.Space.snug)
-        .opacity(machine.enabled ? 1 : 0.65)
+        .opacity(entry.enabled ? 1 : 0.65)
         .contentShape(Rectangle())
         .contextMenu {
-            Button("Rename…", action: onRename)
-            Button(machine.enabled ? "Disable" : "Enable", action: onToggleEnabled)
-            Divider()
-            Button("Remove", role: .destructive, action: onRemove)
+            if !entry.isLocal {
+                Button("Rename…", action: onRename)
+                Button(entry.enabled ? "Disable" : "Enable", action: onToggleEnabled)
+                Divider()
+                Button("Remove", role: .destructive, action: onRemove)
+            }
         }
     }
 }

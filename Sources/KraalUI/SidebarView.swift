@@ -55,6 +55,18 @@ struct SidebarView: View {
 
     // MARK: - Sections
 
+    /// The machine every sidebar row belongs to.
+    ///
+    /// A connection talks to exactly one machine, so the name is a property of the
+    /// view rather than of the rows. It comes from `store.target`, the settings the
+    /// connection was opened with — not from `NSScreen`-style ambient state — so it
+    /// cannot disagree with what the pane content is showing. Panel and sidebar
+    /// therefore name the same machine: this Mac's row reads "This Mac", and an
+    /// SSH target reads the label the user gave it.
+    private var machineName: String {
+        MachineRoster.sidebarMachineName(settings: store.target)
+    }
+
     private var header: some View {
         HStack(spacing: 6) {
             Picker("", selection: $selection) {
@@ -81,7 +93,8 @@ struct SidebarView: View {
         ForEach(store.workspaces) { workspace in
             WorkspaceRowView(
                 workspace: workspace,
-                layout: store.sidebarLayout
+                layout: store.sidebarLayout,
+                machineName: machineName
             )
             .contentShape(Rectangle())
             .onTapGesture { store.focus(workspaceId: workspace.workspaceId) }
@@ -101,7 +114,8 @@ struct SidebarView: View {
                             $0.workspaceId == agent.workspaceId
                         },
                         tab: store.tabs.first { $0.tabId == agent.tabId },
-                        layout: store.sidebarLayout
+                        layout: store.sidebarLayout,
+                        machineName: machineName
                     )
                     .contentShape(Rectangle())
                     .onTapGesture { store.focus(paneId: agent.paneId) }
@@ -121,7 +135,8 @@ struct SidebarView: View {
                             $0.workspaceId == pane.workspaceId
                         },
                         tab: store.tabs.first { $0.tabId == pane.tabId },
-                        layout: store.sidebarLayout
+                        layout: store.sidebarLayout,
+                        machineName: machineName
                     )
                     .contentShape(Rectangle())
                     .onTapGesture { store.focus(paneId: pane.paneId) }
@@ -180,9 +195,13 @@ struct SidebarView: View {
 private struct WorkspaceRowView: View {
     let workspace: ClientShellWorkspace
     let layout: SidebarLayout
+    /// The machine this workspace lives on. Rows describe one connection, so the
+    /// whole sidebar carries a single name; without it the `machine` token fell
+    /// back to the literal "local" and never matched the roster.
+    let machineName: String
 
     var body: some View {
-        let context = SidebarRowContext(workspace: workspace)
+        let context = SidebarRowContext(workspace: workspace, machineName: machineName)
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(layout.spacesRows.enumerated()), id: \.offset) { _, row in
                 let resolved = SidebarTokenResolver.resolve(row: row, context: context)
@@ -226,12 +245,14 @@ private struct AgentRowView: View {
     let workspace: ClientShellWorkspace?
     let tab: ClientShellTab?
     let layout: SidebarLayout
+    let machineName: String
 
     var body: some View {
         let context = SidebarRowContext(
             workspace: workspace,
             agent: agent,
             tab: tab,
+            machineName: machineName,
             tokens: Dictionary(
                 uniqueKeysWithValues: agent.tokens.compactMap { pair in
                     pair.count == 2 ? (pair[0], pair[1]) : nil
@@ -284,12 +305,14 @@ private struct PaneRowView: View {
     let workspace: ClientShellWorkspace?
     let tab: ClientShellTab?
     let layout: SidebarLayout
+    let machineName: String
 
     var body: some View {
         let context = SidebarRowContext(
             workspace: workspace,
             tab: tab,
-            pane: pane
+            pane: pane,
+            machineName: machineName
         )
         VStack(alignment: .leading, spacing: CGFloat(layout.agentsRowGap)) {
             ForEach(Array(layout.paneRows.enumerated()), id: \.offset) { _, row in
