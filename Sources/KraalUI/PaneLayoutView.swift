@@ -57,17 +57,19 @@ struct PaneLayoutView: View {
                             // than the cells it was sent, and every row wrapped.
                             .frame(width: frame.width, height: frame.height)
                             .fixedSize()
-                            .offset(x: frame.minX, y: frame.minY)
+                            // `position`, not `offset`: offset is a rendering
+                            // transform applied after layout, so the pane's real
+                            // NSView never moves and reports the wrong rectangle
+                            // (both panes claimed the same frame). `position`
+                            // takes part in layout, so what is drawn and what is
+                            // measured are the same rectangle.
+                            .position(x: frame.midX, y: frame.midY)
                             .background {
                                 // Report the pane's real rectangle so mouse hit
                                 // testing matches what is drawn.
                                 PaneFrameReporter(
                                     paneId: pane.paneId,
-                                    origin: CGPoint(
-                                        x: proxy.frame(in: .global).minX + frame.minX,
-                                        y: proxy.frame(in: .global).minY + frame.minY
-                                    ),
-                                    size: frame.size
+                                    paneFrame: frame
                                 )
                             }
                             .overlay {
@@ -224,17 +226,18 @@ struct PaneLayoutView: View {
 private struct PaneFrameReporter: NSViewRepresentable {
     @Environment(AppStore.self) private var store
     let paneId: String
-    let origin: CGPoint
-    let size: CGSize
+    /// The pane's rectangle inside the pane container, which is where this
+    /// reporter is installed.
+    let paneFrame: CGRect
 
     func makeNSView(context: Context) -> ReportingView {
         let view = ReportingView()
-        view.apply(paneId: paneId, store: store)
+        view.apply(paneId: paneId, store: store, paneFrame: paneFrame)
         return view
     }
 
     func updateNSView(_ nsView: ReportingView, context: Context) {
-        nsView.apply(paneId: paneId, store: store)
+        nsView.apply(paneId: paneId, store: store, paneFrame: paneFrame)
     }
 
     static func dismantleNSView(_ nsView: ReportingView, coordinator: ()) {
@@ -244,10 +247,12 @@ private struct PaneFrameReporter: NSViewRepresentable {
     final class ReportingView: NSView {
         private var paneId: String?
         private weak var store: AppStore?
+        private var paneFrame: CGRect = .zero
 
-        func apply(paneId: String, store: AppStore) {
+        func apply(paneId: String, store: AppStore, paneFrame: CGRect) {
             self.paneId = paneId
             self.store = store
+            self.paneFrame = paneFrame
             report()
         }
 
@@ -272,13 +277,17 @@ private struct PaneFrameReporter: NSViewRepresentable {
             guard let paneId, let store, let window, let contentView = window.contentView else {
                 return
             }
-            let inContent = contentView.convert(bounds, from: self)
+            // SwiftUI hosts this view in a container that is not moved by
+            // `.frame`/`.position`, so the host's own rect is always the pane
+            // container. The container's rect plus the pane's offset inside it is
+            // the pane's real rectangle.
+            let container = contentView.convert(bounds, from: self)
             // Convert to a top-left origin to match the surface grid.
             let topDown = CGRect(
-                x: inContent.minX,
-                y: contentView.bounds.height - inContent.maxY,
-                width: inContent.width,
-                height: inContent.height
+                x: container.minX + paneFrame.minX,
+                y: contentView.bounds.height - (container.minY + paneFrame.maxY),
+                width: paneFrame.width,
+                height: paneFrame.height
             )
             store.paneViewFrames[paneId] = topDown
         }

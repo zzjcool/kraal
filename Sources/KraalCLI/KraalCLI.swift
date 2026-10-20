@@ -24,6 +24,7 @@ struct Options {
     var command: Command = .probe
     var method: String?
     var params: [String: Any] = [:]
+    var rawParams: String?
     var paneId: String?
     var target: String?
     var text: String?
@@ -42,6 +43,32 @@ struct Options {
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
+}
+
+extension Options {
+    /// The object to send as the request's params.
+    ///
+    /// `--json` is parsed verbatim so non-string fields survive; `--param` falls
+    /// back to strings, which is convenient for ids and the like.
+    func requestParams() throws -> [String: Any] {
+        guard let rawParams else { return params }
+        guard let data = rawParams.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw CLIError.invalidJSON(rawParams)
+        }
+        return object
+    }
+}
+
+enum CLIError: Error, CustomStringConvertible {
+    case invalidJSON(String)
+
+    var description: String {
+        switch self {
+        case let .invalidJSON(raw): "--json is not a JSON object: \(raw)"
+        }
+    }
 }
 
 /// Flags that take one value.
@@ -96,6 +123,10 @@ func parse() -> Options {
             if parts.count == 2 {
                 options.params[parts[0]] = parts[1]
             }
+        case "--json":
+            // A literal object, for the many requests whose fields are not
+            // strings (splits take `[bool]` paths, ratios take `f32`).
+            options.rawParams = nextValue()
         case "screenshot": options.command = .screenshot
         case "snapshot": options.command = .snapshot
         case "call": options.command = .call
@@ -139,6 +170,7 @@ func printUsage() {
       --param k=v         request parameter, repeatable
       --pane <pane_id>    target pane for `keys` / `send-text`
       --text <string>     text for `send-text`
+      --json '{...}'      literal JSON object for `call`
       --timeout <seconds> overall wait (default 20)
     """)
 }
@@ -318,7 +350,8 @@ struct KraalCLI {
             fail("--method is required for `call`")
         }
         do {
-            let response = try await connection.request(method, params: options.params)
+            let params = try options.requestParams()
+            let response = try await connection.request(method, params: params)
             if let text = String(bytes: response, encoding: .utf8) {
                 print(text)
             } else {
@@ -403,6 +436,8 @@ struct KraalCLI {
             let inner = pane.innerRect
             print("  pane \(pane.paneId) inner=(\(inner.originX),\(inner.originY))"
                 + " \(inner.width)×\(inner.height)"
+                + (pane.mouseReporting ? "  mouse" : "")
+                + (pane.sgrPixelMouse ? "+px" : "")
                 + (pane.focused ? "  focused" : ""))
         }
         print("")

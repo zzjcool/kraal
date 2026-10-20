@@ -61,7 +61,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             guard let surface = store.surface else {
                 return AnyView(Color(nsColor: .textBackgroundColor))
             }
-            let model = pool.model(for: paneId, size: store.surfaceSize)
+            let model = pool.model(for: paneId)
             model.onCellMetrics = { [weak store] cellSize in
                 guard let store else { return }
                 Task { @MainActor in

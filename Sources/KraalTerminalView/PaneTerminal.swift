@@ -47,7 +47,7 @@ public final class PaneTerminalModel {
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
-    init(paneId: String, size: ClientSurfaceSize, onInput: @escaping @Sendable (Data) -> Void) {
+    init(paneId: String, onInput: @escaping @Sendable (Data) -> Void) {
         self.paneId = paneId
         session = InMemoryTerminalSession(
             write: { data in
@@ -61,7 +61,6 @@ public final class PaneTerminalModel {
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
-        _ = size
     }
 
     /// Feeds a pane's cells to the terminal, skipping redundant revisions.
@@ -194,14 +193,11 @@ public final class PaneTerminalPool {
         self.onInput = onInput
     }
 
-    public func model(
-        for paneId: String,
-        size: ClientSurfaceSize
-    ) -> PaneTerminalModel {
+    public func model(for paneId: String) -> PaneTerminalModel {
         if let existing = models[paneId] {
             return existing
         }
-        let model = PaneTerminalModel(paneId: paneId, size: size) { [weak self] data in
+        let model = PaneTerminalModel(paneId: paneId) { [weak self] data in
             self?.onInput(paneId, data)
         }
         models[paneId] = model

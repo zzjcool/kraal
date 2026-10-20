@@ -109,6 +109,10 @@ public final class MouseForwarder {
     /// would silently drift out of sync with them.
     private func paneLocation(for event: NSEvent) -> PaneLocation? {
         guard let contentView = window?.contentView else { return nil }
+        // `locationInWindow` is in window coordinates, which include the title
+        // bar; the reported frames are relative to the content view. Converting
+        // against the content view rather than using the window point directly is
+        // what keeps the two in the same space.
         let inView = contentView.convert(event.locationInWindow, from: nil)
         // AppKit's origin is bottom-left; the surface grid counts from the top.
         let topDown = CGPoint(
