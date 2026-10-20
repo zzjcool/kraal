@@ -268,9 +268,36 @@ struct SurfaceGeometryTests {
 
     @Test("points are recovered from pixel metrics for layout")
     func pointsRoundTrip() {
-        let points = SurfaceGeometry.points(for: CGSize(width: 17, height: 37))
-        #expect(points.width == 17 / SurfaceGeometry.backingScale)
-        #expect(points.height == 37 / SurfaceGeometry.backingScale)
+        let points = SurfaceGeometry.points(for: CGSize(width: 17, height: 37), scale: 2)
+        // The expected values are written as CGFloat literal division: `17 / 2`
+        // would infer Int and compare against 8, hiding a half-point error.
+        #expect(points.width == 8.5)
+        #expect(points.height == 18.5)
+    }
+
+    /// The global-offset bug: cell metrics were converted with `NSScreen.main`'s
+    /// scale, which belongs to the menu bar's screen, not the window's. With a
+    /// Retina built-in display and a scale-1 external, a window on the external
+    /// one got the wrong factor, so every cell in every pane was twice its true
+    /// size. The scale must be a parameter the view supplies from its own screen.
+    @Test("the conversion uses the supplied screen scale, not a global default")
+    func scaleIsSuppliedPerScreen() {
+        let cell = CGSize(width: 17, height: 37)
+
+        let retina = SurfaceGeometry.points(for: cell, scale: 2)
+        let external = SurfaceGeometry.points(for: cell, scale: 1)
+
+        #expect(retina.width == 8.5)
+        // On a scale-1 display the same cell occupies twice as many points.
+        #expect(external.width == 17)
+        #expect(external.width == retina.width * 2)
+
+        // And the grid must be derived with the same scale, or the two disagree.
+        let pane = CGSize(width: 850, height: 370)
+        let retinaGrid = SurfaceGeometry.cells(for: pane, cellSize: cell, scale: 2)
+        let externalGrid = SurfaceGeometry.cells(for: pane, cellSize: cell, scale: 1)
+        #expect(retinaGrid.cols == 100, "850*2/17 = 100")
+        #expect(externalGrid.cols == 50, "850*1/17 = 50")
     }
 
     @Test("a zero cell size cannot divide by zero")
@@ -310,15 +337,49 @@ struct PaneFrameMathTests {
 
     @Test("the origin is flipped to match the surface grid")
     func topDownOrigin() {
-        // AppKit counts from the bottom, the surface grid from the top. A pane at
-        // the top of a 760 pt content view must report a small y.
+        // AppKit counts from the bottom, the surface grid from the top. This test
+        // used to put the container at y = 0, which is exactly where the two
+        // conventions coincide — so it passed while the code below added a
+        // bottom-up container offset to a top-down pane offset. The container now
+        // sits at a realistic offset, with chrome below it.
+        //
+        // container = (0, 33, 959, 664), contentHeight 760:
+        //   container top-down top = 760 - (33 + 664) = 63
+        //   pane sits 100 pt into the container, so its top is 163.
         let rect = PaneFrameMath.rect(
-            container: CGRect(x: 0, y: 0, width: 959, height: 652),
-            pane: CGRect(x: 0, y: 566, width: 959, height: 86),
+            container: CGRect(x: 0, y: 33, width: 959, height: 664),
+            pane: CGRect(x: 0, y: 100, width: 959, height: 400),
             contentHeight: 760
         )
-        // pane.maxY is 566 + 86 = 652, so the top-down y is 760 - 652 = 108.
-        #expect(rect.minY == 108)
+        #expect(rect.minY == 163)
+    }
+
+    /// The bug behind a "global" misalignment: the pane offset was added to a
+    /// bottom-origin container offset, so every pane in the window shifted by the
+    /// same constant. This pins the two edges that define the pane: its top sits
+    /// `pane.minY` below the container's top, and its bottom `pane.maxY` below it.
+    @Test("the pane offset is measured from the container top, not the content bottom")
+    func paneOffsetIsRelativeToContainerTop() {
+        let container = CGRect(x: 220, y: 33, width: 959, height: 664)
+        let contentHeight: CGFloat = 760
+        let containerTop = contentHeight - (container.minY + container.height)
+
+        let top = PaneFrameMath.rect(
+            container: container,
+            pane: CGRect(x: 0, y: 0, width: 943, height: 320),
+            contentHeight: contentHeight
+        )
+        let bottom = PaneFrameMath.rect(
+            container: container,
+            pane: CGRect(x: 0, y: 344, width: 943, height: 320),
+            contentHeight: contentHeight
+        )
+
+        #expect(top.minY == containerTop, "a pane at the container top is at the container top")
+        #expect(bottom.minY == containerTop + 344)
+        // The two panes must not overlap: the lower one starts where the upper
+        // one ends, plus the 24 pt divider the daemon reserved between them.
+        #expect(bottom.minY == top.maxY + 24, "panes must stay ordered, no overlap")
     }
 }
 
@@ -334,6 +395,45 @@ struct MouseMappingTests {
             gridWidth: 100,
             gridHeight: 40
         )
+    }
+
+    /// Ghostty derives its grid with `floor(viewPixels / cellPixels)`. A pane
+    /// sized at exactly `cells * cellSize` lands on the integer, so a fraction of
+    /// a pixel missing costs a whole row and column — and every glyph, the
+    /// cursor and the selection then sit one cell off, identically in every pane.
+    /// That is what made it look like one global offset rather than a sizing bug.
+    @Test("pane sizes are snapped up so the grid cannot come out one cell short")
+    func pixelSnappingKeepsTheWholeGrid() {
+        // A 17x37 px cell at 2x is 8.5x18.5 pt. 111 cells => 943.5 pt exactly.
+        let cellPoints = CGSize(width: 8.5, height: 18.5)
+        let scale: CGFloat = 2
+
+        let snappedWidth = PaneFrameMath.pixelSnapped(111 * cellPoints.width, scale: scale)
+        let snappedHeight = PaneFrameMath.pixelSnapped(35 * cellPoints.height, scale: scale)
+
+        // Whatever fraction the multiplication leaves, the pixelised size must
+        // still fit the same number of cells Ghostty was told about.
+        let pixelsWide = (snappedWidth * scale).rounded(.down)
+        let pixelsHigh = (snappedHeight * scale).rounded(.down)
+        #expect(pixelsWide / 17 >= 111, "\(pixelsWide) px must still hold 111 columns")
+        #expect(pixelsHigh / 37 >= 35, "\(pixelsHigh) px must still hold 35 rows")
+    }
+
+    /// Snapping must never round *down*, or it reintroduces the missing cell.
+    @Test("snapping only ever grows a size")
+    func pixelSnappingNeverShrinks() {
+        for points in [0.1, 7.3, 943.5, 1234.567] as [CGFloat] {
+            let snapped = PaneFrameMath.pixelSnapped(points, scale: 2)
+            #expect(snapped >= points)
+        }
+    }
+
+    /// A size already on a pixel boundary must be left alone, so the common case
+    /// does not drift by a hair on every layout pass.
+    @Test("an already-aligned size is unchanged")
+    func pixelSnappingIsIdempotent() {
+        let aligned: CGFloat = 943.5 // 1887 px at 2x
+        #expect(PaneFrameMath.pixelSnapped(aligned, scale: 2) == aligned)
     }
 
     @Test("a point maps to the cell containing it")

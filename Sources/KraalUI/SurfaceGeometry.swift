@@ -110,12 +110,25 @@ public enum SurfaceGeometry {
     }
 
     /// Converts Ghostty's device-pixel cell metrics into points for layout.
+    ///
+    /// `NSScreen.main` is the screen with the menu bar, *not* the screen the
+    /// window is on. On a single-display Mac those are the same and the
+    /// difference is invisible; with a Retina laptop plus a scale-1 external, a
+    /// window on the external display gets the built-in screen's scale factor
+    /// and every cell is off by a factor of two — in every pane, which is what
+    /// makes it look like one global offset instead of a per-pane mistake.
+    /// Views therefore pass the scale down from SwiftUI's `displayScale`, which
+    /// follows the view's own screen; this default stays only for callers with no
+    /// view context (tests, and the very first layout before a window exists).
     public static var backingScale: CGFloat {
         NSScreen.main?.backingScaleFactor ?? 2
     }
 
-    public static func points(for cellSize: CGSize) -> CGSize {
-        CGSize(width: cellSize.width / backingScale, height: cellSize.height / backingScale)
+    public static func points(
+        for cellSize: CGSize,
+        scale: CGFloat = SurfaceGeometry.backingScale
+    ) -> CGSize {
+        CGSize(width: cellSize.width / scale, height: cellSize.height / scale)
     }
 }
 
@@ -151,6 +164,10 @@ public enum ResizePacing {
 /// Reports the pane area's size so the store can negotiate a matching grid.
 private struct SurfaceGeometryReader: ViewModifier {
     @Environment(AppStore.self) private var store
+    /// The scale of the screen this view is actually on. Not `NSScreen.main`,
+    /// which belongs to the menu bar's screen and is the wrong screen whenever
+    /// the window has been dragged to another display.
+    @Environment(\.displayScale) private var displayScale
     @State private var pendingSize: CGSize?
     @State private var debounce: Task<Void, Never>?
     @State private var lastScheduled: CGSize?
@@ -212,7 +229,8 @@ private struct SurfaceGeometryReader: ViewModifier {
         lastReleasedAt = Date()
         let cells = SurfaceGeometry.cells(
             for: size,
-            cellSize: store.terminalCellSize
+            cellSize: store.terminalCellSize,
+            scale: displayScale
         )
         store.resizeSurface(cols: cells.cols, rows: cells.rows)
     }

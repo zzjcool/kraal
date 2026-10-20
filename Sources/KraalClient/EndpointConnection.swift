@@ -504,6 +504,12 @@ public actor EndpointConnection {
         }
     }
 
+}
+
+// Kept out of the actor body to hold it under the type-length limit. These are
+// still actor-isolated members of `EndpointConnection`: a same-file extension
+// sees the same private state, and nothing here changes behaviour.
+extension EndpointConnection {
     // MARK: - Health
 
     private func startHealthMonitor() {

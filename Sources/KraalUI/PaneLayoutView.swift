@@ -25,6 +25,9 @@ import KraalTransport
 
 struct PaneLayoutView: View {
     @Environment(AppStore.self) private var store
+    /// The scale of the screen this window is on. `displayScale` follows the
+    /// view, unlike `NSScreen.main`, which follows the menu bar.
+    @Environment(\.displayScale) private var displayScale
 
     /// Builds each pane's terminal view; injected so this file stays free of the
     /// Ghostty dependency and can be previewed with a stub.
@@ -105,7 +108,10 @@ struct PaneLayoutView: View {
             .task(id: store.surface?.surfaceRevision) {
                 // One line per surface change, not per frame: this is the data
                 // needed to tell a sizing bug from a rendering one.
-                let cell = SurfaceGeometry.points(for: store.terminalCellSize)
+                let cell = SurfaceGeometry.points(
+                    for: store.terminalCellSize,
+                    scale: displayScale
+                )
                 let panes = (store.surface?.panes ?? []).map { pane -> String in
                     let frame = rect(
                         for: pane.innerRect,
@@ -141,8 +147,13 @@ struct PaneLayoutView: View {
     /// so this divides by the backing scale before use. Layout uses this rather
     /// than stretching panes to the container width: a pane composed at N cells
     /// must be drawn N cells wide, or the renderer reflows and every row wraps.
+    ///
+    /// The scale comes from `displayScale`, i.e. the screen this view is on.
+    /// Asking `NSScreen.main` instead returns the menu bar's screen, and on a
+    /// mixed Retina/external setup that is a different display from the one the
+    /// window occupies — every cell then lands at twice or half its true size.
     private var pointsPerCell: CGSize {
-        SurfaceGeometry.points(for: store.terminalCellSize)
+        SurfaceGeometry.points(for: store.terminalCellSize, scale: displayScale)
     }
 
     private func splitHandle(
@@ -245,6 +256,19 @@ struct PaneLayoutView: View {
 
     /// Places a cell rectangle at its real pixel size, centred in the available
     /// space when the grid and the view differ slightly.
+    ///
+    /// Pane sizes are snapped *up* to whole device pixels. Ghostty derives its
+    /// own grid as `floor(viewPixels / cellPixels)`, and a cell is rarely a whole
+    /// number of points — a 17x37 px cell at 2x is 8.5x18.5 pt, so a 111 x 35
+    /// pane wants exactly 943.5 x 647.5 pt. Handing Ghostty a size a fraction of
+    /// a pixel short makes that division land just under the integer, floor to
+    /// 110 x 34, and then every cell, the cursor and the selection sit one row
+    /// and one column off inside an otherwise correct pane. The error is the
+    /// same for every pane, which is what makes it read as a global offset
+    /// rather than a per-pane mistake.
+    ///
+    /// Rounding up rather than to-nearest because a pixel too many is harmless
+    /// (the leftover stays background) while a pixel too few costs a whole cell.
     private func rect(
         for cellRect: SurfaceRect,
         grid: CGSize,
@@ -260,8 +284,14 @@ struct PaneLayoutView: View {
         return CGRect(
             x: originX + CGFloat(cellRect.originX) * cellSize.width,
             y: originY + CGFloat(cellRect.originY) * cellSize.height,
-            width: CGFloat(cellRect.width) * cellSize.width,
-            height: CGFloat(cellRect.height) * cellSize.height
+            width: PaneFrameMath.pixelSnapped(
+                CGFloat(cellRect.width) * cellSize.width,
+                scale: displayScale
+            ),
+            height: PaneFrameMath.pixelSnapped(
+                CGFloat(cellRect.height) * cellSize.height,
+                scale: displayScale
+            )
         )
     }
 }
@@ -274,11 +304,38 @@ struct PaneLayoutView: View {
 /// SwiftUI host, once in the conversion) and leaving the origin at the bottom
 /// while the surface grid counts from the top.
 public enum PaneFrameMath {
+    /// Rounds a point size up to a whole device pixel.
+    ///
+    /// Ghostty derives its grid by floor-dividing the view's pixel size by the
+    /// cell's pixel size, so a pane measuring a fraction of a pixel under
+    /// `cells * cellSize` silently loses a whole row and column — and every cell
+    /// drawn in that pane, along with the cursor and the selection, lands one
+    /// cell off. Since the loss is identical in every pane it reads as a global
+    /// misalignment rather than a sizing bug.
+    public static func pixelSnapped(
+        _ points: CGFloat,
+        scale: CGFloat = SurfaceGeometry.backingScale
+    ) -> CGFloat {
+        (points * scale).rounded(.up) / scale
+    }
     /// A pane's rectangle in content-view coordinates, top-left origin.
+    ///
+    /// `container` is in AppKit coordinates (origin bottom-left) and `pane` is in
+    /// SwiftUI coordinates *inside* that container (origin top-left). Mixing the
+    /// two was the bug: `contentHeight - (container.minY + pane.maxY)` subtracts a
+    /// top-down pane offset from a bottom-up container offset, so the result is
+    /// wrong by an amount that depends on where the container sits — every pane
+    /// in the window shifted by the same constant, which reads as a global offset
+    /// rather than a per-pane one. The old tests missed it because they put the
+    /// container at y = 0, where the two conventions happen to coincide.
+    ///
+    /// The fix is to convert the container to top-down first, then add the pane's
+    /// own top-down offset. Both operands are then measured from the same edge.
     public static func rect(container: CGRect, pane: CGRect, contentHeight: CGFloat) -> CGRect {
-        CGRect(
+        let containerTop = contentHeight - (container.minY + container.height)
+        return CGRect(
             x: container.minX + pane.minX,
-            y: contentHeight - (container.minY + pane.maxY),
+            y: containerTop + pane.minY,
             width: pane.width,
             height: pane.height
         )
