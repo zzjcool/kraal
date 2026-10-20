@@ -155,8 +155,10 @@ func resolveTarget(_ options: Options) throws -> HerdrTarget {
             session: options.session
         )
     }
-    return .unixSocket(
-        path: try HerdrDiscovery.sessionSocket(name: options.session)
+    // Honours `HERDR_CLIENT_SOCKET_PATH` / `HERDR_SOCKET_PATH`, so a probe can be
+    // pointed at a sandbox without typing the path every time.
+    return try HerdrDiscovery.resolve(
+        ConnectionSettings(name: "local", transport: .local, session: options.session)
     )
 }
 

@@ -26,9 +26,24 @@ import SwiftUI
 public final class PaneTerminalModel {
     public let paneId: String
     public let session: InMemoryTerminalSession
-    public let state = TerminalViewState()
+    /// Ghostty's window padding would shrink the usable cell area inside the
+    /// view, so its grid would come out narrower than the pane frame we hand it:
+    /// 450 pt / 8.5 pt = 52 columns of text, but padding eats a few, and the
+    /// renderer then reflows every row we send. The pane is already inset by the
+    /// daemon's own border rects, so the padding must be zero here.
+    public let state = TerminalViewState(
+        terminalConfiguration: TerminalConfiguration { builder in
+            builder.withWindowPaddingX(0)
+            builder.withWindowPaddingY(0)
+        }
+    )
     private var renderer = SurfaceANSIRenderer()
     private var lastRevision: UInt64 = 0
+    /// Set when a frame was rejected because the terminal's grid did not match
+    /// it. The stale rows are still in the terminal's scrollback, and an
+    /// incremental repaint only touches rows that changed — so the skew survives
+    /// every later update until the screen is explicitly cleared.
+    private var needsCleanRepaint = false
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
@@ -50,21 +65,65 @@ public final class PaneTerminalModel {
     }
 
     /// Feeds a pane's cells to the terminal, skipping redundant revisions.
-    func apply(surface: PaneSurfaceFrame, geometry: PaneSurfacePane) {
+    ///
+    /// The pane geometry is read back out of `surface` rather than trusted from a
+    /// separately captured value: SwiftUI can hand this view a surface and a
+    /// geometry that came from different revisions, and slicing the new surface
+    /// with a rect measured on the old one produces a frame of the wrong width.
+    func apply(surface: PaneSurfaceFrame) {
+        guard let geometry = surface.panes.first(where: { $0.paneId == paneId }) else {
+            return
+        }
         guard geometry.contentRevision != lastRevision else { return }
         lastRevision = geometry.contentRevision
 
         let frame = paneFrame(from: surface, geometry: geometry)
-        session.receive(renderer.render(frame))
+        reportCellMetrics()
 
-        // Report the renderer's real cell metrics. Geometry negotiation divides
-        // the pane area by them, and a mismatch makes Ghostty wrap every row.
-        if let grid = state.surfaceSize, grid.cellWidthPixels > 0, grid.cellHeightPixels > 0 {
-            onCellMetrics?(CGSize(
-                width: CGFloat(grid.cellWidthPixels),
-                height: CGFloat(grid.cellHeightPixels)
-            ))
+        // If the terminal's grid disagrees with the frame, writing this frame
+        // would wrap every row and push the overflow into scrollback, leaving a
+        // permanently skewed screen. Repaint from a clean slate in that case and
+        // let the next apply land on a grid that matches.
+        if let grid = state.surfaceSize,
+           grid.columns != frame.width || grid.rows != frame.height {
+            let all = surface.panes.map {
+                "\($0.paneId)=\($0.innerRect.width)x\($0.innerRect.height)"
+            }
+            kraalLog("grid mismatch: pane=\(paneId) ghostty=\(grid.columns)x\(grid.rows) "
+                + "frame=\(frame.width)x\(frame.height) "
+                + "surface=\(surface.frame.width)x\(surface.frame.height) panes=[\(all.joined(separator: " "))]")
+            needsCleanRepaint = true
+            lastRevision = 0
+            return
         }
+
+        if needsCleanRepaint {
+            // The grid is trustworthy again: wipe the screen and scrollback so
+            // the rows written at the wrong width cannot reappear, then paint the
+            // whole frame instead of a delta.
+            needsCleanRepaint = false
+            renderer.reset()
+            session.receive(Data("\u{1B}[2J\u{1B}[3J\u{1B}[H".utf8))
+        }
+
+        session.receive(renderer.render(frame))
+    }
+
+    /// Reports the renderer's measured cell size, in device pixels.
+    ///
+    /// Called before the grid check in `apply`, not after it: the check bails out
+    /// while the grid is wrong, and if reporting lived past that bail-out the
+    /// size used for layout could never be corrected — a one-way trap where the
+    /// grid stays wrong because it was never measured, and never measured
+    /// because it was wrong.
+    private func reportCellMetrics() {
+        guard let grid = state.surfaceSize,
+              grid.cellWidthPixels > 0,
+              grid.cellHeightPixels > 0 else { return }
+        onCellMetrics?(CGSize(
+            width: CGFloat(grid.cellWidthPixels),
+            height: CGFloat(grid.cellHeightPixels)
+        ))
     }
 
     func reset() {
@@ -184,14 +243,21 @@ public struct GhosttyPaneView: View {
 
     public var body: some View {
         TerminalSurfaceView(context: model.state)
-            .onAppear {
-                model.apply(surface: surface, geometry: geometry)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .task(id: Int(proxy.size.width * 10) &+ Int(proxy.size.height * 10)) {
+                            kraalLog("pane view: \(geometry.paneId) "
+                                + "size=\(Int(proxy.size.width))x\(Int(proxy.size.height))pt "
+                                + "cells=\(geometry.innerRect.width)x\(geometry.innerRect.height)")
+                        }
+                }
             }
-            .onChange(of: geometry.contentRevision) { _, _ in
-                model.apply(surface: surface, geometry: geometry)
+            .onAppear {
+                model.apply(surface: surface)
             }
             .onChange(of: surface.surfaceRevision) { _, _ in
-                model.apply(surface: surface, geometry: geometry)
+                model.apply(surface: surface)
             }
             // Give the focused pane the keyboard. `requestFocus` hops the runloop
             // and calls `acquireProgrammaticFocus` once the view is in a window,

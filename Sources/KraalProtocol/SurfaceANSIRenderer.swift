@@ -117,13 +117,9 @@ public struct SurfaceANSIRenderer {
         let start = row * width
         guard start + width <= frame.cells.count else { return }
 
-        // Skip rows that are entirely the default cell: nothing to repaint, and
-        // emitting them would flash cleared background on some terminals.
-        let cells = frame.cells[start ..< start + width]
-        if !full, cells.allSatisfy({ $0 == .blank }) {
-            return
-        }
-
+        // Every changed row is repainted in full, including ones that became
+        // blank: skipping a blank row would leave whatever was drawn there before
+        // on screen, which showed up as stale bands after a pane was split.
         output.appendUTF8("\u{1B}[\(row + 1);1H")
 
         var column = 0

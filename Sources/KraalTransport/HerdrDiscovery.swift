@@ -107,6 +107,12 @@ public enum HerdrDiscovery {
     ) throws -> HerdrTarget {
         switch settings.transport {
         case .local:
+            // `KRAAL_HERDR_SOCKET` is Kraal's own override and wins: it exists so a
+            // development build can be pointed at a sandbox daemon without
+            // inheriting the daemon's own variables.
+            if let override = environment["KRAAL_HERDR_SOCKET"], !override.isEmpty {
+                return .unixSocket(path: override)
+            }
             if settings.session == defaultSession,
                let override = environment["HERDR_CLIENT_SOCKET_PATH"], !override.isEmpty {
                 return .unixSocket(path: override)

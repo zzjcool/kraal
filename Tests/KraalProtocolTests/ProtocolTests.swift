@@ -584,6 +584,89 @@ struct SurfaceANSIRendererTests {
         #expect(!delta.contains("[2;1H"), "an unchanged row must not be repainted")
     }
 
+    @Test("a reset repaints rows that did not change")
+    func resetForcesFullRepaint() {
+        // Regression: after a rejected frame the terminal keeps rows written at
+        // the wrong width in its scrollback. `reset` must make the very next
+        // render emit every row again, not just the rows that changed.
+        var cells = Array(repeating: CellData.blank, count: 12)
+        cells[0] = CellData(
+            symbol: "A",
+            foreground: 0,
+            background: 0,
+            modifier: 0,
+            skip: false,
+            hyperlink: nil
+        )
+        let frame = FrameData(
+            cells: cells,
+            width: 4,
+            height: 3,
+            cursor: nil,
+            hyperlinks: [],
+            graphics: Data()
+        )
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(frame)
+        let unchanged = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
+        #expect(!unchanged.contains("A"), "an unchanged row must not be repainted")
+
+        renderer.reset()
+        let repainted = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
+        #expect(
+            repainted.contains("A"),
+            "a reset must repaint the cells that were already on screen"
+        )
+    }
+
+    @Test("a row that became blank is repainted, not skipped")
+    func clearedRowIsRepainted() {
+        // Regression: skipping blank rows left stale content on screen when a
+        // pane split shrank a pane, because the old glyphs were never cleared.
+        var cells = Array(repeating: CellData.blank, count: 12)
+        cells[4] = CellData(
+            symbol: "#",
+            foreground: 0,
+            background: 0,
+            modifier: 0,
+            skip: false,
+            hyperlink: nil
+        )
+        var frame = FrameData(
+            cells: cells,
+            width: 4,
+            height: 3,
+            cursor: nil,
+            hyperlinks: [],
+            graphics: Data()
+        )
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(frame)
+
+        // Clear the row that had content.
+        cells[4] = .blank
+        frame.cells = cells
+        let delta = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
+        #expect(delta.contains("[2;1H"), "a row that became blank must still be repainted")
+    }
+
+    @Test("an unchanged blank row is still not repainted")
+    func unchangedBlankRowIsSkipped() {
+        let frame = FrameData(
+            cells: Array(repeating: .blank, count: 12),
+            width: 4,
+            height: 3,
+            cursor: nil,
+            hyperlinks: [],
+            graphics: Data()
+        )
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(frame)
+        let delta = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
+        #expect(!delta.contains("[1;1H"))
+        #expect(!delta.contains("[2;1H"))
+    }
+
     @Test("colors use the non-ARGB encoding in SGR output")
     func colorEncoding() {
         let trueColor = CellData(

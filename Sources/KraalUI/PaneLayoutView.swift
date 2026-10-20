@@ -4,9 +4,15 @@
 // Pane layout: places one terminal view per pane using the daemon's own geometry.
 //
 // The rectangles come from `PaneSurfacePane.innerRect`, expressed in the cell
-// grid, and are scaled into the available point space. That is deliberately a
-// proportion of the *grid* rather than a BSP reconstruction: the daemon already
-// resolved the layout, so re-deriving it could only disagree with it.
+// grid. They are scaled by a single cell size — the renderer's measured metrics —
+// rather than stretched to fill the view.
+//
+// That distinction matters: a pane is `innerRect.width` cells wide, and the
+// daemon's cells for it were composed at exactly that width. Stretching the pane
+// to a slightly different pixel width makes Ghostty lay out a different number of
+// columns than were sent, so every row wraps. Scaling by a real cell size keeps
+// "cells drawn" and "pixels available" consistent, leaving any remainder as
+// background rather than as a layout change.
 //
 // Borders and split dividers are ours to draw because `ui.pane_borders` decides
 // whether the daemon reserved a cell for them — which is exactly why layout uses
@@ -37,9 +43,20 @@ struct PaneLayoutView: View {
 
                 if let surface {
                     ForEach(surface.panes, id: \.paneId) { pane in
-                        let frame = rect(for: pane.innerRect, grid: grid, in: proxy.size)
+                        let frame = rect(
+                            for: pane.innerRect,
+                            grid: grid,
+                            in: proxy.size,
+                            cellSize: pointsPerCell
+                        )
                         paneContent(pane.paneId, pane)
+                            // A terminal's grid is decided by its exact pixel
+                            // size, so the pane must be that size — not "that
+                            // size, compressed to fit". Letting the container
+                            // shrink it made Ghostty compute a narrower grid
+                            // than the cells it was sent, and every row wrapped.
                             .frame(width: frame.width, height: frame.height)
+                            .fixedSize()
                             .offset(x: frame.minX, y: frame.minY)
                             .background {
                                 // Report the pane's real rectangle so mouse hit
@@ -63,13 +80,38 @@ struct PaneLayoutView: View {
                     }
 
                     ForEach(Array(surface.splits.enumerated()), id: \.offset) { _, split in
-                        splitHandle(split, grid: grid, size: proxy.size)
+                        splitHandle(
+                            split,
+                            grid: grid,
+                            size: proxy.size,
+                            cellSize: pointsPerCell
+                        )
                     }
                 } else {
                     placeholder
                 }
             }
             .negotiatingSurfaceGeometry()
+            .task(id: store.surface?.surfaceRevision) {
+                // One line per surface change, not per frame: this is the data
+                // needed to tell a sizing bug from a rendering one.
+                let cell = SurfaceGeometry.points(for: store.terminalCellSize)
+                let panes = (store.surface?.panes ?? []).map { pane -> String in
+                    let frame = rect(
+                        for: pane.innerRect,
+                        grid: grid,
+                        in: proxy.size,
+                        cellSize: cell
+                    )
+                    return "\(pane.paneId)=\(pane.innerRect.width)x\(pane.innerRect.height)"
+                        + "->\(Int(frame.width))x\(Int(frame.height))pt"
+                }
+                kraalLog("layout: container=\(Int(proxy.size.width))x\(Int(proxy.size.height)) "
+                    + "grid=\(Int(grid.width))x\(Int(grid.height)) "
+                    + "surfacePaned=\(store.surface != nil) "
+                    + "cell=\(pointsPerCell.width)x\(pointsPerCell.height) "
+                    + "panes=[\(panes.joined(separator: " "))]")
+            }
         }
     }
 
@@ -83,14 +125,24 @@ struct PaneLayoutView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
+    /// The rendered size of one cell, in points.
+    ///
+    /// Ghostty reports cell metrics in device pixels; SwiftUI lays out in points,
+    /// so this divides by the backing scale before use. Layout uses this rather
+    /// than stretching panes to the container width: a pane composed at N cells
+    /// must be drawn N cells wide, or the renderer reflows and every row wraps.
+    private var pointsPerCell: CGSize {
+        SurfaceGeometry.points(for: store.terminalCellSize)
+    }
+
     private func splitHandle(
         _ split: PaneSurfaceSplit,
         grid: CGSize,
-        size: CGSize
+        size: CGSize,
+        cellSize: CGSize
     ) -> some View {
-        let hit = rect(for: split.hitRect, grid: grid, in: size)
-        Rectangle()
+        let hit = rect(for: split.hitRect, grid: grid, in: size, cellSize: cellSize)
+        return Rectangle()
             .fill(Color.secondary.opacity(0.25))
             .frame(width: hit.width, height: hit.height)
             .offset(x: hit.minX, y: hit.minY)
@@ -142,14 +194,25 @@ struct PaneLayoutView: View {
         }
     }
 
-    private func rect(for cellRect: SurfaceRect, grid: CGSize, in size: CGSize) -> CGRect {
-        let scaleX = size.width / grid.width
-        let scaleY = size.height / grid.height
+    /// Places a cell rectangle at its real pixel size, centred in the available
+    /// space when the grid and the view differ slightly.
+    private func rect(
+        for cellRect: SurfaceRect,
+        grid: CGSize,
+        in size: CGSize,
+        cellSize: CGSize
+    ) -> CGRect {
+        let gridSize = CGSize(
+            width: grid.width * cellSize.width,
+            height: grid.height * cellSize.height
+        )
+        let originX = max((size.width - gridSize.width) / 2, 0)
+        let originY = max((size.height - gridSize.height) / 2, 0)
         return CGRect(
-            x: CGFloat(cellRect.originX) * scaleX,
-            y: CGFloat(cellRect.originY) * scaleY,
-            width: CGFloat(cellRect.width) * scaleX,
-            height: CGFloat(cellRect.height) * scaleY
+            x: originX + CGFloat(cellRect.originX) * cellSize.width,
+            y: originY + CGFloat(cellRect.originY) * cellSize.height,
+            width: CGFloat(cellRect.width) * cellSize.width,
+            height: CGFloat(cellRect.height) * cellSize.height
         )
     }
 }

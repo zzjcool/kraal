@@ -26,10 +26,22 @@ import SwiftUI
 /// cell metrics used must be the ones the renderer actually reports, never a
 /// guess — `fallbackCellSize` exists only to bootstrap the first handshake.
 public enum SurfaceGeometry {
-    /// Rough metrics for a 13 pt monospaced font, used before any surface has
-    /// reported its real cell size. Only affects the very first handshake; the
-    /// renderer's measurement replaces it immediately afterwards.
-    public static let fallbackCellSize = CGSize(width: 7.8, height: 17.0)
+    /// Rough metrics for a 13 pt monospaced font, in points, used before any
+    /// surface has reported its real cell size.
+    ///
+    /// The daemon renders the tab at whatever grid the first handshake asks for,
+    /// so a fallback in the wrong unit asks for the wrong grid and every pane
+    /// comes out too wide to fit (and every row wraps). Report it in the same
+    /// unit as measured metrics — device pixels — by scaling at use.
+    public static let fallbackCellPoints = CGSize(width: 7.8, height: 17.0)
+
+    /// The fallback in device pixels, matching what Ghostty reports.
+    public static var fallbackCellSize: CGSize {
+        CGSize(
+            width: fallbackCellPoints.width * backingScale,
+            height: fallbackCellPoints.height * backingScale
+        )
+    }
 
     /// Cells that fit in `size`.
     ///
@@ -52,6 +64,15 @@ public enum SurfaceGeometry {
             cols: UInt16(min(max(cols, 4), 500)),
             rows: UInt16(min(max(rows, 2), 200))
         )
+    }
+
+    /// Converts Ghostty's device-pixel cell metrics into points for layout.
+    public static var backingScale: CGFloat {
+        NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    public static func points(for cellSize: CGSize) -> CGSize {
+        CGSize(width: cellSize.width / backingScale, height: cellSize.height / backingScale)
     }
 }
 

@@ -10,6 +10,7 @@
 import AppKit
 import KraalClient
 import KraalProtocol
+import KraalTransport
 import KraalTerminalView
 import KraalUI
 import SwiftUI
@@ -17,8 +18,25 @@ import SwiftUI
 @MainActor
 final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
-    private let store = AppStore()
+    private let store = AppStore(target: KraalAppDelegate.initialTarget)
     private var mouseForwarder: MouseForwarder?
+
+    /// The daemon to open on launch.
+    ///
+    /// Honours `KRAAL_HERDR_SOCKET` so a development build can be pointed at a
+    /// sandbox daemon. Without it the app talks to this Mac's herdr, which is the
+    /// normal case for a user — but it also means a UI experiment run without the
+    /// variable lands in their live session, so the override is checked first and
+    /// logged loudly.
+    private static var initialTarget: ConnectionSettings {
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["KRAAL_HERDR_SOCKET"], !path.isEmpty {
+            kraalLog("launch: overriding daemon socket -> \(path)")
+            return ConnectionSettings(name: "sandbox", transport: .local)
+        }
+        kraalLog("launch: no socket override, using this Mac's herdr")
+        return .local
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)

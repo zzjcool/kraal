@@ -32,7 +32,7 @@ public final class AppStore {
     public private(set) var welcome: EndpointServerWelcome?
     public private(set) var snapshot: ClientShellSnapshot?
     public private(set) var surface: PaneSurfaceFrame?
-    public private(set) var lastError: String?
+    public internal(set) var lastError: String?
     public private(set) var reconnectedAt: Date?
 
     /// Applied to every sidebar render; replaced when a config is imported.
@@ -58,7 +58,7 @@ public final class AppStore {
     /// The measured size of one terminal cell in device pixels, reported by the
     /// renderer once a surface exists. Geometry negotiation divides the pane
     /// area by this to pick a grid size.
-    public var terminalCellSize = CGSize(width: 7.8, height: 17.0)
+    public var terminalCellSize = SurfaceGeometry.fallbackCellSize
 
     /// The geometry the daemon renders for us, in cells.
     public var surfaceSize = ClientSurfaceSize(cols: 120, rows: 40) {
@@ -67,7 +67,7 @@ public final class AppStore {
         }
     }
 
-    @ObservationIgnored private var connection: EndpointConnection?
+    @ObservationIgnored var connection: EndpointConnection?
     @ObservationIgnored private var connectTask: Task<Void, Never>?
     @ObservationIgnored private var healthTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
@@ -247,20 +247,28 @@ public final class AppStore {
                 + "panes=\(snapshot.panes.count) agents=\(snapshot.agents.count)")
             // A newer boot id invalidates every surface we hold.
             let bootChanged = self.snapshot?.bootId != snapshot.bootId
+            let focusedTabChanged = self.snapshot?.focusedTabId != snapshot.focusedTabId
             self.snapshot = snapshot
-            if bootChanged {
+            if bootChanged || focusedTabChanged {
+                // The surface we hold describes the previously focused tab.
                 surface = nil
             }
-            if let surface, surface.projectionRevision != snapshot.revision {
-                // The daemon re-sends the surface after a projection change; the
-                // stale one must not keep driving the layout.
-                self.surface = surface
-            }
+            // Claiming surface interest is what makes the daemon stream the
+            // focused tab's projection; without it the surface we get stays the
+            // one for whichever tab was focused when the connection opened.
+            requestSurfaceInterest()
 
         case let .surface(surface):
             if let current = self.surface,
                current.surfaceRevision > surface.surfaceRevision,
                current.bootId == surface.bootId {
+                return
+            }
+            if let snapshot, surface.projectionRevision != snapshot.revision {
+                // The daemon streamed a projection for a tab we are no longer
+                // focused on; it is authoritative for that tab, not for ours.
+                kraalLog("surface: stale projection \(surface.projectionRevision) "
+                    + "!= revision \(snapshot.revision), ignored")
                 return
             }
             kraalLog("surface: \(surface.frame.width)x\(surface.frame.height) "
@@ -275,6 +283,7 @@ public final class AppStore {
 
         case let .surfacePatch(patch):
             guard var current = surface, current.bootId == patch.bootId else { return }
+            guard patch.projectionRevision == current.projectionRevision else { return }
             do {
                 try current.apply(patch)
                 surface = current
@@ -376,6 +385,9 @@ public final class AppStore {
 
     /// Set when measured metrics invalidate the current grid.
     public var needsGeometryReeval = false
+
+    /// In-flight `client_shell.surface.set` request, coalesced by tab switches.
+    var surfaceInterestTask: Task<Void, Never>?
 
     public func resizeSurface(cols: UInt16, rows: UInt16) {
         guard cols > 0, rows > 0 else { return }
@@ -510,12 +522,10 @@ public final class AppStore {
         loadSidebarConfig(fileURL: URL(fileURLWithPath: path))
     }
 
-    private func call(_ method: String, _ params: [String: Any]) async {
-        guard let connection else { return }
-        do {
-            _ = try await connection.request(method, params: params)
-        } catch {
-            lastError = "\(method): \(error)"
-        }
-    }
+    /// Asks the daemon to stream the focused tab's projection to us.
+    ///
+    /// `client_shell.surface.set` is an upstream API, not a protocol message:
+    /// until it is called the daemon keeps projecting whichever tab held focus at
+    /// handshake time, so switching tabs in another client would leave this
+    /// window rendering a tab that is no longer visible.
 }
