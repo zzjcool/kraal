@@ -1,9 +1,12 @@
-# iHerdr
+# Kraal
 
 原生 Swift 的 [Herdr](https://herdr.dev) 客户端，为 iOS / iPadOS / macOS 共用一套代码。
 
-*i* 是 iOS / iPadOS 的 i，也是 interface 的 i —— 一个给 Herdr 用的原生界面。
-
+> **命名**：`Kraal` 是南非荷兰语的「畜栏」——给畜群一个围起来的落脚处，正如这个 app 给 Herdr 的 agent 群一个随身的窗口。
+>
+> **商标**：Herdr 是 Herdr, Inc. 的商标。Kraal 是独立的第三方客户端，
+> 与 Herdr, Inc. 无关联，未获其授权或背书。
+>
 > **状态：设计阶段。** 本仓库当前包含完整的可行性验证、协议逆向研究与技术设计文档。
 
 ## 为什么再做一版
@@ -14,7 +17,7 @@
 2. **一条连接一个请求**——每次操作新开一次 SSH
 3. **拿不到几何信息**——没有 split 布局、没有鼠标区域、没有 popup
 
-iHerdr 走另一条路：直接用 Herdr 桌面客户端（GPUI 版）使用的 **endpoint 协议**，拿到结构化的 cell 网格和分屏几何，然后把 pane 内容交给 **Ghostty** 自己的渲染器。
+Kraal 走另一条路：直接用 Herdr 桌面客户端（GPUI 版）使用的 **endpoint 协议**，拿到结构化的 cell 网格和分屏几何，然后把 pane 内容交给 **Ghostty** 自己的渲染器。
 
 ## 核心发现
 
