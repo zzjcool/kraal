@@ -17,15 +17,38 @@ import KraalProtocol
 import KraalUI
 import SwiftUI
 
-/// Installs a local mouse monitor for one window and routes events to panes.
+/// One pane's own context menu, and the clipboard actions it needs.
+///
+/// Ghostty's terminal view owns right-click: it either offers its Copy item over a
+/// selection or forwards the press to the program in the pane. It has no menu for
+/// the pane itself, so the pane's actions (
+/// split, zoom, rename, close, focus, paste) are unreachable from the one place a
+/// user is most likely to right-click. This provides them.
+@MainActor
+public protocol PaneContextMenuProviding: AnyObject {
+    /// Raises the pane menu at the pointer. `event` is the right-click being
+    /// handled, so the menu opens where the user clicked.
+    func showPaneContextMenu(for paneId: String, event: NSEvent)
+    /// Whether the pane's terminal currently has a text selection, which is what
+    /// makes Copy meaningful.
+    func paneHasSelection(_ paneId: String) -> Bool
+    /// Runs Ghostty's `copy_to_clipboard` binding for the pane.
+    func copySelection(in paneId: String)
+}
+
 @MainActor
 public final class MouseForwarder {
     private weak var window: NSWindow?
     private var monitors: [Any] = []
     private let store: AppStore
+    /// Supplies the pane context menu and the clipboard actions behind it.
+    /// Held weakly because the app delegate owns the window and the forwarder,
+    /// and neither should keep the other alive.
+    private weak var paneActions: (any PaneContextMenuProviding)?
 
-    public init(store: AppStore) {
+    public init(store: AppStore, paneActions: (any PaneContextMenuProviding)? = nil) {
         self.store = store
+        self.paneActions = paneActions
     }
 
     public func attach(to window: NSWindow) {
@@ -33,8 +56,8 @@ public final class MouseForwarder {
         self.window = window
 
         let handler: (NSEvent) -> NSEvent? = { [weak self] event in
-            self?.handle(event)
-            return event
+            guard let self else { return event }
+            return self.handle(event) ? nil : event
         }
 
         for mask in [
@@ -72,9 +95,34 @@ public final class MouseForwarder {
 
     // MARK: - Routing
 
-    private func handle(_ event: NSEvent) {
-        guard let window, event.window === window else { return }
-        guard let location = paneLocation(for: event) else { return }
+    /// Routes one event. Returns true when the event was consumed and must not be
+    /// delivered to the view underneath — a right-click that raised the pane menu
+    /// is such a case: the menu has taken the gesture, and letting Ghostty also
+    /// forward it to the program would act on one click twice.
+    @discardableResult
+    private func handle(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window else { return false }
+        guard let location = paneLocation(for: event) else { return false }
+
+        // Right-click is both a menu gesture and an input event, and which one it
+        // is depends on the program. A pane that enabled mouse reporting is
+        // using the right button itself (TUIs do), so the menu would steal a
+        // click the program is waiting for; those panes get the event and no
+        // menu. Every other pane has no use for the button, and without a menu
+        // the click does nothing at all — which is the state this fixes.
+        if event.type == .rightMouseDown, paneShowsMenu(location.paneId) {
+            let paneId = location.paneId
+            let actions = paneActions
+            // Raised on the next runloop turn rather than here: a menu runs a
+            // modal event loop of its own, and starting one from inside event
+            // dispatch (before the view has seen the event) wedges the app.
+            // Consuming the event first is what makes this safe — by the time the
+            // menu opens, this click is already finished.
+            DispatchQueue.main.async {
+                actions?.showPaneContextMenu(for: paneId, event: event)
+            }
+            return true
+        }
 
         let kind = mouseKind(for: event)
         let modifiers = MouseModifiers.bits(from: event.modifierFlags)
@@ -84,7 +132,7 @@ public final class MouseForwarder {
 
         // Only panes that asked for mouse reporting get the event; the terminal
         // view has already handled it locally either way.
-        guard let kind else { return }
+        guard let kind else { return false }
         store.sendMouse(
             kind,
             at: location.point,
@@ -92,6 +140,18 @@ public final class MouseForwarder {
             paneId: location.paneId,
             modifiers: modifiers,
             lines: lines
+        )
+        return false
+    }
+
+    /// Whether the program in `paneId` asked to receive mouse buttons itself.
+    ///
+    /// Read from the daemon's geometry rather than from Ghostty: the daemon is
+    /// what decoded the program's escape sequences, and `sendMouse` already
+    /// gates on this same flag, so the two decisions cannot disagree.
+    private func paneShowsMenu(_ paneId: String) -> Bool {
+        KraalUI.PaneContextRouting.shouldShowPaneMenu(
+            programReportsMouse: store.paneGeometry(for: paneId)?.mouseReporting == true
         )
     }
 

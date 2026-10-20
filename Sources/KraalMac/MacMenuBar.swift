@@ -194,7 +194,6 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         NSApplication.shared.windowsMenu = menu
     }
 
-
     private func helpMenu(_ menu: NSMenu) {
         let debugMenu = NSMenu(title: "Debug")
         let showInfo = NSMenuItem(
@@ -363,7 +362,11 @@ private extension AppCommand {
 private extension NSMenu {
     /// Adds an item bound to `command`, with the shortcut the app documents.
     func addItem(command: AppCommand, target: AnyObject) {
-        let item = NSMenuItem(title: command.title, action: #selector(MacMenuBar.runCommand(_:)), keyEquivalent: "")
+        let item = NSMenuItem(
+            title: command.title,
+            action: #selector(MacMenuBar.runCommand(_:)),
+            keyEquivalent: ""
+        )
         item.representedObject = command.rawValue
         item.target = target
         if let shortcut = MenuShortcuts.shortcut(for: command) {

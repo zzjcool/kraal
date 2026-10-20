@@ -20,6 +20,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private let store = AppStore(target: KraalAppDelegate.initialTarget)
     private var mouseForwarder: MouseForwarder?
+    /// Terminals, kept so the pane menu can reach a pane's selection and clipboard.
+    private var paneTerminalPool: PaneTerminalPool?
     private let windowActions = WindowActions()
     private var menuBar: MacMenuBar?
 
@@ -93,9 +95,10 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         // Mouse events are observed, not intercepted: Ghostty keeps its own
         // selection and scroll behaviour, and panes that asked for mouse
         // reporting additionally get semantic events on the daemon connection.
-        let forwarder = MouseForwarder(store: store)
+        let forwarder = MouseForwarder(store: store, paneActions: self)
         forwarder.attach(to: window)
         mouseForwarder = forwarder
+        self.paneTerminalPool = pool
 
         // The menu bar is installed after the window exists so validation can
         // consult a live store; a bare NSApplication has no main menu at all, so
@@ -313,6 +316,94 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         saveFrame()
         mouseForwarder?.detach()
         store.disconnect()
+    }
+}
+
+// MARK: - Pane context menu
+
+/// The pane menu reaches the app delegate for everything that is not already an
+/// `AppCommand`: the pane it acts on comes from the menu the click raised, and
+/// the two clipboard actions have to reach that pane's Ghostty surface.
+extension KraalAppDelegate: PaneContextMenuProviding, PaneContextTarget {
+    func showPaneContextMenu(for paneId: String, event: NSEvent) {
+        // Focus follows the click: a right-click is a deliberate act on one pane,
+        // and every item in the menu reads "the focused pane". Without this, a
+        // right-click in a background pane would silently act on another one.
+        store.focus(paneId: paneId)
+
+        let menu = PaneContextMenuBar.menu(
+            paneId: paneId,
+            target: self,
+            commandSelector: #selector(MacMenuBar.runCommand(_:))
+        )
+        // Anchor the menu to the click, not to the view's origin: this is what
+        // makes it open where the user right-clicked.
+        let location = event.locationInWindow
+        if let view = window?.contentView {
+            NSMenu.popUpContextMenu(menu, with: event, for: view)
+        } else {
+            menu.popUp(positioning: nil, at: location, in: nil)
+        }
+        kraalLog("contextmenu: pane=\(paneId) at=\(Int(location.x)),\(Int(location.y))")
+    }
+
+    func paneHasSelection(_ paneId: String) -> Bool {
+        paneTerminalPool?.model(for: paneId).state.surface?.hasSelection() == true
+    }
+
+    /// Runs Ghostty's own `copy_to_clipboard` binding, so what lands on the
+    /// pasteboard is exactly what the user would get from ⌘C inside the pane.
+    func copySelection(in paneId: String) {
+        guard let surface = paneTerminalPool?.model(for: paneId).state.surface else { return }
+        _ = surface.performBindingAction("copy_to_clipboard")
+    }
+
+    // MARK: PaneContextTarget
+
+    func focusPane(_ sender: NSMenuItem) {
+        guard let paneId = sender.menu?.owningPaneId else { return }
+        store.focus(paneId: paneId)
+    }
+
+    func copySelection(_ sender: NSMenuItem) {
+        guard let paneId = sender.menu?.owningPaneId else { return }
+        copySelection(in: paneId)
+    }
+
+    /// Paste is sent as input rather than through Ghostty's paste binding: the
+    /// daemon owns the pane's content, so bytes have to go back over the
+    /// connection for the program to see them.
+    func pasteIntoPane(_ sender: NSMenuItem) {
+        guard let paneId = sender.menu?.owningPaneId else { return }
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        store.sendInput(Data(text.utf8), to: paneId)
+    }
+
+    func renamePane(_ sender: NSMenuItem) {
+        guard let paneId = sender.menu?.owningPaneId else { return }
+        presentPaneRename(paneId: paneId)
+    }
+
+    /// The menu bar's rename flow, reused so a rename started from a pane looks
+    /// and behaves the same as one started from the menu.
+    private func presentPaneRename(paneId: String) {
+        let alert = NSAlert()
+        alert.messageText = CommandPrompt.renamePane(
+            paneId: paneId,
+            current: store.paneLabel(paneId) ?? ""
+        ).title
+        alert.informativeText = "Enter a new name."
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = store.paneLabel(paneId) ?? ""
+        alert.accessoryView = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        store.rename(paneId: paneId, to: name)
     }
 }
 

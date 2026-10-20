@@ -66,11 +66,11 @@ struct DebugInfoView: View {
         let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
         let build = bundle.infoDictionary?["CFBundleVersion"] as? String ?? "—"
         let identifier = bundle.bundleIdentifier ?? "—"
-        let os = ProcessInfo.processInfo.operatingSystemVersionString
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         return [
             ("Version", "\(version) (\(build))"),
             ("Bundle ID", identifier),
-            ("macOS", os),
+            ("macOS", osVersion),
         ]
     }
 
