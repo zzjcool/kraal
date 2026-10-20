@@ -39,6 +39,14 @@ public final class PaneTerminalModel {
     )
     private var renderer = SurfaceANSIRenderer()
     private var lastRevision: UInt64 = 0
+    /// The pane grid the last rendered frame was composed for.
+    private var frameGrid: FrameData?
+
+    /// Clears the visible screen and the scrollback, then homes the cursor.
+    ///
+    /// Both are needed: a repaint at the wrong width leaves rows in scrollback
+    /// that a later incremental render never revisits.
+    private let clearScreenSequence = "\u{1B}[2J\u{1B}[3J\u{1B}[H"
     /// Set when a frame was rejected because the terminal's grid did not match
     /// it. The stale rows are still in the terminal's scrollback, and an
     /// incremental repaint only touches rows that changed — so the skew survives
@@ -73,10 +81,34 @@ public final class PaneTerminalModel {
         guard let geometry = surface.panes.first(where: { $0.paneId == paneId }) else {
             return
         }
-        guard geometry.contentRevision != lastRevision else { return }
-        lastRevision = geometry.contentRevision
-
         let frame = paneFrame(from: surface, geometry: geometry)
+        // A pane's content revision only moves when its *content* changes, so the
+        // same revision is normal for a pane that merely got a new grid: going
+        // from a split to full width changes every row's width but not one cell
+        // of text. Skipping those frames on the revision alone left the pane blank
+        // until it printed something. The grid is what decides whether the frame
+        // already on screen is still valid.
+        guard SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: geometry.contentRevision != lastRevision,
+            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
+            currentGrid: (width: Int(frame.width), height: Int(frame.height))
+        ) else { return }
+        if SurfaceGeometry.deltaStreamRestarted(
+            previousRevision: lastRevision,
+            incomingRevision: geometry.contentRevision
+        ) || frameGrid != frame {
+            // Revisions going backwards means this pane's delta stream restarted:
+            // the daemon began a fresh projection (a tab switch, a reconnect, a
+            // new boot) and renumbered from scratch. The renderer still holds the
+            // old stream's state, so a delta would paint onto a baseline that no
+            // longer exists. Wipe and take this frame whole.
+            renderer.reset()
+            session.receive(Data(clearScreenSequence.utf8))
+            needsCleanRepaint = false
+        }
+        lastRevision = geometry.contentRevision
+        frameGrid = frame
+
         reportCellMetrics()
 
         // If the terminal's grid disagrees with the frame, writing this frame
@@ -93,6 +125,7 @@ public final class PaneTerminalModel {
                 + "surface=\(surface.frame.width)x\(surface.frame.height) panes=[\(all.joined(separator: " "))]")
             needsCleanRepaint = true
             lastRevision = 0
+            frameGrid = nil
             return
         }
 
@@ -102,7 +135,7 @@ public final class PaneTerminalModel {
             // whole frame instead of a delta.
             needsCleanRepaint = false
             renderer.reset()
-            session.receive(Data("\u{1B}[2J\u{1B}[3J\u{1B}[H".utf8))
+            session.receive(Data(clearScreenSequence.utf8))
         }
 
         session.receive(renderer.render(frame))

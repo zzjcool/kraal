@@ -368,4 +368,41 @@ struct MouseMappingTests {
         #expect(PaneMouse.scrollLines(from: -3.6) == 4)
         #expect(PaneMouse.scrollLines(from: 999) == 20)
     }
+
+    @Test("a lower content revision means the delta stream restarted")
+    func streamRestarted() {
+        // A tab switch makes the daemon re-project the pane and renumber from
+        // scratch. Treating that as "older frame, ignore" leaves the pane blank,
+        // because no frame will ever exceed the stale revision.
+        #expect(SurfaceGeometry.deltaStreamRestarted(previousRevision: 38, incomingRevision: 1))
+        #expect(SurfaceGeometry.deltaStreamRestarted(previousRevision: 5, incomingRevision: 4))
+        #expect(!SurfaceGeometry.deltaStreamRestarted(previousRevision: 1, incomingRevision: 1))
+        #expect(!SurfaceGeometry.deltaStreamRestarted(previousRevision: 1, incomingRevision: 9))
+    }
+
+    @Test("a new grid repaints even when the content revision did not move")
+    func repaintOnGridChange() {
+        // Split to full width: same text, same revision, different frame width.
+        // Skipping this frame left the pane blank until it printed something.
+        #expect(SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: (53, 33),
+            currentGrid: (111, 35)
+        ))
+        #expect(SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: nil,
+            currentGrid: (111, 35)
+        ))
+        #expect(SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: true,
+            previousGrid: (111, 35),
+            currentGrid: (111, 35)
+        ))
+        #expect(!SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: (111, 35),
+            currentGrid: (111, 35)
+        ))
+    }
 }

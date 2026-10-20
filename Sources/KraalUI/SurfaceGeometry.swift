@@ -26,6 +26,38 @@ import SwiftUI
 /// cell metrics used must be the ones the renderer actually reports, never a
 /// guess — `fallbackCellSize` exists only to bootstrap the first handshake.
 public enum SurfaceGeometry {
+    /// Whether an incoming content revision means the delta stream was renumbered.
+    ///
+    /// Revisions only ever increase within one projection. A smaller one means
+    /// the daemon started a fresh projection — a tab switch, a reconnect, a new
+    /// boot — so frames already rendered belong to a stream that no longer exists
+    /// and cannot be patched. Treating it as a stale frame instead leaves the
+    /// pane blank: no later revision will ever exceed the stale high-water mark.
+    public static func deltaStreamRestarted(
+        previousRevision: UInt64,
+        incomingRevision: UInt64
+    ) -> Bool {
+        incomingRevision < previousRevision
+    }
+
+    /// Whether a frame must be painted even though its revision is unchanged.
+    ///
+    /// A pane's content revision only moves when its *content* changes, so it
+    /// stays put when the pane merely gets a new grid. Going from a split to full
+    /// width rewrites every row without touching a single cell of text, and the
+    /// already-painted frame is then the wrong width. Keying repaints on the
+    /// revision alone skipped exactly those frames.
+    public static func needsRepaint(
+        contentRevisionChanged: Bool,
+        previousGrid: (width: Int, height: Int)?,
+        currentGrid: (width: Int, height: Int)
+    ) -> Bool {
+        guard !contentRevisionChanged else { return true }
+        guard let previousGrid else { return true }
+        return previousGrid.width != currentGrid.width
+            || previousGrid.height != currentGrid.height
+    }
+
     /// Rough metrics for a 13 pt monospaced font, in points, used before any
     /// surface has reported its real cell size.
     ///
