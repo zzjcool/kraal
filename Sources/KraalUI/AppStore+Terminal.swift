@@ -13,8 +13,6 @@ import KraalSidebar
 import KraalTransport
 
 extension AppStore {
-    /// Re-issues a request when the geometry changed, so the daemon re-renders
-    /// at the new size.
     /// Records the renderer's measured cell size and re-negotiates if it changed
     /// enough to alter the grid.
     public func updateCellMetrics(_ size: CGSize) {
@@ -27,12 +25,57 @@ extension AppStore {
         needsGeometryReeval = true
     }
 
+    /// Negotiates a new surface grid with the daemon.
+    ///
+    /// This is the whole of "the window was resized": the pane area measured
+    /// itself, converted to cells, and asks the daemon to re-render at that grid.
+    /// The resize travels on the live connection as a `client_shell_resize`, so
+    /// the panes follow the window on the very next frame instead of after a
+    /// reconnect.
     public func resizeSurface(cols: UInt16, rows: UInt16) {
         guard cols > 0, rows > 0 else { return }
         let clamped = ClientSurfaceSize(cols: cols, rows: rows)
         guard clamped != surfaceSize else { return }
         kraalLog("geometry: \(surfaceSize.cols)x\(surfaceSize.rows) -> \(cols)x\(rows)")
         surfaceSize = clamped
+        pushSurfaceSize()
+    }
+
+    /// Sends the current grid to the daemon without tearing the connection down.
+    ///
+    /// Before the welcome there is nothing to resize — the hello already carries
+    /// this size — and a daemon that has closed the connection would just drop
+    /// the message, so both cases are no-ops rather than errors.
+    ///
+    /// Concurrent drags collapse: a run already in flight re-reads `surfaceSize`
+    /// after its send, so the newest grid wins instead of every intermediate one
+    /// queueing up behind the socket. A window drag produces a resize per frame,
+    /// and unsynchronised sends would let the daemon render a size the window has
+    /// already left.
+    func pushSurfaceSize() {
+        guard connection != nil, phase.isLive else { return }
+        // Raise the flag *before* deciding whether to start a task. If a send is
+        // already in flight this records that another size is waiting, so the
+        // running task cannot finish without seeing it — otherwise the request
+        // would be dropped exactly when the connection had just been replaced.
+        resizePending = true
+        guard resizeTask == nil else { return }
+        resizeTask = Task { [weak self] in
+            defer { self?.resizeTask = nil }
+            while let self, self.resizePending {
+                self.resizePending = false
+                let size = self.surfaceSize
+                // Re-read the connection each pass: a reconnect during a drag
+                // replaces it, and the new one needs the current grid.
+                guard let connection = self.connection, self.phase.isLive else { return }
+                do {
+                    try await connection.sendResize(to: size)
+                } catch {
+                    kraalLog("resize: failed to send \(size.cols)x\(size.rows): \(error)")
+                    return
+                }
+            }
+        }
     }
 
     /// Sends keystrokes to a pane.

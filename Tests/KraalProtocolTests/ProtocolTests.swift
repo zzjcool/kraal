@@ -415,6 +415,22 @@ struct ClientMessageEncodingTests {
         #expect(payload.last == 0xBB) // UTF-8 second byte of λ
     }
 
+    /// The resize path a window drag uses. Field order is positional on the wire,
+    /// so a reordering would silently make the daemon render a different grid
+    /// (here: columns and rows swapped) rather than fail loudly.
+    @Test("ClientShellResize is tag 12 with cell size before the grid")
+    func clientShellResize() {
+        let payload = ClientMessageEncoder.encode(
+            .clientShellResize(
+                cellWidthPx: 17,
+                cellHeightPx: 37,
+                surfaceSize: ClientSurfaceSize(cols: 92, rows: 36),
+                pixelMouse: false
+            )
+        )
+        #expect(Array(payload) == [12, 17, 37, 92, 36, 0])
+    }
+
     @Test("a right-button press encodes as mouse kind 0 with button 1")
     func rightButtonPress() {
         let event = ClientPaneInputEvent.mouse(

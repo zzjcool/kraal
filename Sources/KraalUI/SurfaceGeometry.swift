@@ -119,12 +119,43 @@ public enum SurfaceGeometry {
     }
 }
 
+/// When a resize should be released, as a pure decision so it can be tested.
+///
+/// Split out of the view because the interesting part is a timing rule, and a
+/// timing rule buried in a `ViewModifier` can only be checked by dragging a window
+/// by hand. The two edges it describes are what the bug was about:
+///
+/// - *leading*: a size change during a drag must go out at once, or the panes wait
+///   for the gesture to end before they follow the window;
+/// - *trailing*: the size the gesture stopped on must still be sent, including
+///   when the drag ended inside the leading-edge interval.
+public enum ResizePacing {
+    /// Shortest gap between two negotiations while a resize is in progress.
+    public static let dragInterval: TimeInterval = 0.05
+    /// Quiet period after which a resize is treated as finished.
+    public static let settleDelay: TimeInterval = 0.18
+
+    /// Whether a size change is released immediately rather than coalesced.
+    ///
+    /// `sinceLastRelease` is how long ago the previous grid went to the daemon.
+    /// A forced change (measured cell metrics, a geometry re-evaluation) is not
+    /// part of a drag and always goes out.
+    public static func releasesImmediately(
+        sinceLastRelease: TimeInterval,
+        forced: Bool
+    ) -> Bool {
+        forced || sinceLastRelease >= dragInterval
+    }
+}
+
 /// Reports the pane area's size so the store can negotiate a matching grid.
 private struct SurfaceGeometryReader: ViewModifier {
     @Environment(AppStore.self) private var store
     @State private var pendingSize: CGSize?
     @State private var debounce: Task<Void, Never>?
     @State private var lastScheduled: CGSize?
+    /// When the last resize was actually released to the store.
+    @State private var lastReleasedAt = Date.distantPast
 
     func body(content: Content) -> some View {
         content.background {
@@ -146,22 +177,44 @@ private struct SurfaceGeometryReader: ViewModifier {
         }
     }
 
+    /// Releases a new grid while a resize is happening and once more when it stops.
+    ///
+    /// A trailing debounce alone cannot do this: it restarts on every event, and a
+    /// window drag never stops emitting them, so the negotiation only started
+    /// ~350 ms *after* the user let go — the panes stayed at the old size for the
+    /// whole gesture. Leading + trailing keeps up during the drag and still
+    /// guarantees the final size lands exactly once after it.
     private func schedule(_ size: CGSize, force: Bool = false) {
         guard size.width > 8, size.height > 8 else { return }
         if !force, lastScheduled == size { return }
         lastScheduled = size
         pendingSize = size
+
+        let now = Date()
+        if ResizePacing.releasesImmediately(
+            sinceLastRelease: now.timeIntervalSince(lastReleasedAt),
+            forced: force
+        ) {
+            // Leading edge: the first change, and anything spaced by at least
+            // `dragInterval`, goes out immediately.
+            release(size)
+        }
         debounce?.cancel()
         debounce = Task { @MainActor in
-            // Coalesce a drag into one negotiation.
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            // Trailing edge: the size the gesture ended on.
+            try? await Task.sleep(for: .seconds(ResizePacing.settleDelay))
             guard !Task.isCancelled, let pendingSize else { return }
-            let cells = SurfaceGeometry.cells(
-                for: pendingSize,
-                cellSize: store.terminalCellSize
-            )
-            store.resizeSurface(cols: cells.cols, rows: cells.rows)
+            release(pendingSize)
         }
+    }
+
+    private func release(_ size: CGSize) {
+        lastReleasedAt = Date()
+        let cells = SurfaceGeometry.cells(
+            for: size,
+            cellSize: store.terminalCellSize
+        )
+        store.resizeSurface(cols: cells.cols, rows: cells.rows)
     }
 }
 

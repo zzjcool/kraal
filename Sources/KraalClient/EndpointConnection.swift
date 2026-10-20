@@ -38,7 +38,10 @@ public enum ConnectionLimits {
 
 public actor EndpointConnection {
     private let target: HerdrTarget
-    private let surfaceSize: ClientSurfaceSize
+    /// The grid this connection last told the daemon to render, starting with the
+    /// one in the hello. Tracked so a resize that matches it is not re-sent: the
+    /// daemon would re-render a whole surface for nothing.
+    public private(set) var surfaceSize: ClientSurfaceSize
     private let cellSize: (width: UInt32, height: UInt32)
     private let surfaceActive: Bool
 
@@ -190,6 +193,24 @@ public actor EndpointConnection {
     public func sendPaneInput(_ paneId: String, events: [ClientPaneInputEvent]) throws {
         guard !events.isEmpty else { return }
         try send(.clientShellPaneInput(paneId: paneId, events: events))
+    }
+
+    /// Tells the daemon that this client's surface needs a different grid.
+    ///
+    /// `client_shell_resize` re-renders the current projection at the new size on
+    /// the *existing* connection: measured against a 0.9.5 daemon, the reply is a
+    /// fresh `PaneSurface` at the requested grid in 16–20 ms. Without it the only
+    /// lever was a new handshake, which is why a window drag used to tear the
+    /// surface down on every step and could never settle.
+    public func sendResize(to size: ClientSurfaceSize) throws {
+        guard size != surfaceSize else { return }
+        surfaceSize = size
+        try send(.clientShellResize(
+            cellWidthPx: cellSize.width,
+            cellHeightPx: cellSize.height,
+            surfaceSize: size,
+            pixelMouse: false
+        ))
     }
 
     /// Issues an endpoint API call and returns the reassembled response body.

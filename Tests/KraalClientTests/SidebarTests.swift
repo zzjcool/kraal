@@ -444,3 +444,44 @@ struct MouseMappingTests {
         #expect(!SurfaceGeometry.needsParkingUntilGridIsKnown(hasGrid: true))
     }
 }
+
+@Suite("Window resize pacing")
+struct ResizePacingTests {
+    /// The bug this pins down: a trailing-only debounce restarts on every size
+    /// change, and dragging a window emits one per frame. The negotiation then
+    /// started only after the user let go, so the panes sat at the old grid for
+    /// the whole gesture instead of following the window.
+    @Test("a size change during a drag is released immediately")
+    func leadingEdge() {
+        #expect(ResizePacing.releasesImmediately(
+            sinceLastRelease: ResizePacing.dragInterval,
+            forced: false
+        ))
+        // The first change of a gesture, long after the previous one.
+        #expect(ResizePacing.releasesImmediately(sinceLastRelease: 60, forced: false))
+    }
+
+    @Test("back-to-back frames coalesce instead of flooding the daemon")
+    func coalesces() {
+        // A 60 fps drag offers a change every ~16 ms; only one per interval goes
+        // out, and the rest are covered by the trailing release.
+        #expect(!ResizePacing.releasesImmediately(sinceLastRelease: 0.016, forced: false))
+        #expect(!ResizePacing.releasesImmediately(sinceLastRelease: 0, forced: false))
+    }
+
+    @Test("a forced negotiation is never delayed")
+    func forcedBypassesInterval() {
+        // Measured cell metrics and explicit geometry re-evaluations are not part
+        // of a drag; holding them back would leave the grid wrong after the very
+        // event that invalidated it.
+        #expect(ResizePacing.releasesImmediately(sinceLastRelease: 0, forced: true))
+    }
+
+    @Test("the trailing release waits for the gesture to stop")
+    func trailingEdge() {
+        // Long enough to be past a drag frame, short enough that the final size
+        // lands while the user is still looking at the window.
+        #expect(ResizePacing.settleDelay > ResizePacing.dragInterval)
+        #expect(ResizePacing.settleDelay < 0.5)
+    }
+}

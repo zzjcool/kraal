@@ -63,11 +63,13 @@ public final class AppStore {
     public var terminalCellSize = SurfaceGeometry.fallbackCellSize
 
     /// The geometry the daemon renders for us, in cells.
-    public var surfaceSize = ClientSurfaceSize(cols: 120, rows: 40) {
-        didSet {
-            if surfaceSize != oldValue { scheduleReconnect(resetBackoff: true) }
-        }
-    }
+    ///
+    /// A change here is a *resize*, not a new session: it is pushed onto the live
+    /// connection with `client_shell_resize` (see `resizeSurface`). Reconnecting
+    /// instead — which is what this used to do — made every step of a window drag
+    /// a fresh handshake, so the pane sat on a stale surface for the length of a
+    /// TCP/handshake round-trip and the chrome never followed the window.
+    public var surfaceSize = ClientSurfaceSize(cols: 120, rows: 40)
 
     @ObservationIgnored var connection: EndpointConnection?
     @ObservationIgnored private var connectTask: Task<Void, Never>?
@@ -75,6 +77,11 @@ public final class AppStore {
     @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored var inputDecoders: [String: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
+    /// In-flight `client_shell_resize` sender, so a drag coalesces.
+    @ObservationIgnored var resizeTask: Task<Void, Never>?
+    /// Set when a grid still has to be pushed, so a request that arrives while a
+    /// send is in flight is not lost.
+    @ObservationIgnored var resizePending = false
 
     public init(target: ConnectionSettings = .local) {
         self.target = target
@@ -162,6 +169,11 @@ public final class AppStore {
                 self.reconnectedAt = Date()
                 self.reconnectAttempt = 0
                 kraalLog("connected: daemon=\(self.welcome?.serverVersion ?? "?")")
+                // The hello carried the grid measured when this attempt began.
+                // A resize during the handshake would otherwise leave the daemon
+                // rendering a size the window has already left, with no later
+                // event to correct it.
+                self.pushSurfaceSize()
             } catch {
                 kraalLog("connect failed: \(error)")
                 await connection.stop()
