@@ -83,28 +83,43 @@ swift build --product kraal
 ./.build/out/Products/Debug/kraal --ssh my-host call --method tab.create --param label=logs
 ```
 
-### 在别的 Herdr 实例上开发
+### 在隔离的 Herdr 实例上开发
 
-开发和自测不要动正在用的那个 Herdr。用独立容器起一个：
-
-```bash
-ssh devcloud 'docker run -d --name kraal-herdr \
-  -v /tmp/kraal-herdr:/root/.config/herdr pi-herdr-sandbox:latest bash -lc "herdr server"'
-
-# 把它的 unix socket 映射到本机
-sudo -u zzj ssh -N -L /tmp/kraal-dev/herdr-client.sock:/tmp/kraal-herdr/herdr-client.sock devcloud
-```
-
-`KRAAL_HERDR_SOCKET` 指定要连哪个 daemon，app 和 CLI 都认：
+开发和自测**必须**在一次性容器里做，不要连任何正在使用的 daemon。GUI 调试会
+分屏、打字、关 pane、改布局，这些落在真实会话里就是破坏。
 
 ```bash
-KRAAL_HERDR_SOCKET=/tmp/kraal-dev/herdr-client.sock \
-  ./.build/out/Products/Debug/kraal screenshot
+# 1. 起一个专属容器，配置目录用一次性路径
+ssh devcloud 'mkdir -p /tmp/kraal-zzj-iso && chmod 777 /tmp/kraal-zzj-iso \
+  && docker run -d --name kraal-zzj-sandbox \
+     -v /tmp/kraal-zzj-iso:/root/.config/herdr \
+     pi-herdr-sandbox:latest bash -lc "herdr server"'
+
+# 2. 升到最新版（镜像自带的是旧版）
+ssh devcloud 'docker exec kraal-zzj-sandbox sh -c "herdr update </dev/null"'
+ssh devcloud 'docker restart kraal-zzj-sandbox'
+
+# 3. 把它的 unix socket 映射到本机那个专属路径
+sudo -u zzj ssh -N -L \
+  /tmp/kraal-mine/herdr-client.sock:/tmp/kraal-zzj-iso/herdr-client.sock devcloud
 ```
 
-debug 包里的 `Kraal.app` 由 `Scripts/build-app.sh` 自动带上这个变量，默认就指向
-沙箱；release 包不带，连本机。这一点很要紧：GUI 调试如果连到正在用的 daemon，
-分屏、打字、关 pane 都会落在真实会话里。
+自查：第一步之后 `docker inspect` 里的 `Mounts` 必须只指向 `/tmp/kraal-zzj-iso`。
+`kraal-herdr` 这类**看起来像沙箱**的现成容器要当作别人的环境处理——它可能挂着
+真实会话，重启或写入都会落到使用者身上。
+
+`KRAAL_HERDR_SOCKET` 指定连哪个 daemon，app 和 CLI 都认：
+
+```bash
+KRAAL_HERDR_SOCKET=/tmp/kraal-mine/herdr-client.sock \
+  ./.build/out/Products/Debug/kraal probe
+```
+
+debug 包里的 `Kraal.app` 由 `Scripts/build-app.sh` 自动带上这个变量并默认指向
+`/tmp/kraal-mine/herdr-client.sock`；release 包不带，连本机。
+
+这个默认值必须是**只为此目的存在**的路径。写错或写旧的路径比不写更危险：
+它会静默解析到该路径上碰巧在监听的 daemon，而不是报错。
 
 ---
 
