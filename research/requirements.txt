@@ -1,0 +1,2 @@
+# 04_ansi_vs_surface.py 用它做 VT 一致性校验（标准 VT 模拟器）
+pyte>=0.8.2

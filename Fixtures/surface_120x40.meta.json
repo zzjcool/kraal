@@ -1,0 +1,23 @@
+{
+  "width": 120,
+  "height": 40,
+  "cells": 4800,
+  "panes": [
+    {
+      "pane_id": "wP:p9",
+      "rect": [
+        0,
+        0,
+        120,
+        40
+      ],
+      "inner_rect": [
+        0,
+        0,
+        119,
+        40
+      ],
+      "focused": true
+    }
+  ]
+}

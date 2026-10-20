@@ -1,0 +1,39 @@
+# 第三方归属
+
+## herdr
+
+协议类型的结构定义（21 个 ClientMessage、21 个 ServerMessage、全部嵌套
+struct/enum 的字段与变体顺序）衍生自：
+
+- https://github.com/herdrdev/herdr
+- 许可证：Apache-2.0
+- 版权：Herdr contributors
+
+bincode 位置编码要求枚举变体顺序逐字保持，因此本仓库的协议定义在结构上
+与该项目的 wire 定义对应。
+
+## herdr-gpui
+
+客户端侧的协议实现（帧编解码、surface patch 校验、SSH bridge 握手、
+超时参数）参考自：
+
+- https://github.com/penso/herdr-gpui
+- 许可证：Apache-2.0
+- 其上溯到 Herdr 0.9.1 commit 856b64b9bfd41b9d3d82e2375ed5b4bf941fda28
+
+## Ghostty / libghostty-spm
+
+设计目标平台使用 Ghostty 作为终端渲染器：
+
+- https://github.com/ghostty-org/ghostty — MIT
+- https://github.com/Lakr233/libghostty-spm — MIT
+  （注意其历史版本曾静态链入 LGPL 的 libintl，1.6.x 起以 -Di18n=false 修复）
+
+Ghostty 上游的 shell-integration 脚本是 GPLv3；libghostty-spm 特意自带
+MIT 授权的等价实现，选用时需确认具体版本。
+
+## 本项目
+
+设计文档与研究脚本：MIT（见 LICENSE）。
+
+本项目与 Herdr 官方无关，未获其背书。

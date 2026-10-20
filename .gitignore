@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Xcode / Swift
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# 本地抓包（可能含私有内容），只保留刻意提交的 fixture
+research/*.local.ansi
+
+# 调研用子代理会话记录
+.pi-subagents/
+.ruff_cache/

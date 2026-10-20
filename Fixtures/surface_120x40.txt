@@ -1,0 +1,40 @@
+HerdKit fixture
+colors: red green bold
+box: ┌───┐ │ └───┘
+wide: 中文测试 ＡＢＣ
+tabs: a b       c
+lines:
+1
+2
+3
+4
+5
+EOF
+(base) zheng@zzjs-MacBook-Pro iherdr %
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
