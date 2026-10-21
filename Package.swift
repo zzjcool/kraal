@@ -86,7 +86,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KraalClientTests",
-            dependencies: ["KraalClient", "KraalSidebar", "KraalUI"],
+            dependencies: ["KraalClient", "KraalSidebar", "KraalUI", "KraalTerminalView"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

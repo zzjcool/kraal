@@ -41,8 +41,11 @@ public final class PaneTerminalModel {
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
-    /// A frame that arrived before Ghostty's surface existed.
+    /// A frame that arrived before Ghostty's surface existed, or before its grid
+    /// caught up with the frame's size.
     private var pendingFrame: FrameData?
+    /// The retry chain that keeps trying to paint `pendingFrame`.
+    private var pendingRetryTask: Task<Void, Never>?
 
     /// Clears the visible screen and the scrollback, then homes the cursor.
     ///
@@ -139,6 +142,10 @@ public final class PaneTerminalModel {
             pendingFrame = frame
             lastRevision = 0
             frameGrid = nil
+            // Same reason as the grid-mismatch branch: the grid appearing fires
+            // `onChange` only while it is still *changing*. If the surface reports
+            // its first size before the view observes it, nothing else will come.
+            schedulePendingRetry()
             return
         }
         pendingFrame = nil
@@ -161,6 +168,13 @@ public final class PaneTerminalModel {
             // program prints, so a still screen stayed frozen at the old size
             // forever. Parking it lets the grid arriving below repaint it.
             pendingFrame = frame
+            // Parking alone is not enough: this frame is only ever painted again
+            // by a *later* trigger, and after the window stops moving there are no
+            // more grid changes to trigger it. The daemon has already rendered the
+            // final grid, so nothing else will arrive. Schedule our own retry —
+            // the grid does catch up, it just does it after the last event any
+            // observer is watching for.
+            schedulePendingRetry()
             return
         }
 
@@ -207,16 +221,82 @@ public final class PaneTerminalModel {
         // would wrap every row. Leaving it parked is correct — another grid report
         // follows.
         guard let grid = state.surfaceSize,
-              grid.columns == frame.width,
-              grid.rows == frame.height else { return }
+              Self.gridMatches(
+                  frameWidth: Int(frame.width),
+                  frameHeight: Int(frame.height),
+                  gridColumns: grid.columns,
+                  gridRows: grid.rows
+              ) else { return }
         pendingFrame = nil
         lastRevision = 0
         frameGrid = nil
         renderer.reset()
-        session.receive(Data(clearScreenSequence.utf8))
-        session.receive(renderer.render(frame))
+        let clear = Data(clearScreenSequence.utf8)
+        let painted = renderer.render(frame)
+
+        session.receive(clear)
+        session.receive(painted)
         lastRevision = 0
         frameGrid = frame
+
+    }
+
+    /// How many times a parked frame is retried, and how far apart.
+    ///
+    /// Read by the tests as the contract for how long a park may live: long
+    /// enough to outlast the launch grid burst, short enough that a pane whose
+    /// grid genuinely disagrees is not repainted into the wrong width.
+    static let pendingRetryAttempts = 12
+    static let pendingRetryIntervalMilliseconds = 80
+
+    /// Whether a parked frame can be painted at the grid the terminal reports.
+    ///
+    /// Split out so the rule is testable without a Ghostty surface: painting at
+    /// a different width wraps every row and pushes the overflow into
+    /// scrollback, which is worse than staying blank for one more turn.
+    static func gridMatches(
+        frameWidth: Int, frameHeight: Int,
+        gridColumns: UInt16, gridRows: UInt16
+    ) -> Bool {
+        gridColumns == frameWidth && gridRows == frameHeight
+    }
+
+    /// Retries a parked frame on a short timer.
+    ///
+    /// The bug this exists for: the pane stayed blank until the user switched
+    /// tabs. `flushPendingFrame` was only called from `onChange(of:
+    /// surfaceSize)`, so a frame parked on the *last* grid change had nothing
+    /// left to wake it — the window settled, the grid stopped changing, and the
+    /// frame sat in `pendingFrame` forever. Switching tabs rebuilt the view,
+    /// `onAppear` ran again against a grid that now matched, and the content
+    /// appeared. That is why the trigger looked like "switch a tab".
+    ///
+    /// The retry is bounded and cheap: it polls the grid a handful of times over
+    /// roughly a second, which is the window in which Ghostty's surface catches
+    /// up with a resize. It stops as soon as the frame paints, and it does
+    /// nothing at all when no frame is parked.
+    private func schedulePendingRetry() {
+        // One timer per model. Re-parking during an active retry must not start a
+        // second chain that would double-paint when the grid finally matches.
+        guard pendingRetryTask == nil else { return }
+        pendingRetryTask = Task { @MainActor [weak self] in
+            defer { self?.pendingRetryTask = nil }
+            // The first attempt is immediate: most parks are one runloop turn
+            // behind the grid, and waiting would add a visible delay for them.
+            for _ in 0..<Self.pendingRetryAttempts {
+                guard let self, !Task.isCancelled, self.pendingFrame != nil else { return }
+                self.flushPendingFrame()
+                guard self.pendingFrame != nil else { return }
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.pendingRetryIntervalMilliseconds) * 1_000_000
+                )
+            }
+            // Gave up: the grid never matched the frame. Drop the park rather than
+            // leaving it to be painted at some arbitrary later moment against a
+            // grid it was not rendered for. The next surface frame repaints.
+            guard let self, !Task.isCancelled else { return }
+            self.pendingFrame = nil
+        }
     }
 
     /// Prepares for a terminal view that has never painted anything.
@@ -235,6 +315,11 @@ public final class PaneTerminalModel {
         frameGrid = nil
         pendingFrame = nil
         needsCleanRepaint = false
+        // The view this chain was polling for is gone. Its successor runs
+        // `onAppear` against the live grid, and a surviving retry would paint into
+        // a terminal it knows nothing about.
+        pendingRetryTask?.cancel()
+        pendingRetryTask = nil
     }
 
     func reset() {
