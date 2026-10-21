@@ -95,9 +95,57 @@ public enum PaneMouse {
         )
     }
 
-    /// Scroll amount as whole lines, keeping the sub-line remainder out of the
-    /// wire: the protocol counts lines.
-    public static func scrollLines(from delta: CGFloat) -> UInt16 {
-        UInt16(max(1, min(Int(abs(delta).rounded()), 20)))
+    /// Turns a stream of trackpad deltas into wheel notches, the way Ghostty
+    /// does it.
+    ///
+    /// A trackpad emits a scroll event per frame, not per notch: a light flick is
+    /// dozens of events carrying 1–3 pixels each. Rounding every one of them up
+    /// to a whole line turns 60 events of 2px into 60 lines when the gesture only
+    /// moved three — the page tears past. Rounding down instead loses the gesture
+    /// entirely.
+    ///
+    /// So the remainder is carried: pixels accumulate until they cover a cell,
+    /// only then does a notch go out and the remainder stay behind for the next
+    /// frame. That is `Surface.zig`'s `pending_scroll_y`, and matching it is what
+    /// makes scrolling feel the same as it does in Ghostty standalone.
+    ///
+    /// `lines` cannot carry the amount here. For a pane that reports the mouse,
+    /// the daemon ignores `lines` and emits exactly one wheel sequence per event
+    /// (`pane_input.rs` → `apply_scroll` → `WheelRouting::MouseReport`), so a
+    /// larger count would change nothing and only the *number* of events scrolls
+    /// the program. Accumulating before sending is the only lever that works.
+    public struct ScrollAccumulator: Sendable {
+        /// Pixels moved but not yet converted into a notch.
+        private var pending: CGFloat = 0
+        /// Pixel height of one cell; the divisor that turns pixels into rows.
+        public let cellHeight: CGFloat
+
+        public init(cellHeight: CGFloat) {
+            // A zero or negative height would divide to infinity and emit a notch
+            // on every event, which is the bug this type exists to prevent.
+            self.cellHeight = max(cellHeight, 1)
+        }
+
+        /// Feeds one event's delta and returns how many notches to send, signed
+        /// the way a wheel is (positive = up).
+        ///
+        /// Returned as `Int` rather than `UInt16` because the sign is the
+        /// direction; the caller turns it into a kind plus a count.
+        public mutating func notches(for delta: CGFloat) -> Int {
+            guard delta.isFinite, delta != 0 else { return 0 }
+            pending += delta
+            // Truncate toward zero so a partial cell keeps its sign and is not
+            // thrown away: a slow drag downward must not be banked as upward.
+            let whole = (pending / cellHeight).rounded(.towardZero)
+            guard whole != 0 else { return 0 }
+            pending -= whole * cellHeight
+            return Int(whole)
+        }
+
+        /// Drops any banked remainder, for when the gesture ends or the pane
+        /// changes: a leftover from one direction must not offset the next.
+        public mutating func reset() {
+            pending = 0
+        }
     }
 }

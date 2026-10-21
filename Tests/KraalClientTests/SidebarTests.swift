@@ -462,11 +462,64 @@ struct MouseMappingTests {
         #expect(pixels.y == 0)
     }
 
-    @Test("scroll deltas become a bounded line count")
-    func scrollLines() {
-        #expect(PaneMouse.scrollLines(from: 0.2) == 1)
-        #expect(PaneMouse.scrollLines(from: -3.6) == 4)
-        #expect(PaneMouse.scrollLines(from: 999) == 20)
+    @Test("a slow drag is neither lost nor banked as the wrong direction")
+    func scrollAccumulatorKeepsFractionalProgress() {
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 10)
+        // Each event alone is under a cell, so none of them may emit.
+        #expect(accumulator.notches(for: 4) == 0)
+        #expect(accumulator.notches(for: 4) == 0)
+        // 4 + 4 + 4 = 12: one notch, 2px left over.
+        #expect(accumulator.notches(for: 4) == 1)
+        // The leftover still counts: 2 + 9 = 11 crosses another cell.
+        #expect(accumulator.notches(for: 9) == 1)
+    }
+
+    @Test("a partial cell is carried, so no movement is lost")
+    func scrollAccumulatorTruncatesTowardZero() {
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 10)
+        // 6px up is not a cell yet, so nothing is sent.
+        #expect(accumulator.notches(for: 6) == 0)
+        // 4px down un-does 4 of those 6 and still has not crossed zero; nothing
+        // is sent and the 2px that remain stay banked rather than being dropped.
+        #expect(accumulator.notches(for: -4) == 0)
+        // 12px more down crosses the boundary once: 2 - 12 = -10.
+        #expect(accumulator.notches(for: -12) == -1)
+    }
+
+    @Test("reset drops the banked remainder")
+    func scrollAccumulatorResets() {
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 10)
+        #expect(accumulator.notches(for: 9) == 0)
+        accumulator.reset()
+        // Without the reset this 1px would complete the earlier 9px and emit.
+        #expect(accumulator.notches(for: 1) == 0)
+        #expect(accumulator.notches(for: 10) == 1)
+    }
+
+    @Test("a measured trackpad flick sends 3 notches, not 19")
+    func scrollAccumulatorMatchesMeasuredFlick() {
+        // Numbers from a real measurement against the sandbox daemon: the
+        // simulated flick delivered 19 events (-6 then 18x -3 = -60 points) into
+        // a pane whose cell is 18.5 points tall. Scrolling that pane used to
+        // send one wheel event per input event, 19 in all, which is what made
+        // the view tear ahead of the gesture; the fix sends the 3 rows the
+        // gesture actually covered.
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 18.5)
+        var sent = 0
+        for delta in [-6.0] + Array(repeating: -3.0, count: 18) {
+            sent += abs(accumulator.notches(for: delta))
+        }
+        #expect(sent == 3)
+    }
+
+    @Test("a zero cell height would divide to a notch per event")
+    func scrollAccumulatorRejectsZeroCellHeight() {
+        // Guards the guard: a pane reporting height 0 must not turn every pixel
+        // into a notch, which is exactly the runaway this type prevents.
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 0)
+        #expect(accumulator.cellHeight == 1)
+        #expect(accumulator.notches(for: 1) == 1)
+        #expect(accumulator.notches(for: 0.5) == 0)
     }
 
     @Test("a lower content revision means the delta stream restarted")

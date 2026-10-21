@@ -46,6 +46,10 @@ public final class MouseForwarder {
     /// and neither should keep the other alive.
     private weak var paneActions: (any PaneContextMenuProviding)?
 
+    /// Pixels banked per pane between scroll notches. See
+    /// `PaneMouse.ScrollAccumulator` for why the remainder has to be carried.
+    private var scrollAccumulators: [String: PaneMouse.ScrollAccumulator] = [:]
+
     public init(store: AppStore, paneActions: (any PaneContextMenuProviding)? = nil) {
         self.store = store
         self.paneActions = paneActions
@@ -124,24 +128,78 @@ public final class MouseForwarder {
             return true
         }
 
-        let kind = mouseKind(for: event)
         let modifiers = MouseModifiers.bits(from: event.modifierFlags)
-        let lines = event.type == .scrollWheel
-            ? PaneMouse.scrollLines(from: event.scrollingDeltaY)
-            : 0
+
+        // A trackpad delivers dozens of scroll events per gesture, each only a
+        // pixel or two. Sending all of them makes the program scroll once per
+        // event and the view races ahead of the fingers; banking the pixels per
+        // pane and emitting only whole cells matches Ghostty's own feel.
+        if event.type == .scrollWheel {
+            let notches = scrollNotches(for: event, paneId: location.paneId, viewSize: location.size)
+            // Zero: the gesture has not covered a cell yet, or there is nothing
+            // to measure against. Both mean send nothing; the remainder waits.
+            guard notches != 0 else { return false }
+            store.sendMouse(
+                notches > 0 ? .scrollUp : .scrollDown,
+                at: location.point,
+                in: location.size,
+                paneId: location.paneId,
+                modifiers: modifiers,
+                lines: UInt16(min(abs(notches), 20))
+            )
+            return false
+        }
 
         // Only panes that asked for mouse reporting get the event; the terminal
         // view has already handled it locally either way.
-        guard let kind else { return false }
+        guard let kind = mouseKind(for: event) else { return false }
         store.sendMouse(
             kind,
             at: location.point,
             in: location.size,
             paneId: location.paneId,
             modifiers: modifiers,
-            lines: lines
+            lines: 0
         )
         return false
+    }
+
+    /// Whole-cell notches for one scroll event, or nil when the accumulator has
+    /// not yet covered a cell (or the pane has no geometry to measure against).
+    ///
+    /// Whole-cell notches for one scroll event, signed so positive scrolls up.
+    ///
+    /// Zero means the gesture has not yet covered a cell and nothing should be
+    /// sent; the pixels stay banked in the accumulator for the next event.
+    /// Whole-cell notches for one scroll event, signed so positive scrolls up.
+    ///
+    /// A wheel with detents already reports whole notches, so its delta is used
+    /// as-is; a trackpad reports points, which have to be banked until they
+    /// cover a cell. Treating the two the same either loses the wheel (it takes
+    /// a dozen clicks to move a row) or floods the trackpad path.
+    private func scrollNotches(for event: NSEvent, paneId: String, viewSize: CGSize) -> Int {
+        let delta = event.scrollingDeltaY
+        guard event.hasPreciseScrollingDeltas else {
+            // Not points — a wheel notch count. One event, one notch.
+            scrollAccumulators[paneId]?.reset()
+            return delta > 0 ? 1 : (delta < 0 ? -1 : 0)
+        }
+        guard let geometry = store.paneGeometry(for: paneId), geometry.innerRect.height > 0 else {
+            return 0
+        }
+        // Height of one cell in **points**, because that is the unit
+        // `scrollingDeltaY` uses for a precise device. Derived from the view
+        // rather than from `pixelHeight`: the daemon reports pixels, and mixing
+        // the two would halve the speed on a 2x display. `viewSize` is points
+        // and `innerRect.height` is rows, so the ratio is scale-free.
+        let cellHeight = viewSize.height / CGFloat(geometry.innerRect.height)
+        var accumulator = scrollAccumulators[paneId]
+            ?? PaneMouse.ScrollAccumulator(cellHeight: cellHeight)
+        // Trackpads emit momentum events after the fingers lift. They still
+        // carry real distance, so they go through the same bank.
+        let notches = accumulator.notches(for: delta)
+        scrollAccumulators[paneId] = accumulator
+        return notches
     }
 
     /// Whether the program in `paneId` asked to receive mouse buttons itself.
