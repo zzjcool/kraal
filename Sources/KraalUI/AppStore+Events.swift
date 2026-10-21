@@ -33,6 +33,10 @@ extension AppStore {
         let bootChanged = self.snapshot?.bootId != snapshot.bootId
         let focusedTabChanged = self.snapshot?.focusedTabId != snapshot.focusedTabId
         self.snapshot = snapshot
+        // The selected machine's own group reads from the main snapshot; keep its
+        // catalog entry in step so switching away and back does not show the rows
+        // from before the last snapshot arrived.
+        syncActiveEndpointSnapshot()
         guard bootChanged || focusedTabChanged else { return }
         // Keep the previous frame on screen while the daemon re-projects.
         //

@@ -121,6 +121,10 @@ public struct RootView: View {
                 store.loadDefaultSidebarConfig()
                 store.connect()
             }
+            // Machines load beside the connection: the sidebar can draw the local
+            // group before any remote profile is known, and the groups appear as
+            // soon as the list arrives.
+            Task { await store.loadEndpoints() }
         }
         // The menu bar owns the keyboard shortcuts now: AppKit gives a menu item's
         // key equivalent first refusal, so registering the same chord here as a

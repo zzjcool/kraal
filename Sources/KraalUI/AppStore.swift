@@ -41,6 +41,24 @@ public final class AppStore {
     public var sidebarLayout = SidebarLayout()
     public var sidebarConfigSource: String?
 
+    /// Every machine the sidebar can draw, local first.
+    ///
+    /// One entry per saved profile plus `Local`. Only the selected entry streams a
+    /// pane surface and receives input; the others run snapshot-only observers (see
+    /// `AppStore+Endpoints.swift`). The terminal client keeps the same catalog so a
+    /// machine's workspace list stays visible, dimmed, while it reconnects.
+    public internal(set) var endpoints: [EndpointState] = []
+    /// The entry `target` currently points at.
+    public internal(set) var activeEndpointID: EndpointID?
+    /// `worktree.key` values whose child rows are folded shut, per endpoint.
+    public var collapsedWorktreeGroups: [EndpointID: Set<String>] = [:]
+    /// Machines whose row group is collapsed, hiding their workspaces.
+    public var collapsedEndpoints: Set<EndpointID> = []
+
+    /// Loads the saved-machine list that populates `endpoints`.
+    @ObservationIgnored
+    public let endpointCatalog: EndpointCatalogLoader
+
     /// Called whenever the set of live panes changes, so the renderer pool can
     /// release surfaces for panes that no longer exist.
     @ObservationIgnored
@@ -95,6 +113,20 @@ public final class AppStore {
 
     public init(target: ConnectionSettings = .local) {
         self.target = target
+        self.endpointCatalog = EndpointCatalogLoader(
+            local: LocalMachineDescriptor.resolve(settings: target)
+        )
+    }
+
+    /// Rebuilds the machine catalog from the saved-profile list.
+    ///
+    /// Called at launch and after the machines dialog writes a profile, so the
+    /// sidebar's machine rows and the dialog never disagree about which machines
+    /// exist.
+    public func loadEndpoints() async {
+        let roster = await endpointCatalog.reload()
+        rebuildEndpoints(roster: roster)
+        refreshObservers()
     }
 
     // MARK: - Derived state
