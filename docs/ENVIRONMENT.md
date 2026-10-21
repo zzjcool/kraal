@@ -165,7 +165,72 @@ Ghostty Metal 画的，AX 树几乎为空。
 独立的桌面，但虚拟 GPU 下 `NSVisualEffectView` 的 `.behindWindow` 材质与真机
 不一致。功能回归可以在 VM 里跑，**透明/模糊的视觉定稿必须在真机上做**。
 
-### 4.4 网络
+### 4.4 多机行为要在双 daemon 上验
+
+单机沙箱验不了跨机器行为，而跨机器**不是**边角情况——它是这套代码最容易错的一条
+前提。官方把话说明白了：
+
+> Workspace, tab, pane IDs, and agent names are scoped to one server.
+> **Two machines may both contain `w1:p1`**
+> —— `docs/next/website/src/content/docs/connecting-machines.mdx:118`
+
+也就是说 pane id 只在单台 daemon 内唯一。凡是按 `paneId` 建索引的地方——终端池、
+SwiftUI 的 `ForEach` 身份、复用判断——都可能把两台机器当成同一台。而两台机器的
+**几何完全相同**（第一个 workspace 的第一个 pane 都是 `w1:p1`、同样的分屏比例、
+同样的 innerRect），所以任何"数字没变就别重画"的判断在这条路径上必然失效。
+
+同一台机器内切 workspace 验不出这些：paneId 前缀不同，集合比较能兜住。必须有两个
+真正的 daemon。做法是在沙箱里再起一个独立 session：
+
+```bash
+# 1. 容器里起第二个 daemon（需要伪终端，stty 显式给尺寸）
+ssh devcloud 'docker exec kraal-zzj-sandbox bash -lc "
+  nohup script -qec \"stty rows 40 cols 120; herdr --session kraal-b\" /dev/null \
+    > /root/b.log 2>&1 &"'
+sleep 12
+ssh devcloud 'docker exec kraal-zzj-sandbox herdr session list'   # 应看到 kraal-b running
+```
+
+它的 socket 在容器内 `/root/.config/herdr/sessions/kraal-b/herdr-client.sock`，宿主机
+看不见。两条路把它接到本机：
+
+- **只想用 CLI 查**：容器里没 socat/nc/包管理器，可用 `python3` 写个 TCP→unix socket
+  转发，再 `ssh -L` 接到那个端口；
+- **想让 Kraal 自己连（GUI 验证）**：app 的 SSH transport 执行的是
+  `herdr --session <name> remote-client-bridge`，所以 daemon 必须在**宿主机**上可达。
+  `docker cp` 出一个同版本二进制到宿主机再起 session 即可。
+
+然后在 Kraal 侧注册成一台"机器"：
+
+```bash
+herdr machine add devcloud --label AAA-sandbox-b --remote-session kraal-b
+herdr machine list                                    # 确认 remote session 是 kraal-b
+```
+
+验完**必须清理**，否则会污染你自己和别人的机器列表：
+
+```bash
+herdr machine remove <profile-id>
+ssh devcloud 'herdr session stop kraal-b && rm -f /tmp/herdr-095'
+```
+
+判断两台是不是真的不同，看 `bootId`——daemon 启动时打上，两台永不撞：
+
+```bash
+kraal --socket /tmp/kraal-mine/herdr-client.sock | grep ^boot
+kraal --socket /tmp/kraal-b/herdr-client.sock    | grep ^boot
+```
+
+想确认没串台，给两边同名 pane 写**不同内容**再来回切：
+
+```bash
+kraal --socket <A> send-text --pane w1:p1 --text "clear; echo MACHINE_A"
+kraal --socket <B> send-text --pane w1:p1 --text "clear; echo MACHINE_B"
+```
+
+切换后若屏上是另一台的字，就是串台；若是自己的字，状态隔离正确。
+
+### 4.5 网络
 
 - GitHub HTTPS / SSH 均通，release 资产下载实测 ~8.7 MB/s
 - 无系统代理；`swcdn.apple.com` 可达
