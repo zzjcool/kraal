@@ -121,6 +121,71 @@ debug 包里的 `Kraal.app` 由 `Scripts/build-app.sh` 自动带上这个变量�
 这个默认值必须是**只为此目的存在**的路径。写错或写旧的路径比不写更危险：
 它会静默解析到该路径上碰巧在监听的 daemon，而不是报错。
 
+### 多机行为要在双 daemon 上验
+
+单机沙箱验不了跨机器行为，而跨机器**不是**边角情况——它是这套代码最容易错的一条
+前提。官方把话说明白了：
+
+> Workspace, tab, pane IDs, and agent names are scoped to one server.
+> **Two machines may both contain `w1:p1`**
+> —— `docs/next/website/src/content/docs/connecting-machines.mdx:118`
+
+也就是说 pane id 只在单台 daemon 内唯一。凡是按 `paneId` 建索引的地方——终端池、
+SwiftUI 的 `ForEach` 身份、复用判断——都可能把两台机器当成同一台。而两台机器的
+**几何完全相同**（第一个 workspace 的第一个 pane 都是 `w1:p1`、同样的分屏比例、
+同样的 innerRect），所以任何"数字没变就别重画"的判断在这条路径上必然失效。
+
+同一台机器内切 workspace 验不出这些：paneId 前缀不同，集合比较能兜住。必须有两个
+真正的 daemon。做法是在沙箱里再起一个独立 session：
+
+```bash
+# 1. 容器里起第二个 daemon（需要伪终端，stty 显式给尺寸）
+ssh devcloud 'docker exec kraal-zzj-sandbox bash -lc "
+  nohup script -qec \"stty rows 40 cols 120; herdr --session kraal-b\" /dev/null \
+    > /root/b.log 2>&1 &"'
+sleep 12
+ssh devcloud 'docker exec kraal-zzj-sandbox herdr session list'   # 应看到 kraal-b running
+```
+
+它的 socket 在容器内 `/root/.config/herdr/sessions/kraal-b/herdr-client.sock`，宿主机
+看不见。两条路把它接到本机：
+
+- **只想用 CLI 查**：容器里没 socat/nc/包管理器，可用 `python3` 写个 TCP→unix socket
+  转发，再 `ssh -L` 接到那个端口；
+- **想让 Kraal 自己连（GUI 验证）**：app 的 SSH transport 执行的是
+  `herdr --session <name> remote-client-bridge`，所以 daemon 必须在**宿主机**上可达。
+  `docker cp` 出一个同版本二进制到宿主机再起 session 即可。
+
+然后在 Kraal 侧注册成一台"机器"：
+
+```bash
+herdr machine add devcloud --label AAA-sandbox-b --remote-session kraal-b
+herdr machine list                                    # 确认 remote session 是 kraal-b
+```
+
+验完**必须清理**，否则会污染你自己和别人的机器列表：
+
+```bash
+herdr machine remove <profile-id>
+ssh devcloud 'herdr session stop kraal-b && rm -f /tmp/herdr-095'
+```
+
+判断两台是不是真的不同，看 `bootId`——daemon 启动时打上，两台永不撞：
+
+```bash
+kraal --socket /tmp/kraal-mine/herdr-client.sock | grep ^boot
+kraal --socket /tmp/kraal-b/herdr-client.sock    | grep ^boot
+```
+
+想确认没串台，给两边同名 pane 写**不同内容**再来回切：
+
+```bash
+kraal --socket <A> send-text --pane w1:p1 --text "clear; echo MACHINE_A"
+kraal --socket <B> send-text --pane w1:p1 --text "clear; echo MACHINE_B"
+```
+
+切换后若屏上是另一台的字，就是串台；若是自己的字，状态隔离正确。
+
 ### 桌面侧隔离（多人 / 多 agent 同机）
 
 daemon 隔离了，桌面还没隔离：第二个 `Kraal.app` 启动时会
@@ -158,6 +223,16 @@ screencapture -x -o -l "$WINDOW_NUMBER" out.png   # 只截该窗口，压在你�
 这样 agent 可以自证渲染结果，不需要把窗口提到前面，也不需要 Accessibility
 （Ghostty 由 Metal 绘制，AX 树几乎是空的）。
 
+要**点**某个控件时，别拿截图目测换坐标——先把它提到前台，再按布局数值算：
+
+```bash
+osascript -e 'tell application "System Events" to tell process "KraalMac-bin" to set frontmost to true'
+```
+
+不激活就点，事件会落到别的窗口上，表现是"点了没反应"，很容易误判成命中区域
+有问题。反过来，如果在**已激活**的窗口上仍点不中，那多半真的是布局错了，去查
+`.frame` / `.padding` / `contentShape` 的实际数值，而不是继续微调坐标。
+
 ---
 
 ## 仓库结构
@@ -186,7 +261,7 @@ Fixtures 在 Tests/KraalProtocolTests/Fixtures/
 ## 验证
 
 ```bash
-swift test      # 132 个测试
+swift test      # 143 个测试
 ```
 
 真正重要的是这几条：
@@ -198,6 +273,26 @@ swift test      # 132 个测试
   且拒绝后帧内容不变。
 - **输入解码**：控制字符、CSI/SS3 方向键、xterm 修饰符、跨包拆分的 UTF-8 与
   转义序列、单个 Esc、坏字节不卡死。
+
+### 验证一条修复时，先保证样本能暴露问题
+
+这几条是从实际返工里攒出来的，每条都对应一次白跑的排查：
+
+- **样本本身要是"正确"和"错误"能区分开的东西。** 曾用一个只有 `#` 提示符的空
+  shell 排查「终端只渲染第一行」，屏幕上那个 `#` 看着像"只画了一行"，其实那个
+  pane 本来就只有 `#`——图像完全正确。换成有内容的 pane 才看清真正的现象是整片
+  空白。**样本没内容时，空白和正确长得一模一样。**
+- **A/B 回退能不能复现，比修完看起来对更重要。** 修完截图正常只说明"现在没坏"，
+  把改动回退掉还能复现原症状，才说明修的是那个原因。三次渲染问题的结论都是靠回退
+  对照确认的。
+- **探针要测对对象。** 曾把 `.position` 之后 `.background` 里的测量视图当成终端视图
+  来读 frame，得出"NSView 被撑满父容器"的错误结论——那个视图本来就设计成占满容器
+  （源码注释写明了）。换一个 scout 用 `swift -` 从 stdin 编译最小复现才纠正过来。
+- **删除临时探针不要用跨行正则。** 一次 `re.sub` 清 `PROBERESET` 块时连带吃掉了
+  `apply` 后半段的 grid 校验与 `reportCellMetrics`（文件从 497 行掉到 460 行），
+  是 `git diff` 时发现的。删除要精确匹配，改完必须 `git diff` 看一眼行数。
+- **临时改动是一个完整动作：加探针 → 验证 → 还原 → 干净重启 → 再确认一次。**
+  只做前两步会在下一次启动时带着残留的环境变量或代码跑，看起来像"bug 没修好"。
 
 ---
 
