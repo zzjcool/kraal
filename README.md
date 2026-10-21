@@ -215,7 +215,7 @@ Fixtures 在 Tests/KraalProtocolTests/Fixtures/
 ## 验证
 
 ```bash
-swift test      # 143 个测试
+swift test      # 275 条：250 绿 + 25 条移植过来故意红的
 ```
 
 真正重要的是这几条：
@@ -227,12 +227,34 @@ swift test      # 143 个测试
   且拒绝后帧内容不变。
 - **输入解码**：控制字符、CSI/SS3 方向键、xterm 修饰符、跨包拆分的 UTF-8 与
   转义序列、单个 Esc、坏字节不卡死。
+- **上游兼容性**：21 个 client tag 逐条对齐、字段序用**手写字节表**（不是我们
+  自己的编码器）钉住、三份 herdr-gpui 冻结 fixture 能解码。
+
+### 已知红：从上游移植过来的差异
+
+参考的三个项目（herdr / herdr-gpui / rootshell）各自有一套成熟测试。适合我们的
+部分已移植，**当前有 25 条是红的**，每一条都指向一个具体差异（命名字色 SGR
+偏一档、resize 清 scrollback、半角假名声宽、OSC 8 缺失、`u8` 写成 varint、
+握手用 error 判新旧、快照 revision 回退、patch 行重叠、重连倒计时错位……）。
+
+已按缺陷拆成 9 个 issue，跟踪见 [#11](https://github.com/zzjcool/kraal/issues/11)；
+逐条出处与差异见 **[docs/PORTED-TESTS.md](docs/PORTED-TESTS.md)**。
+这一轮只移植测试、不修实现，红是预期的。因此验证走：
+
+```bash
+./Scripts/verify.sh                    # 除已知红外全绿（build + test + lint + app）
+./Scripts/test-baseline.sh --compare   # 哪些已知红已经修好了
+```
+
+`swift test` 直接跑会红，那是故意的；`verify.sh` 已改用 `test-baseline.sh`
+跳过这 25 条，所以真回归仍然会被拦住。
 
 ---
 
 ## 文档
 
 - **[实施路线](docs/ROADMAP.md)** —— 里程碑与工程约定（含已完成/待办对照）
+- **[移植的上游测试](docs/PORTED-TESTS.md)** —— 抄自哪里、为什么、哪 25 条现在红、对应哪个 issue
 - **[开发环境](docs/ENVIRONMENT.md)** —— 本机基线、依赖版本、签名与已知坑
 - **[排查方法](docs/DEBUGGING.md)** —— 怎么验证一件事是真的：样本、A/B 回退、探针纪律
 - **[技术设计文档](docs/DESIGN.md)** —— 完整设计：连接层、协议类型、渲染、侧边栏引擎
