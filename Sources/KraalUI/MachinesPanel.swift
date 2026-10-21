@@ -594,13 +594,31 @@ private struct MachineRow: View {
         .opacity(entry.enabled ? 1 : 0.65)
         .contentShape(Rectangle())
         .contextMenu {
-            if !entry.isLocal {
-                Button("Rename…", action: onRename)
-                Button(entry.enabled ? "Disable" : "Enable", action: onToggleEnabled)
-                Divider()
-                Button("Remove", role: .destructive, action: onRemove)
+            // Driven by `entry.menuActions`, which is tested to be non-empty for
+            // every row. A `.contextMenu` whose body renders nothing still installs
+            // a menu, and AppKit then opens an empty one — a right-click that looks
+            // like a broken menu. This Mac's row used to do exactly that.
+            ForEach(entry.menuActions, id: \.self) { action in
+                switch action {
+                case .copySocketPath:
+                    Button("Copy Socket Path") { copy(entry.targetDescription) }
+                case .copyLabel:
+                    Button("Copy Label") { copy(entry.displayLabel) }
+                case .rename:
+                    Button("Rename…", action: onRename)
+                case .toggleEnabled:
+                    Button(entry.enabled ? "Disable" : "Enable", action: onToggleEnabled)
+                case .remove:
+                    Divider()
+                    Button("Remove", role: .destructive, action: onRemove)
+                }
             }
         }
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 

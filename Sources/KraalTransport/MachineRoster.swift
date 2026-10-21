@@ -67,6 +67,37 @@ public enum MachineEntry: Identifiable, Hashable, Sendable {
         if case let .remote(machine) = self { return machine }
         return nil
     }
+
+    /// The actions a row's context menu offers.
+    ///
+    /// This is a type rather than a `View` for one reason: a `.contextMenu` whose
+    /// body renders nothing still installs a menu, and AppKit then opens an empty
+    /// one — a right-click that does nothing at all. That is indistinguishable
+    /// from "the menu is broken", and it is what this Mac's row used to do, because
+    /// its body was `if !isLocal { ... }` with nothing in the else branch. Naming
+    /// the actions makes "every row has at least one" checkable without a UI test.
+    public enum MenuAction: Hashable, Sendable {
+        /// Only this Mac: the roster cannot rename or remove the local daemon.
+        case copySocketPath
+        case copyLabel
+        /// Only a saved profile.
+        case rename
+        case toggleEnabled
+        case remove
+    }
+
+    /// What a right-click on this row should offer. Never empty.
+    public var menuActions: [MenuAction] {
+        switch self {
+        case .local:
+            // No `herdr machine` command can edit the local daemon, so the row
+            // offers identity instead of write controls. Two items, and neither
+            // is destructive.
+            return [.copySocketPath, .copyLabel]
+        case .remote:
+            return [.rename, .toggleEnabled, .remove]
+        }
+    }
 }
 
 /// How this Mac is presented and reached.

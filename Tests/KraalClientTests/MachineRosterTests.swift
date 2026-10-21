@@ -149,6 +149,51 @@ struct MachineRosterTests {
         #expect(MachineRoster.sidebarMachineName(settings: unnamed) == "local")
         #expect(MachineRoster.sidebarMachineName(settings: unnamed, fallback: "?") == "?")
     }
+    /// The reported bug: right-clicking a row in the Machines list did nothing.
+    ///
+    /// The cause was not a missing `.contextMenu` — the modifier was always there.
+    /// Its body was `if !isLocal { ... }`, so this Mac's row produced an empty menu
+    /// body, and SwiftUI still installs a menu for that. AppKit then opens a menu
+    /// with no items, which reads exactly like "the menu never appears".
+    ///
+    /// These tests pin the property that was violated: every row offers at least
+    /// one action. They cannot watch AppKit open a menu, but they can make the empty
+    /// case unreachable again.
+    @Test("no row ever has an empty context menu")
+    func everyRowHasMenuActions() {
+        let local = MachineEntry.local(LocalMachineDescriptor(
+            label: "This Mac",
+            socketPath: "/tmp/herdr-client.sock"
+        ))
+        let remote = MachineEntry.remote(profile())
+
+        #expect(!local.menuActions.isEmpty)
+        #expect(!remote.menuActions.isEmpty)
+    }
+
+    @Test("this Mac offers identity, not write actions it cannot perform")
+    func localRowOffersOnlyCopy() {
+        let local = MachineEntry.local(LocalMachineDescriptor(
+            label: "This Mac",
+            socketPath: "/tmp/herdr-client.sock"
+        ))
+
+        // There is no `herdr machine` command that renames, disables or removes the
+        // local daemon, so offering those would be a menu of failures.
+        #expect(local.menuActions == [.copySocketPath, .copyLabel])
+        #expect(!local.menuActions.contains(.remove))
+        #expect(!local.menuActions.contains(.rename))
+        #expect(!local.menuActions.contains(.toggleEnabled))
+    }
+
+    @Test("a saved profile keeps the actions it can actually perform")
+    func remoteRowOffersWriteActions() {
+        let remote = MachineEntry.remote(profile())
+
+        #expect(remote.menuActions == [.rename, .toggleEnabled, .remove])
+        // Copying the socket path is meaningless for an SSH profile.
+        #expect(!remote.menuActions.contains(.copySocketPath))
+    }
 }
 
 @Suite("Machines store roster")
