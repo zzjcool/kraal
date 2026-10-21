@@ -161,7 +161,7 @@ KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=wS:p5 \
 6. **自动化点击先激活窗口**，再谈坐标。
 7. **没证据就说"没验证"**，不要用"逻辑上应该对"代替。
 
-### 针对本仓库的两条具体经验
+### 两条本仓库具体的经验
 
 **带内报错。** endpoint 协议把拒绝写在响应体里
 （`{"error":{"code":"endpoint_busy",...}}`），帧是完整的、JSON 合法、socket
@@ -172,6 +172,30 @@ KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=wS:p5 \
 **一条连接一个命令。** 同一 tick 发两个请求，后一个会被 `endpoint_busy`
 拒绝。所以 focus 和它要影响的动作**不能并发**（`MacMenuBar.dispatch` 把
 focus 放在 `perform` 之后）。新增命令时注意这一点。
+
+**`No such module 'KraalTerminalView'` 是 IDE 误报，不是编译错误。** pi-lens 的
+SourceKit-LSP 会报这个，但 `swift build` 零错误、`swift test` 全绿。
+
+根因是两套工具链的 `.swiftmodule` 布局不同：
+
+| 工具链 | 产物 | 形态 |
+| --- | --- | --- |
+| CLT | `.build/arm64-apple-macosx/debug/Modules/X.swiftmodule` | **单个文件** |
+| Xcode | `.build/out/Products/Debug/X.swiftmodule/` | **目录**（内含 `arm64-apple-macos.swiftmodule`） |
+
+`.build/debug` 是一个符号链接，指向哪一套取决于最后一次构建用的是哪个工具链。
+SourceKit-LSP 跟随这个链接，遇到跨工具链的布局就会解析不到跨 target 的模块——
+`KraalTerminalView` 恰好是最深的一环（它还依赖二进制 target `GhosttyTerminal`）。
+
+**判断它是否真错误**，看这三点就够：
+
+```bash
+swift build 2>&1 | tail -2                              # Build complete!
+swift package describe --type json | grep -A2 KraalMac   # 依赖图包含它
+ls .build/out/Products/Debug/KraalTerminalView.swiftmodule  # 产物存在
+```
+
+三条都对就是误报，**不要花时间“修”它**。判断完直接在回复里说明即可。
 
 ---
 

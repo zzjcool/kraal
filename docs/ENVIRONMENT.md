@@ -269,25 +269,46 @@ kraal --socket <B> send-text --pane w1:p1 --text "clear; echo MACHINE_B"
 - 远端 herdr 通过 `ssh -o BatchMode=yes` 免交互认证
 - 本机 `nj-rssyes` 是 **Debian Linux**（非 macOS），不能跑 macOS GUI 隔离
 
-### 4.6 Tart VM（`tahoe-base`）作为验证环境
+### 4.6 Tart VM（`kraal-agent`）作为验证环境
 
 宿主机上有一个常驻的 Tart VM，验证优先级高于直接动宿主机：真正 macOS 语义
 （TCC、签名、Spotlight、`darwin` 行为）在宿主机上改东西代价大，在 VM 里毁掉重来
 很便宜。
 
 ```bash
-tart list                      # 确认 tahoe-base 是 running
-tart ip tahoe-base             # 例如 192.168.64.4
-tart exec tahoe-base uname -a  # 不要写 `--`，会 exit 125
+./Scripts/agent-vm.sh status   # 起停 / IP / SSH / herdr / pi 一屏看完
+./Scripts/agent-vm.sh start    # 无窗口启动，拉起 herdr daemon，等 SSH 就绪
+./Scripts/agent-vm.sh probe    # 用 Kraal 走 SSH 连进 VM 的 herdr daemon
+./Scripts/agent-vm.sh sh       # 进 VM
+./Scripts/agent-vm.sh exec …   # 在 VM 里跑一条命令
+./Scripts/agent-vm.sh stop     # 停（不删）
+```
+
+裸 `tart` 命令仍可用：
+
+```bash
+tart list                      # 确认 kraal-agent 是 running
+tart ip kraal-agent            # 例如 192.168.64.2
+tart exec kraal-agent uname -a # 不要写 `--`，会 exit 125
 ```
 
 VM 没起来时无头启动（不抢焦点，和在跑的桌面并存）：
 
 ```bash
-tart run --no-graphics tahoe-base
+tart run --no-graphics kraal-agent
 ```
 
-**限制（2026-10 实测，本机 Tart 2.41.1 / macOS 26.6.2 build 25G83）**
+#### 配置（2026-10 实测，Tart 2.32.1 / macOS 26.6.2 build 25G83）
+
+| 项 | 值 |
+| --- | --- |
+| CPU / 内存 / 磁盘 / 显示 | 6 vCPU / 12 GB / 80 GB / 1920×1200 |
+| 用户 | `admin`（密码 `admin`），免密 sudo |
+| herdr | 0.9.5，`~/.local/bin/herdr`；daemon 由 `start` 拉起，**不是** login item |
+| pi | 1.3.0，`/opt/homebrew/bin/pi`，带完整配置与 SOP 库 |
+| node | v24.22.0（镜像自带 `node@24`） |
+
+#### 限制（实测）
 
 | 项 | 实际情况 | 影响 |
 | --- | --- | --- |
@@ -295,13 +316,21 @@ tart run --no-graphics tahoe-base
 | Swift | 有。`/usr/bin/swift`，Swift 6.4，target `arm64-apple-macosx26.0` | 纯 SwiftPM 验证可行 |
 | 共享目录 | **没有**。`/Volumes` 只有 `Macintosh HD`，无 VirtioFS | 宿主机↔guest 传文件只能靠 `tart exec` 的 stdio 管道或走网络 |
 | Automation Mode | **关着**。有 `TCC.db` 但没有自动化/辅助功能授权 | 需要 UI 自动化的验证（点按、截图驱动）在 guest 里做不了 |
-| 常用命令 | 缺 `mount`、部分 `system_profiler` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf` |
+| 常用命令 | 缺 `mount`、部分 `system_profiler`、`timeout` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf`；等超时自己写循环 |
+| 网络 | 出网正常但慢；拉 OCI 镜像直连 GHCR 只有 ~116 KB/s | 拉镜像走 `ghcr.nju.edu.cn` 镜像源（实测 ~19 MB/s） |
 
 **不要拉 `macos-tahoe-xcode` 大镜像**，除非明确需要 Xcode 且用户同意——它几十 GB，
 而这里的绝大多数验证（SwiftPM 构建、纯逻辑、协议）用不上 Xcode。
 
 因此分工是：**逻辑与测试放 VM**（`swift test` 全绿），**app 打包与 GUI/点击类验证
 仍留在宿主机**（要 `xcodebuild` 和 Automation Mode）。
+
+传文件用 `tart exec -i` 的 stdio 管道，比 scp 稳妥（guest 的 sshd 要单独开，
+而 guest agent 一直可用）：
+
+```bash
+tar -czf - ~/.pi/agent/skills | tart exec -i kraal-agent /bin/bash -c 'tar -xzf - -C ~/.pi/agent'
+```
 
 ---
 
@@ -325,4 +354,85 @@ resize，不是渲染器的问题。这正是待验证项 #2 的入口，做 M4 
 - Xcode 27 的 iOS 26+ SDK 是否改变了 `UITerminalView` 的键盘/安全区行为
 - macOS 27 上 Ghostty Metal surface 在 `NSHostingView` 中的 resize 时序
 - 模拟器 runtime 18.6 与本项目 UI 的手势/键盘适配细节
+
+---
+
+## 7. 重建 `kraal-agent` 虚拟机
+
+`./Scripts/agent-vm.sh destroy` 之后按这里重建。整个过程约 10 分钟，绝大多数时间
+花在拉基础镜像上。
+
+### 7.1 拉基础镜像
+
+```bash
+brew install --cask zheng/local/tart          # 若尚未安装（当前 2.32.1）
+
+tart clone ghcr.nju.edu.cn/cirruslabs/macos-tahoe-base:latest kraal-agent
+```
+
+**走 `ghcr.nju.edu.cn` 镜像源**。直连 GHCR 实测只有 ~116 KB/s，80 GB 的镜像要拉
+一个多小时；换镜像源后 ~19 MB/s。`tart list` 里能看到本地已缓存的那份 OCI 镜像，
+可以直接 `tart clone` 它而不重新下载。
+
+### 7.2 配置资源
+
+```bash
+tart set kraal-agent --cpu 6 --memory 12288 --disk-size 80
+tart set kraal-agent --display 1920x1200
+```
+
+### 7.3 起 VM 并初始化
+
+```bash
+./Scripts/agent-vm.sh start     # 无窗口启动，等 guest agent 与 SSH 就绪
+./Scripts/agent-vm.sh sh        # 进 VM（用户 admin，密码 admin，免密 sudo）
+```
+
+guest 里要装的：
+
+```bash
+# Homebrew（镜像自带，确认在 PATH）
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+# herdr
+curl -fsSL https://herdr.dev/install.sh | sh     # 装到 ~/.local/bin/herdr
+
+# node（镜像自带 node@24：/opt/homebrew/opt/node@24/bin）
+# pi
+npm install -g @earendil-works/pi-coding-agent
+```
+
+**daemon 不是 login item**，镜像里没有对应配置，由 `agent-vm.sh start` 显式拉起。
+不要指望重启后自动恢复。
+
+### 7.4 同步 pi 配置
+
+guest 没挂共享目录（见 §4.6 限制表），传文件用 `tart exec -i` 的 stdio 管道：
+
+```bash
+tar -czf - ~/.pi/agent/skills | tart exec -i kraal-agent /bin/bash -c 'mkdir -p ~/.pi/agent && tar -xzf - -C ~/.pi/agent'
+```
+
+跨机器同步的完整注意事项（绝对路径、原生二进制、平台差异）见
+`sop:sync-pi-config-to-remote-machine`。
+
+### 7.5 验收
+
+```bash
+./Scripts/agent-vm.sh status    # vm/ip/ssh/herdr/daemon/pi/node 全绿
+./Scripts/agent-vm.sh probe     # Kraal 走 SSH 连进 VM 的 daemon，打印快照
+```
+
+`probe` 能打印出 workspace / pane / surface，就说明整条链路（SSH 传输、
+`remote-client-bridge`、endpoint 握手）在 VM 里也成立。
+
+### 7.6 guest 里能做什么、不能做什么
+
+| 能 | 不能 |
+| --- | --- |
+| `swift build` / `swift test`（Swift 6.4 自带） | `xcodebuild`、出 `.app` 包（没有 Xcode） |
+| 跑 herdr daemon 并作为多机验证的一端 | UI 自动化：Automation Mode 关着，无辅助功能授权 |
+| 改坏后 `destroy` 重来 | 透明/模糊材质的视觉定稿（虚拟 GPU 与真机不一致，见 §4.3） |
+
+所以分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
 

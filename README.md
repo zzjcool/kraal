@@ -85,8 +85,23 @@ swift build --product kraal
 
 ### 在隔离的 Herdr 实例上开发
 
-开发和自测**必须**在一次性容器里做，不要连任何正在使用的 daemon。GUI 调试会
+开发和自测**必须**在一次性环境里做，不要连任何正在使用的 daemon。GUI 调试会
 分屏、打字、关 pane、改布局，这些落在真实会话里就是破坏。
+
+**macOS 上首选 Tart 虚拟机**（本机现有 `kraal-agent`，脚本已封装）：
+
+```bash
+./Scripts/agent-vm.sh start    # 起 VM + 拉起 herdr daemon（~27 s）
+./Scripts/agent-vm.sh probe    # Kraal 走 SSH 连进去，看 daemon / pane / surface
+./Scripts/agent-vm.sh sh       # 进 VM
+./Scripts/agent-vm.sh stop     # 停（不删，下次 start 还是热的）
+```
+
+为什么不用容器：Kraal 是 macOS/iOS 客户端，macOS 上容器里跑不了 macOS，而
+要验的恰恰是 macOS 语义。VM 里没挂共享目录，改坏了 `destroy` 重新 clone 即可，
+代价几分钟。配置与限制见 [ENVIRONMENT.md §4.6](docs/ENVIRONMENT.md)。
+
+容器路线（远端 Linux，适合验跨机/无 macOS 语义的部分）：
 
 ```bash
 # 1. 起一个专属容器，配置目录用一次性路径
