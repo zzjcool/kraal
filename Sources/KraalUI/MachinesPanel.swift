@@ -37,6 +37,10 @@ public final class MachinesStore {
     /// How this Mac is labelled and reached. Held here so the roster always has
     /// a local row even when the CLI is missing or the remote list fails.
     private let local: LocalMachineDescriptor
+    /// Fired after a write lands. The store owns no connection and cannot refresh
+    /// the sidebar itself; this is the only signal that the saved profiles on
+    /// disk, and therefore the sidebar's machine list, just changed.
+    public var onProfilesChanged: (() -> Void)?
 
     public init(
         client: HerdrMachineClient? = HerdrMachineClient.discover(),
@@ -166,6 +170,9 @@ public final class MachinesStore {
                 try await Task.detached(priority: .userInitiated) { try work() }.value
                 self.isBusy = false
                 self.reload()
+                // After the reload, so a listener that re-reads the catalog sees
+                // the same list this panel is about to draw.
+                self.onProfilesChanged?()
                 done?(true)
             } catch {
                 self.error = String(describing: error)
@@ -187,32 +194,51 @@ public struct MachinesPanel: View {
     @State private var confirmingDisable: HerdrMachine?
 
     private let onClose: () -> Void
+    /// Called after any write (add / rename / enable / disable / remove) lands.
+    /// The panel talks to the herdr CLI directly and owns no connection, so it
+    /// cannot refresh the sidebar by itself — without this the sidebar kept
+    /// showing the pre-edit roster until the next launch.
+    private let onProfilesChanged: () -> Void
+    /// Whether this panel is a pane of something larger (the settings window)
+    /// rather than a sheet of its own. Embedded, it gives up the fixed frame, the
+    /// sheet material and the Done button — all three belong to the host.
+    private let embedded: Bool
 
     /// `target` is the connection the app is actually on, so the local row shows
     /// the same name the sidebar does. Defaulting to `.local` here instead would
     /// label a sandbox connection "This Mac" while the sidebar called it
     /// "sandbox" — one machine, two names, which is how this panel drifted from
     /// the sidebar in the first place.
-    public init(target: ConnectionSettings = .local, onClose: @escaping () -> Void) {
+    public init(
+        target: ConnectionSettings = .local,
+        embedded: Bool = false,
+        onClose: @escaping () -> Void,
+        onProfilesChanged: @escaping () -> Void = {}
+    ) {
         self.onClose = onClose
-        _store = State(initialValue: MachinesStore(
-            local: LocalMachineDescriptor.resolve(settings: target)
-        ))
+        self.onProfilesChanged = onProfilesChanged
+        self.embedded = embedded
+        let store = MachinesStore(local: LocalMachineDescriptor.resolve(settings: target))
+        store.onProfilesChanged = onProfilesChanged
+        _store = State(initialValue: store)
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
+            // Embedded, the tab bar is the header: the row below would be a strip
+            // of empty space holding two buttons that sit better in the footer.
+            if !embedded {
+                header
+                Divider()
+            }
             content
             Divider()
             footer
         }
-        .frame(width: 640, height: 460)
-        // Sheets in this app are hosted in their own `NSWindow`, so a
-        // behind-window material here samples the desktop rather than the main
-        // window — which is what makes the panel read as a floating pane of glass.
-        .glassChrome(.sheet, rim: false)
+        // Embedded, the host supplies the frame; standalone, this is the sheet's
+        // own size. `if` rather than a zero-or-size frame: an embedded panel that
+        // still demanded 640x460 would fight whatever the settings window picks.
+        .modifier(PanelChrome(embedded: embedded))
         .onAppear {
             store.reload()
             runDemoIfRequested()
@@ -317,10 +343,16 @@ public struct MachinesPanel: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "server.rack")
-                .foregroundStyle(.secondary)
-            Text("Machines")
-                .font(.headline)
+            // Embedded, the settings tab bar already names this pane: repeating
+            // the title here stacks two "Machines" labels a few points apart. The
+            // action buttons stay either way — they are the reason this row
+            // exists at all.
+            if !embedded {
+                Image(systemName: "server.rack")
+                    .foregroundStyle(.secondary)
+                Text("Machines")
+                    .font(.headline)
+            }
             if store.isBusy {
                 ProgressView().controlSize(.small)
             }
@@ -343,7 +375,10 @@ public struct MachinesPanel: View {
             .keyboardShortcut("n", modifiers: .command)
         }
         .padding(.horizontal, KraalTheme.Space.roomy)
-        .padding(.vertical, KraalTheme.Space.base)
+        // Embedded, this row holds only buttons; it does not need the breathing
+        // room a titled header does, and the tab bar above already separates it
+        // from the window chrome.
+        .padding(.vertical, embedded ? KraalTheme.Space.snug : KraalTheme.Space.base)
     }
 
     @ViewBuilder
@@ -430,15 +465,40 @@ public struct MachinesPanel: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 10) {
             // Counts the whole roster, not just the saved profiles: "1 saved"
             // next to a visible this-Mac row would read as a contradiction.
             Text(store.footerSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("Done", action: onClose)
-                .keyboardShortcut(.defaultAction)
+            // Embedded, the header is gone (the tab bar replaces it), so the two
+            // actions it held live here instead. Refreshing and adding are still
+            // reachable; they just no longer cost a whole strip at the top.
+            if embedded {
+                Button {
+                    store.reload()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Reload from herdr")
+                .disabled(store.isLoading || !store.available)
+
+                Button {
+                    showingAdd = true
+                } label: {
+                    Label("Add Machine", systemImage: "plus")
+                }
+                .disabled(!store.available || store.isBusy)
+                .keyboardShortcut("n", modifiers: .command)
+            } else {
+                // No Done button when embedded: the settings window is closed the
+                // way every other window is. Keeping it would also claim Return as
+                // a window-closing chord, which is wrong inside a tab.
+                Button("Done", action: onClose)
+                    .keyboardShortcut(.defaultAction)
+            }
         }
         .padding(.horizontal, KraalTheme.Space.roomy)
         .padding(.vertical, KraalTheme.Space.base)
@@ -655,6 +715,33 @@ private struct RenameMachineSheet: View {
             } else {
                 failure = store.error
             }
+        }
+    }
+}
+
+// MARK: - Chrome
+
+/// The frame and material the machines list gets from its host.
+///
+/// Split out because the two hosts want opposite things: a sheet owns its own
+/// glass and a fixed size, while a settings tab must fill whatever space the
+/// window gives it and must not paint a second behind-window material inside an
+/// already-material-backed window (that would sample the desktop twice and read
+/// as a grey rectangle).
+private struct PanelChrome: ViewModifier {
+    let embedded: Bool
+
+    func body(content: Content) -> some View {
+        if embedded {
+            content.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            content
+                .frame(width: 640, height: 460)
+                // Sheets in this app are hosted in their own `NSWindow`, so a
+                // behind-window material here samples the desktop rather than the
+                // main window — which is what makes the panel read as a floating
+                // pane of glass.
+                .glassChrome(.sheet, rim: false)
         }
     }
 }

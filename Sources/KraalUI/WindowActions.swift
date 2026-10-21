@@ -25,7 +25,10 @@ public final class WindowActions {
     public private(set) var statusBarToggleCount = 0
     public private(set) var commandPaletteCount = 0
     public private(set) var shortcutsCount = 0
-    public private(set) var machinesCount = 0
+    /// Settings replaced the old standalone Machines dialog: machines are a tab
+    /// inside it now, so the window asks for settings and the window picks which
+    /// tab to show.
+    public private(set) var settingsCount = 0
     public private(set) var debugInfoCount = 0
 
     public init() {}
@@ -34,6 +37,6 @@ public final class WindowActions {
     public func toggleStatusBar() { statusBarToggleCount += 1 }
     public func showCommandPalette() { commandPaletteCount += 1 }
     public func showShortcuts() { shortcutsCount += 1 }
-    public func showMachines() { machinesCount += 1 }
+    public func showSettings() { settingsCount += 1 }
     public func showDebugInfo() { debugInfoCount += 1 }
 }

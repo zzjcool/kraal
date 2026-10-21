@@ -101,7 +101,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
     case toggleStatusBar = "toggle_status_bar"
     case commandPalette = "command_palette"
     case reloadConfig = "reload_config"
-    case machines = "machines"
+    case settings = "settings"
     case keyboardShortcuts = "keybindings"
     case reconnect = "reconnect"
 
@@ -144,7 +144,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
         case .toggleStatusBar: return "Toggle Status Bar"
         case .commandPalette: return "Command Palette"
         case .reloadConfig: return "Reload Config"
-        case .machines: return "Machines…"
+        case .settings: return "Settings…"
         case .keyboardShortcuts: return "Keyboard Shortcuts"
         case .reconnect: return "Reconnect"
         case .focusWorkspace1, .focusWorkspace2, .focusWorkspace3,
@@ -246,9 +246,10 @@ public struct CommandEnvironment {
     public var toggleStatusBar: () -> Void
     public var showCommands: () -> Void
     public var showShortcuts: () -> Void
-    /// Opens the machine-management panel. Machines live in the CLI config, not
-    /// in the daemon snapshot, so they get their own panel.
-    public var showMachines: () -> Void
+    /// Opens the settings window. Machine management lives in it as a tab:
+    /// machines are configuration, and a File-menu dialog put them next to the
+    /// everyday workspace actions.
+    public var showSettings: () -> Void
 
     public init(
         prompt: @escaping (CommandPrompt) -> Void = { _ in },
@@ -256,14 +257,14 @@ public struct CommandEnvironment {
         toggleStatusBar: @escaping () -> Void = {},
         showCommands: @escaping () -> Void = {},
         showShortcuts: @escaping () -> Void = {},
-        showMachines: @escaping () -> Void = {}
+        showSettings: @escaping () -> Void = {}
     ) {
         self.prompt = prompt
         self.toggleSidebar = toggleSidebar
         self.toggleStatusBar = toggleStatusBar
         self.showCommands = showCommands
         self.showShortcuts = showShortcuts
-        self.showMachines = showMachines
+        self.showSettings = showSettings
     }
 }
 
@@ -297,7 +298,7 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
         performPaneAction(command, on: store)
 
     case .toggleSidebar, .toggleStatusBar, .commandPalette,
-         .reloadConfig, .keyboardShortcuts, .reconnect, .machines:
+         .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
         performViewAction(command, on: store, env: env)
     }
 }
@@ -389,7 +390,7 @@ private func performViewAction(
     case .commandPalette: env.showCommands()
     case .reloadConfig: store.reloadServerConfig()
     case .keyboardShortcuts: env.showShortcuts()
-    case .machines: env.showMachines()
+    case .settings: env.showSettings()
     case .reconnect: store.connect()
     default: break
     }

@@ -33,7 +33,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         var toggleStatusBar: () -> Void = {}
         var showCommands: () -> Void = {}
         var showShortcuts: () -> Void = {}
-        var showMachines: () -> Void = {}
+        var showSettings: () -> Void = {}
         var showDebugInfo: () -> Void = {}
     }
 
@@ -73,6 +73,12 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
             keyEquivalent: ""
         )
         menu.addItem(.separator())
+        // Settings sits in the app menu with ⌘, because that is where macOS users
+        // look for it and what their fingers already press. Machines moved into
+        // it as a tab: they were under File, wedged between Rename and Close,
+        // which read as a document action rather than configuration.
+        menu.addItem(command: .settings, target: self)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Command Palette", action: #selector(showCommandPalette), keyEquivalent: "k")
         menu.addItem(withTitle: "Keyboard Shortcuts", action: #selector(showShortcuts), keyEquivalent: "/")
         menu.addItem(.separator())
@@ -103,12 +109,6 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         menu.addItem(command: .renameWorkspace, target: self)
         menu.addItem(command: .renameTab, target: self)
         menu.addItem(command: .renamePane, target: self)
-        menu.addItem(.separator())
-
-        // Machine management. Filed under File because that is where Herdr puts
-        // its server/host actions, and because it is configuration rather than a
-        // view toggle. It opens a panel; it does not change the main window.
-        menu.addItem(command: .machines, target: self)
         menu.addItem(.separator())
 
         // Close — pane, then tab, then workspace, widening scope. Herdr labels
@@ -264,7 +264,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
             toggleStatusBar: actions.toggleStatusBar,
             showCommands: actions.showCommands,
             showShortcuts: actions.showShortcuts,
-            showMachines: actions.showMachines
+            showSettings: actions.showSettings
         )
     }
 

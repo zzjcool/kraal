@@ -71,9 +71,14 @@ public final class AppStore {
     @ObservationIgnored
     public var paneViewFrames: [String: CGRect] = [:]
 
-    public var target: ConnectionSettings {
-        didSet { if target != oldValue { scheduleReconnect(resetBackoff: true) } }
-    }
+    /// Where the foreground connection points.
+    ///
+    /// Assigning it no longer reconnects. Changing machines goes through
+    /// `selectEndpoint`, which flips the surface lease on two live connections
+    /// instead of tearing one down — so a `didSet` reconnect here would undo that
+    /// work and reintroduce the gap it was meant to remove. The setter is kept
+    /// because the connection sheet writes it before calling `connect()`.
+    public var target: ConnectionSettings
 
     /// The measured size of one terminal cell in device pixels, reported by the
     /// renderer once a surface exists. Geometry negotiation divides the pane
@@ -89,22 +94,18 @@ public final class AppStore {
     /// followed the window.
     public var surfaceSize = ClientSurfaceSize(cols: 120, rows: 40)
 
-    @ObservationIgnored var connection: EndpointConnection?
-    @ObservationIgnored private var connectTask: Task<Void, Never>?
+    /// The connection belonging to the machine that currently owns the screen.
+    ///
+    /// Computed, not stored: every machine has its own connection now (see
+    /// `EndpointState.connection`), and the store-level one is just the view onto
+    /// whichever is foreground. Everything that talks to "the daemon" — input,
+    /// requests, resize — reads this and therefore follows the selection without
+    /// knowing that connections are per-machine.
+    var connection: EndpointConnection? { activeEndpoint?.connection }
     @ObservationIgnored private var healthTask: Task<Void, Never>?
     @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored var inputDecoders: [String: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
-    /// Bumped every time a connection is started or abandoned on purpose.
-    ///
-    /// A superseded connection tears itself down asynchronously, so its
-    /// `.disconnected` arrives *after* the replacement is already connecting. The
-    /// event carries no connection identity, and treating that late report as a
-    /// dropped link scheduled a second reconnect on top of the one in flight —
-    /// which is what made switching to this Mac never settle: the new handshake
-    /// was torn down moments after it went live. Events captured under an older
-    /// epoch are reports about a connection nobody is listening to any more.
-    @ObservationIgnored var connectionEpoch = 0
     /// In-flight `client_shell_resize` sender, so a drag coalesces.
     @ObservationIgnored var resizeTask: Task<Void, Never>?
     /// Set when a grid still has to be pushed, so a request that arrives while a
@@ -126,7 +127,7 @@ public final class AppStore {
     public func loadEndpoints() async {
         let roster = await endpointCatalog.reload()
         rebuildEndpoints(roster: roster)
-        refreshObservers()
+        connectMissingEndpoints()
     }
 
     // MARK: - Derived state
@@ -157,110 +158,69 @@ public final class AppStore {
 
     public func connect() {
         // Idempotent: `onAppear` and the app delegate both ask to connect, and a
-        // second handshake would deliver a duplicate snapshot and surface.
-        if connectTask != nil, !intentionalStop, phase.isLive || phase == .connecting {
+        // second handshake would deliver a duplicate snapshot and surface. The
+        // task check matters as much as the connection check — between the call
+        // and the handshake landing there is no connection object yet, and that
+        // window is exactly when the second caller arrives.
+        if activeEndpoint?.connection != nil || activeEndpoint?.connectionTask != nil {
             return
         }
         intentionalStop = false
         reconnectAttempt = 0
-        startConnection()
+        connectActiveEndpoint()
+    }
+
+    /// Opens the selected machine's connection, creating its endpoint row first if
+    /// the catalog has not landed yet.
+    ///
+    /// At launch `connect()` runs before `loadEndpoints()`, so on the very first
+    /// call there is no endpoint to attach to. The local row is the one the store
+    /// starts on, so it is created here rather than making `connect()` wait for a
+    /// subprocess to list machines.
+    private func connectActiveEndpoint() {
+        if endpoints.isEmpty {
+            let local = EndpointState(id: .local, label: "Local", settings: .local)
+            endpoints = [local]
+            activeEndpointID = .local
+        }
+        guard let endpoint = activeEndpoint else { return }
+        endpoint.settings = target
+        kraalLog("connect: target=\(target.name) transport=\(target.transport.rawValue) "
+            + "session=\(target.session) surface=\(surfaceSize.cols)x\(surfaceSize.rows)")
+        phase = .connecting
+        lastError = nil
+        connectEndpoint(endpoint)
     }
 
     public func disconnect() {
         intentionalStop = true
-        connectTask?.cancel()
-        connectTask = nil
         healthTask?.cancel()
         healthTask = nil
-        let connection = self.connection
-        self.connection = nil
-        Task { await connection?.stop() }
+        // Every machine has a connection now, so leaving the store means closing
+        // all of them — not just the foreground one.
+        disconnectAllEndpoints()
         phase = .idle
         surface = nil
     }
 
-    /// Opens a connection and adopts its welcome/snapshot.
-    private func startConnection() {
-        kraalLog("connect: target=\(target.name) transport=\(target.transport.rawValue) "
-            + "session=\(target.session) surface=\(surfaceSize.cols)x\(surfaceSize.rows)")
-        connectTask?.cancel()
-        let resolvedTarget: HerdrTarget
-        do {
-            resolvedTarget = try HerdrDiscovery.resolve(target)
-        } catch {
-            phase = .failed("\(error)")
-            return
-        }
-
-        // A new attempt supersedes whatever the previous connection still has to
-        // say. Bumping here — not on failure — also silences a handshake that was
-        // *replaced*, which is the case a target switch produces.
-        connectionEpoch &+= 1
-        let epoch = connectionEpoch
-        phase = .connecting
-        lastError = nil
-
-        connectTask = Task { [weak self] in
-            guard let self else { return }
-            let connection = EndpointConnection(
-                target: resolvedTarget,
-                surfaceSize: surfaceSize
-            ) { [weak self] event in
-                Task { @MainActor [weak self] in
-                    self?.apply(event, epoch: epoch)
-                }
-            }
-            self.connection = connection
-            do {
-                try await connection.start()
-                self.phase = .live
-                self.reconnectedAt = Date()
-                self.reconnectAttempt = 0
-                kraalLog("connected: daemon=\(self.welcome?.serverVersion ?? "?")")
-                // The hello carried the grid measured when this attempt began.
-                // A resize during the handshake would otherwise leave the daemon
-                // rendering a size the window has already left, with no later
-                // event to correct it.
-                self.pushSurfaceSize()
-            } catch {
-                kraalLog("connect failed: \(error)")
-                await connection.stop()
-                guard !Task.isCancelled else { return }
-                self.phase = .failed("\(error)")
-                self.lastError = "\(error)"
-                self.scheduleReconnect()
-            }
-        }
-    }
-
-    /// Reconnects after the connection was lost, with exponential backoff capped
-    /// at 30 s: the daemon has no transparent resume, so a reconnect is always a
-    /// fresh handshake.
+    /// Reconnects the selected machine after its connection was lost.
     ///
-    /// A window resize deliberately does *not* take this path. Changing the grid
-    /// is a resize of the current surface, not a new session, and it travels on
-    /// the live connection as a `client_shell_resize` (see `resizeSurface`).
+    /// Kept as a store-level entry point because the reconnect controls and the
+    /// phase machine call it, but the work belongs to the endpoint: one machine
+    /// dropping out must not touch any other machine's connection.
     func scheduleReconnect(resetBackoff: Bool = false) {
-        guard !intentionalStop else { return }
+        guard !intentionalStop, let endpoint = activeEndpoint else { return }
         if resetBackoff {
-            reconnectAttempt = 0
-            let established = connection
-            connection = nil
-            Task { await established?.stop() }
+            endpoint.reconnectAttempt = 0
+            disconnectEndpoint(endpoint)
         }
-
-        reconnectAttempt += 1
-        let delay = min(pow(2.0, Double(reconnectAttempt - 1)), 30)
-        let retryAt = Date().addingTimeInterval(delay)
-        phase = .reconnecting(attempt: reconnectAttempt, retryAt: retryAt)
-
-        connectTask?.cancel()
-        connectTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            guard let self, !self.intentionalStop else { return }
-            self.startConnection()
-        }
+        let attempt = max(endpoint.reconnectAttempt, 1)
+        let delay = min(pow(2.0, Double(attempt - 1)), 30)
+        phase = .reconnecting(
+            attempt: attempt,
+            retryAt: Date().addingTimeInterval(delay)
+        )
+        scheduleEndpointRetry(endpoint)
     }
 
     // MARK: - Events
@@ -273,52 +233,6 @@ public final class AppStore {
     /// its replacement has already started.
     nonisolated static func eventIsCurrent(epoch: Int, currentEpoch: Int) -> Bool {
         epoch == currentEpoch
-    }
-
-    private func apply(_ event: ConnectionEvent, epoch: Int) {
-        guard Self.eventIsCurrent(epoch: epoch, currentEpoch: connectionEpoch) else {
-            kraalLog("event ignored: from superseded connection (epoch \(epoch), "
-                + "current \(connectionEpoch))")
-            return
-        }
-        switch event {
-        case let .connected(welcome):
-            handleWelcome(welcome)
-        case let .snapshot(snapshot):
-            handleSnapshot(snapshot)
-        case let .surface(surface):
-            handleSurface(surface)
-        case let .surfacePatch(patch):
-            handleSurfacePatch(patch)
-        case let .error(message):
-            lastError = message
-        case let .serverShutdown(reason):
-            self.surface = nil
-            surfaceIsStale = false
-            phase = .failed(reason ?? "The daemon shut down.")
-        case let .disconnected(reason):
-            // Keep the last frame up while the reconnect runs. A dropped
-            // connection does not invalidate what was on screen a moment ago, and
-            // replacing a working picture with an empty background turns a blip
-            // into what looks like a crash. The frame is marked stale so the view
-            // can dim it rather than pass it off as current.
-            surfaceIsStale = surface != nil
-            if intentionalStop {
-                surface = nil
-                surfaceIsStale = false
-                return
-            }
-            if case .failed = phase { return }
-            if surfaceIsStale {
-                kraalLog("disconnected: holding last frame (stale)")
-            } else {
-                surface = nil
-            }
-            lastError = reason
-            scheduleReconnect()
-        default:
-            break
-        }
     }
 
     // MARK: - Actions

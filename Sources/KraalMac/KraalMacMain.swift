@@ -127,7 +127,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 toggleStatusBar: { [windowActions] in windowActions.toggleStatusBar() },
                 showCommands: { [windowActions] in windowActions.showCommandPalette() },
                 showShortcuts: { [windowActions] in windowActions.showShortcuts() },
-                showMachines: { [windowActions] in windowActions.showMachines() },
+                showSettings: { [windowActions] in windowActions.showSettings() },
                 showDebugInfo: { [windowActions] in windowActions.showDebugInfo() }
             )
         )
@@ -136,7 +136,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
         store.loadDefaultSidebarConfig()
         store.connect()
-        openPanelsRequestedByEnvironment(windowActions: windowActions)
     }
 
     /// Builds and shows the main window.
@@ -307,18 +306,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         }
         kraalLog("vibrancy: \(found.count) NSVisualEffectView(s) -> "
             + (found.isEmpty ? "NONE (chrome is flat!)" : found.joined(separator: " | ")))
-    }
-
-    /// Opens panels on launch when the environment asks for one.
-    ///
-    /// `KRAAL_SHOW_MACHINES=1` exists because a bare `NSApplication` exposes no
-    /// accessible menu hierarchy, so a script cannot click File ▸ Machines…. The
-    /// flag drives the same `WindowActions` counter the menu item drives, so it is
-    /// a handle for automated verification rather than a second code path.
-    private func openPanelsRequestedByEnvironment(windowActions: WindowActions) {
-        if ProcessInfo.processInfo.environment["KRAAL_SHOW_MACHINES"] == "1" {
-            windowActions.showMachines()
-        }
     }
 
     /// The frame from the previous session, if it was saved.

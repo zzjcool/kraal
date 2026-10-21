@@ -54,6 +54,10 @@ enum MenuShortcuts {
             .toggleStatusBar: Shortcut(key: "b", modifiers: [.command, .shift]),
             .commandPalette: Shortcut(key: "k", modifiers: .command),
             .reconnect: Shortcut(key: "r", modifiers: .command),
+            // ⌘, is the chord macOS users press for preferences, and it is what
+            // every other Mac app binds it to — a settings window without it feels
+            // broken before it is even opened.
+            .settings: Shortcut(key: ",", modifiers: .command),
         ]
 
         // ⌘1…⌘9 focus tabs; ⌃⌘1…⌃⌘9 focus workspaces, so the two ranges do not

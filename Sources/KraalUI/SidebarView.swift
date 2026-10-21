@@ -130,37 +130,70 @@ struct SidebarView: View {
             .padding(.top, 2)
     }
 
+    /// A machine header with two hit areas, because a machine row means two
+    /// different things depending on where you click.
+    ///
+    /// Clicking the name selects that machine — the same act as clicking one of
+    /// its workspaces, which is how you get to a machine you are not on. Clicking
+    /// the triangle only folds the list. Making the *whole* row fold was the
+    /// earlier behaviour, and it left no way to select a machine whose workspaces
+    /// were collapsed: the row was the only handle, and it did the wrong thing.
+    ///
+    /// The two areas are laid out as separate views rather than one row with a
+    /// gesture that inspects the click position: `onTapGesture` carries no
+    /// location, so splitting the row is what keeps each area's meaning explicit.
+    /// Both keep the full-width frame and the same insets as a workspace row, so
+    /// the list still reads as one block with one left edge.
     @ViewBuilder
     private func machineRow(_ endpoint: EndpointState) -> some View {
         let collapsed = store.collapsedEndpoints.contains(endpoint.id)
+        let isActive = endpoint.id == store.activeEndpointID
         HStack(spacing: 4) {
+            // Fold target. Padded out to a comfortable square so it is hittable
+            // without stealing clicks from the label next to it.
             Text(collapsed ? "▸" : "▾")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
-            Text(endpoint.label)
-                .font(.system(size: 12, weight: .bold))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            if let badge = endpoint.status.badge, !endpoint.id.isLocal {
-                Text(badge)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(endpoint.status.badgeIsWarning
-                        ? Color.red : Color.green)
+                .frame(width: 14, height: 16)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.collapsedEndpoints.formSymmetricDifference([endpoint.id])
+                }
+                .help(collapsed ? "Expand \(endpoint.label)" : "Collapse \(endpoint.label)")
+
+            // Select target: the name and the empty space to its right, so the
+            // row is clickable the way it looks.
+            HStack(spacing: 4) {
+                Text(endpoint.label)
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if let badge = endpoint.status.badge, !endpoint.id.isLocal {
+                    Text(badge)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(endpoint.status.badgeIsWarning
+                            ? Color.red : Color.green)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // Selecting an already-active machine just makes sure its list is
+                // open — the click would otherwise do nothing at all.
+                if isActive {
+                    store.collapsedEndpoints.remove(endpoint.id)
+                } else {
+                    store.selectEndpoint(endpoint)
+                }
             }
         }
-        // Same insets and same full-width frame as a workspace row: the machine
-        // header and the rows under it are one list, so their left edges and
-        // their clickable area have to line up.
         .padding(.vertical, 2)
         .padding(.horizontal, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
-                .fill(endpoint.id == store.activeEndpointID
-                    ? Color.accentColor.opacity(0.10) : .clear)
+                .fill(isActive ? Color.accentColor.opacity(0.10) : .clear)
         }
-        .onTapGesture { store.collapsedEndpoints.formSymmetricDifference([endpoint.id]) }
     }
 
     /// One machine's workspaces, with its worktrees nested.

@@ -17,7 +17,7 @@ public struct RootView: View {
     @State private var showCommands = false
     @State private var showConnection = false
     @State private var showShortcuts = false
-    @State private var showMachines = false
+    @State private var showSettings = false
     @State private var showDebugInfo = false
     @State private var sidebarVisible = true
     @State private var statusBarVisible = true
@@ -85,8 +85,15 @@ public struct RootView: View {
         .sheet(isPresented: $showShortcuts) {
             ShortcutsView()
         }
-        .sheet(isPresented: $showMachines) {
-            MachinesPanel(target: store.target) { showMachines = false }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(target: store.target) {
+                showSettings = false
+            } onProfilesChanged: {
+                // A machine was added, renamed, disabled or removed: the sidebar's
+                // roster comes from the same saved profiles, so it has to re-read
+                // them or it keeps drawing the pre-edit list.
+                Task { await store.loadEndpoints() }
+            }
         }
         .sheet(isPresented: $showDebugInfo) {
             DebugInfoView()
@@ -145,7 +152,7 @@ public struct RootView: View {
         .onChange(of: windowActions.statusBarToggleCount) { statusBarVisible.toggle() }
         .onChange(of: windowActions.commandPaletteCount) { showCommands = true }
         .onChange(of: windowActions.shortcutsCount) { showShortcuts = true }
-        .onChange(of: windowActions.machinesCount) { showMachines = true }
+        .onChange(of: windowActions.settingsCount) { showSettings = true }
         .onChange(of: windowActions.debugInfoCount) { showDebugInfo = true }
     }
 }
