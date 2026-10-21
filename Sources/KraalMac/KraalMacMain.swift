@@ -200,6 +200,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             guard let window else { return }
             Self.logVibrancyTree(in: window)
         }
+        Self.installTitlebarMaterial(in: window)
         kraalLog("window chrome: isOpaque=\(window.isOpaque) "
             + "backgroundColor=\(window.backgroundColor.alphaComponent) "
             + "titlebarTransparent=\(window.titlebarAppearsTransparent) "
@@ -207,6 +208,52 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         return window
+    }
+
+    /// Puts a real material behind the titlebar strip.
+    ///
+    /// The window is non-opaque with a clear background (required for
+    /// `.behindWindow` vibrancy to reach the desktop) and hides its titlebar
+    /// (`titlebarAppearsTransparent`). Those two together leave the top strip
+    /// with nothing drawn in it: SwiftUI lays its content out below the titlebar's
+    /// safe area, and AppKit's own titlebar chrome was told to go away. The strip
+    /// therefore showed the desktop straight through — the traffic lights and the
+    /// toolbar buttons floating on raw wallpaper, with a hard edge where the
+    /// sidebar's material began 38pt lower.
+    ///
+    /// The material has to be installed as a sibling *below* the titlebar
+    /// container rather than as part of the SwiftUI tree, because the strip is
+    /// outside the hosting view's frame entirely: anything the view tree draws
+    /// there would be clipped away.
+    private static func installTitlebarMaterial(in window: NSWindow) {
+        guard let frameView = window.contentView?.superview else { return }
+        let height = window.frame.height - window.contentLayoutRect.height
+        guard height > 0 else { return }
+
+        let glass = NSVisualEffectView(
+            frame: NSRect(x: 0, y: frameView.bounds.height - height,
+                          width: frameView.bounds.width, height: height)
+        )
+        // Same role as the bars below it (`GlassLayer.bar`), so the seam between
+        // the titlebar and the tab bar is invisible: the two strips are the same
+        // system material, adjacent.
+        glass.material = .headerView
+        glass.blendingMode = .behindWindow
+        glass.state = .followsWindowActiveState
+        glass.autoresizingMask = [.width, .minYMargin]
+
+        // Below the titlebar container (which holds the traffic lights and the
+        // toolbar items) so those keep drawing on top, but above the frame view's
+        // own background.
+        if let titlebar = frameView.subviews.first(where: {
+            String(describing: type(of: $0)).contains("TitlebarContainer")
+        }) {
+            frameView.addSubview(glass, positioned: .below, relativeTo: titlebar)
+        } else {
+            frameView.addSubview(glass, positioned: .below, relativeTo: nil)
+        }
+        kraalLog("titlebar material: height=\(height) frame=\(glass.frame) "
+            + "material=headerView blending=behindWindow")
     }
 
     /// Logs every `NSVisualEffectView` in the window, with the properties that
