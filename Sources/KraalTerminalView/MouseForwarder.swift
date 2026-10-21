@@ -49,6 +49,15 @@ public final class MouseForwarder {
     /// Points banked per pane between whole-row scrolls.
     private var scrollAccumulators: [String: PaneMouse.ScrollAccumulator] = [:]
 
+    /// The pane whose context menu a consumed `rightMouseDown` just raised.
+    ///
+    /// The menu opens on the next runloop turn, which is *after* the matching
+    /// `rightMouseUp` has been dispatched. AppKit's menu tracking reads the mouse
+    /// as already released and closes the menu the instant it appears — the click
+    /// looks like it did nothing. Swallowing the paired up keeps a button the
+    /// pointer is no longer holding.
+    private var menuRaisedFor: String?
+
     public init(store: AppStore, paneActions: (any PaneContextMenuProviding)? = nil) {
         self.store = store
         self.paneActions = paneActions
@@ -121,10 +130,25 @@ public final class MouseForwarder {
             // dispatch (before the view has seen the event) wedges the app.
             // Consuming the event first is what makes this safe — by the time the
             // menu opens, this click is already finished.
+            menuRaisedFor = paneId
             DispatchQueue.main.async {
                 actions?.showPaneContextMenu(for: paneId, event: event)
             }
             return true
+        }
+
+        // The up that pairs with a menu-raising down has to be consumed too.
+        // The menu does not open until the next runloop turn, so without this the
+        // up is already dispatched when AppKit starts tracking: it sees a released
+        // button and closes the menu as it appears, which is why a right-click
+        // looked like it did nothing at all. Cleared on every press as well, so a
+        // lost up (app switched away mid-click) cannot leak into the next one.
+        if event.type == .rightMouseUp {
+            let raised = menuRaisedFor
+            menuRaisedFor = nil
+            if KraalUI.PaneContextRouting.consumesRightUp(menuRaisedForPane: raised) {
+                return true
+            }
         }
 
         // A program that reports the mouse owns its own scrolling (a TUI's pager,

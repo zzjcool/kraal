@@ -62,6 +62,41 @@ struct PaneContextMenuRoutingTests {
             #expect(owns != shows, "exactly one side must claim the click")
         }
     }
+
+    /// The reported bug: right-clicking a pane raised a menu that vanished
+    /// immediately, so the click looked like it did nothing.
+    ///
+    /// The press is consumed (the menu owns the gesture), but the release was
+    /// forwarded. The menu does not open until the next runloop turn, by which
+    /// point AppKit had already seen the button go up — it dismissed the menu as
+    /// it appeared. Measured: sending only a `rightMouseDown` left the menu
+    /// standing; sending the pair closed it. The press now claims its release.
+    @Test("a pane menu consumes the release that pairs with its press")
+    func menuConsumesPairedRelease() {
+        #expect(PaneContextRouting.consumesRightUp(menuRaisedForPane: "w1:p7"))
+    }
+
+    /// A right-button release that no pane menu asked for must reach the view:
+    /// Ghostty tracks selection state across the press/release pair, and a TUI
+    /// that owns the right button is waiting for exactly this event.
+    @Test("an unclaimed release is still delivered")
+    func unclaimedReleaseIsDelivered() {
+        #expect(!PaneContextRouting.consumesRightUp(menuRaisedForPane: nil))
+    }
+
+    /// The two rules are independent inputs to one click: a TUI both keeps the
+    /// press (no menu) and keeps the release (nothing to consume). If the release
+    /// rule keyed off mouse reporting instead of "did we raise a menu", the TUI
+    /// would lose half of every right-click pair.
+    @Test("a TUI keeps both halves of the click")
+    func tuiKeepsBothHalves() {
+        let reportsMouse = true
+        let showsMenu = PaneContextRouting.shouldShowPaneMenu(programReportsMouse: reportsMouse)
+        // No menu was raised, so there is nothing to claim.
+        let menuRaised: String? = showsMenu ? "w1:p7" : nil
+        #expect(menuRaised == nil)
+        #expect(!PaneContextRouting.consumesRightUp(menuRaisedForPane: menuRaised))
+    }
 }
 
 // MARK: - The menu itself

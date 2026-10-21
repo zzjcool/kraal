@@ -31,4 +31,21 @@ public enum PaneContextRouting {
     public static func shouldShowPaneMenu(programReportsMouse: Bool) -> Bool {
         !ownsRightClick(programReportsMouse: programReportsMouse)
     }
+
+    /// Whether a right-button release belongs to a menu this app just raised.
+    ///
+    /// The pane menu cannot open inside the `rightMouseDown` handler — a menu runs
+    /// a modal event loop, and starting one mid-dispatch wedges the app — so it
+    /// opens on the next runloop turn. By then the matching `rightMouseUp` has
+    /// already been dispatched. AppKit's menu tracking reads the button as
+    /// released and dismisses the menu the moment it appears, so the click looks
+    /// like it did nothing.
+    ///
+    /// The press therefore has to claim its own release. This is a separate rule
+    /// from `shouldShowPaneMenu` because it has to answer for the *release*: a
+    /// program that owns the right button still gets its own up events, and eating
+    /// those would break the TUI this routing exists to protect.
+    public static func consumesRightUp(menuRaisedForPane: String?) -> Bool {
+        menuRaisedForPane != nil
+    }
 }
