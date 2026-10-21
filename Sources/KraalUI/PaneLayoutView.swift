@@ -196,15 +196,25 @@ struct PaneLayoutView: View {
             .offset(x: hit.minX, y: hit.minY)
             .gesture(
                 DragGesture()
-                    .onEnded { value in
-                        guard let surface = store.surface else { return }
-                        let ratio = ratio(
-                            for: split,
-                            drag: value,
-                            grid: grid,
-                            surface: surface
+                    // Live during the drag, not only at the end. The mouse is the
+                    // thing the user is watching; leaving the divider still until
+                    // mouse-up made a correct ratio change look like no change,
+                    // and made it impossible to aim.
+                    .onChanged { value in
+                        store.dragSplitRatio(
+                            path: split.path,
+                            ratio: ratio(for: split, drag: value, cellSize: cellSize)
                         )
-                        store.setSplitRatio(path: split.path, ratio: ratio)
+                    }
+                    .onEnded { value in
+                        // The final position is authoritative and must not be
+                        // dropped: the last `onChanged` may have been coalesced
+                        // away, and the daemon has no idea where the pointer
+                        // stopped. Same coalescing path, newest value wins.
+                        store.dragSplitRatio(
+                            path: split.path,
+                            ratio: ratio(for: split, drag: value, cellSize: cellSize)
+                        )
                     }
             )
             .onHover { hovering in
@@ -229,23 +239,46 @@ struct PaneLayoutView: View {
 
     /// Converts a drag into the ratio the daemon expects: the divider's new
     /// offset within the split's own area, clamped so a pane cannot vanish.
+    ///
+    /// `DragGesture` reports **points**; `position` and `area` are **cells**. The
+    /// conversion therefore has to go through the cell size, which is exactly what
+    /// an earlier version got wrong: it scaled the drag by
+    /// `surface.frame.height / grid.height`, and those two are the same number by
+    /// construction (both come from `surface.frame`), so the factor was always 1
+    /// and a 40-point drag counted as 40 *rows*. In a 45-row surface one small tug
+    /// produced a ratio change of 0.89, hit the clamp, and pinned the divider to an
+    /// edge — which reads as "the divider does not follow the mouse".
     private func ratio(
         for split: PaneSurfaceSplit,
         drag: DragGesture.Value,
-        grid: CGSize,
-        surface: PaneSurfaceFrame
+        cellSize: CGSize
     ) -> Double {
-        let area = split.area
-        let translatedX = drag.translation.width / max(grid.width, 1)
-            * CGFloat(surface.frame.width)
-        let translatedY = drag.translation.height / max(grid.height, 1)
-            * CGFloat(surface.frame.height)
-        return Self.splitRatio(
+        Self.splitRatioForDrag(
             direction: split.direction,
             position: split.position,
+            area: split.area,
+            dragPoints: drag.translation,
+            cellSize: cellSize
+        )
+    }
+
+    /// The points-to-cells step, split out so it can be tested without a view.
+    ///
+    /// Delegates to ``PaneSplitAxis/ratio(position:area:dragPoints:cellSize:)``,
+    /// which is the public home of this arithmetic. Kept as a named entry point
+    /// because the tests and the probe read better calling it this way.
+    static func splitRatioForDrag(
+        direction: PaneSurfaceSplitDirection,
+        position: UInt16,
+        area: SurfaceRect,
+        dragPoints: CGSize,
+        cellSize: CGSize
+    ) -> Double {
+        PaneSplitAxis(direction).ratio(
+            position: position,
             area: area,
-            translatedX: translatedX,
-            translatedY: translatedY
+            dragPoints: dragPoints,
+            cellSize: cellSize
         )
     }
 
@@ -402,6 +435,46 @@ public enum PaneSplitAxis: Sendable {
         case .verticalDrag: .vertical
         case .horizontalDrag: .horizontal
         }
+    }
+
+    /// Converts a drag in points into the ratio the daemon expects.
+    ///
+    /// `DragGesture` reports **points**; the daemon's `position` and `area` are
+    /// **cells**. Going straight from one to the other is the mistake that made the
+    /// divider leap to an edge: the old conversion multiplied by
+    /// `surface.height / grid.height`, and those are the same number by
+    /// construction, so a 40-point drag counted as 40 rows — 0.89 of a 45-row
+    /// surface, straight into the 0.9 clamp.
+    ///
+    /// Lives on the axis type because "which way does this move" and "in what unit"
+    /// are the same question: each axis divides by the cell extent along itself.
+    ///
+    /// A zero cell size is possible (Ghostty reports 0 before its first frame), and
+    /// must not divide by zero; treating one point as one cell is wrong but bounded,
+    /// since the result is clamped anyway.
+    public func ratio(
+        position: UInt16,
+        area: SurfaceRect,
+        dragPoints: CGSize,
+        cellSize: CGSize
+    ) -> Double {
+        let cellsWide = cellSize.width > 0 ? cellSize.width : 1
+        let cellsHigh = cellSize.height > 0 ? cellSize.height : 1
+        let translatedX = dragPoints.width / cellsWide
+        let translatedY = dragPoints.height / cellsHigh
+        // `.vertical` names a horizontal divider line between stacked panes, so it
+        // moves along Y; `.horizontal` is a vertical line, so it moves along X.
+        let base: Double
+        let span: Double
+        switch self {
+        case .verticalDrag:
+            base = Double(position) - Double(area.originY) + Double(translatedY)
+            span = Double(max(area.height, 1))
+        case .horizontalDrag:
+            base = Double(position) - Double(area.originX) + Double(translatedX)
+            span = Double(max(area.width, 1))
+        }
+        return min(max(base / span, 0.1), 0.9)
     }
 }
 

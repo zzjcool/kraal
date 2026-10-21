@@ -142,6 +142,54 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         store.loadDefaultSidebarConfig()
         store.connect()
         runCommandProbeIfRequested()
+        runDividerProbeIfRequested()
+    }
+
+    /// Drives a divider drag from an env var, for scripted checks.
+    ///
+    /// `KRAAL_PROBE_DIVIDER_DRAG=111` moves the root divider up by 111 points
+    /// through the same `dragSplitRatio` the gesture calls. The mouse is the only
+    /// thing skipped — which is exactly the part that cannot be scripted reliably:
+    /// synthesised `CGEvent` drags need Accessibility permission, and a VM without
+    /// it silently drops them (the drag ends at the same ratio it started, and the
+    /// log shows no request at all).
+    ///
+    /// Points, not cells: the point-to-cell conversion is the bug this exists to
+    /// keep visible, so the probe must feed it points the way a mouse would.
+    private func runDividerProbeIfRequested() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let raw = environment["KRAAL_PROBE_DIVIDER_DRAG"],
+              let points = Double(raw) else { return }
+        let orientation = environment["KRAAL_PROBE_DIVIDER_AXIS"] ?? "vertical"
+        kraalLog("probe: will drag \(orientation) divider by \(points)pt once connected")
+        Task { @MainActor in
+            for _ in 0..<100 where self.store.surface == nil {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let surface = self.store.surface,
+                  let split = surface.splits.first else {
+                kraalLog("probe: no split to drag")
+                return
+            }
+            let cell = SurfaceGeometry.points(
+                for: self.store.terminalCellSize,
+                scale: NSScreen.main?.backingScaleFactor ?? 1
+            )
+            let ratio = PaneSplitAxis(split.direction).ratio(
+                position: split.position,
+                area: split.area,
+                dragPoints: CGSize(
+                    width: orientation == "horizontal" ? points : 0,
+                    height: orientation == "vertical" ? points : 0
+                ),
+                cellSize: cell
+            )
+            kraalLog("probe: drag \(points)pt cell=\(cell.width)x\(cell.height)"
+                + " position=\(split.position) area=[\(split.area.originX),\(split.area.originY)"
+                + " \(split.area.width)x\(split.area.height)] -> ratio \(ratio)")
+            self.store.dragSplitRatio(path: split.path, ratio: ratio)
+        }
     }
 
     /// Fires one context-menu command from an env var, for scripted checks.

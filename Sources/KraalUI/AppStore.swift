@@ -108,6 +108,10 @@ public final class AppStore {
     @ObservationIgnored var intentionalStop = false
     /// In-flight `client_shell_resize` sender, so a drag coalesces.
     @ObservationIgnored var resizeTask: Task<Void, Never>?
+
+    /// In-flight divider drag, so a mouse move coalesces into one request.
+    /// See `dragSplitRatio(path:ratio:)` for why sending every change is wrong.
+    @ObservationIgnored var splitDrag = SplitDragState()
     /// Set when a grid still has to be pushed, so a request that arrives while a
     /// send is in flight is not lost.
     @ObservationIgnored var resizePending = false
@@ -407,6 +411,42 @@ public final class AppStore {
         }
     }
 
+    /// Moves a divider while it is being dragged.
+    ///
+    /// Sending one request per `onChanged` looks obvious and is wrong twice over:
+    ///
+    /// - A connection serves one command at a time. A drag emits changes far
+    ///   faster than a round-trip, so most requests would be refused with
+    ///   `endpoint_busy` and the divider would follow only whichever ones won the
+    ///   race — stuttering, and lagging further behind the faster you move.
+    /// - The ratios are positions, not increments, so coalescing is safe and
+    ///   skipping the intermediate ones loses nothing. Only the latest matters.
+    ///
+    /// So: keep the newest ratio, and while a request is in flight, let it fall
+    /// through to the next slot. The result is at most one request per round-trip,
+    /// always carrying the most recent pointer position.
+    ///
+    /// Also used for the released position: the last `onChanged` can be coalesced
+    /// away and the daemon has no idea where the pointer stopped, so the final
+    /// ratio has to be sent through the same path rather than dropped.
+    public func dragSplitRatio(path: [Bool], ratio: Double) {
+        splitDrag.pending = SplitDragState.Target(path: path, ratio: ratio)
+        guard !splitDrag.inFlight else { return }
+        splitDrag.inFlight = true
+        Task {
+            // Loop rather than recurse: each iteration drains the newest value
+            // that arrived while the previous request was on the wire.
+            while let next = splitDrag.pending {
+                splitDrag.pending = nil
+                await call("layout.set_split_ratio", [
+                    "path": next.path,
+                    "ratio": next.ratio,
+                ])
+            }
+            splitDrag.inFlight = false
+        }
+    }
+
     public func invoke(commandId: String) {
         Task { await call("command.invoke", ["command_id": commandId]) }
     }
@@ -421,4 +461,29 @@ public final class AppStore {
     @ObservationIgnored var resyncPending = false
     /// Guards `reprojectSurface` against overlapping toggles.
     @ObservationIgnored var reprojectInFlight = false
+}
+
+/// Coalescing state for a divider drag.
+///
+/// A `DragGesture` emits a change per mouse move — hundreds per second on a
+/// trackpad — while a request round-trip is milliseconds and the connection
+/// serves exactly one command at a time. Sending them all would spend the whole
+/// drag being refused with `endpoint_busy`, and the divider would follow only the
+/// few that happened to win.
+///
+/// `pending` holds the newest position the pointer reported; the looping sender in
+/// `dragSplitRatio` keeps consuming it, so the requests that do go out always
+/// carry where the pointer is *now*, never a stale position queued behind them.
+/// Because ratios are absolute positions rather than increments, dropping the
+/// intermediate ones loses nothing.
+struct SplitDragState {
+    struct Target {
+        var path: [Bool]
+        var ratio: Double
+    }
+
+    /// The newest position not yet sent.
+    var pending: Target?
+    /// Whether a sender loop is already draining `pending`.
+    var inFlight = false
 }
