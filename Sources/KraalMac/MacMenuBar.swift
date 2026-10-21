@@ -244,7 +244,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
     /// `AppCommand.rawValue` so one selector can serve the whole menu — this is
     /// also what makes `validateMenuItem` able to reason about availability.
     @objc func runCommand(_ sender: NSMenuItem) {
-        guard let store, let raw = sender.representedObject as? String,
+        guard let raw = sender.representedObject as? String,
               let command = AppCommand(rawValue: raw) else { return }
         // A context menu carries the pane it was raised over, and that is more
         // trustworthy than "whatever is focused now": the menu bar's items mean
