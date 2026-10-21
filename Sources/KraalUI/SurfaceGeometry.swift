@@ -40,6 +40,39 @@ public enum SurfaceGeometry {
         incomingRevision < previousRevision
     }
 
+    /// Identifies which projection a surface belongs to.
+    ///
+    /// Two things can make the cells on screen stop meaning anything: the daemon
+    /// booted again, or it re-projected onto a different tab. Neither is visible
+    /// in a pane's `contentRevision`, which keeps climbing across the whole daemon
+    /// session and is not reset by a re-projection.
+    public struct ProjectionIdentity: Equatable, Sendable {
+        public var bootId: String
+        public var revision: UInt64
+
+        public init(bootId: String, revision: UInt64) {
+            self.bootId = bootId
+            self.revision = revision
+        }
+    }
+
+    /// Whether a surface belongs to a different projection than the last one.
+    ///
+    /// This is the judgement that a workspace or machine switch needs and that
+    /// revisions alone cannot make: two machines name their first workspace's
+    /// first pane the same way, can hand over the same pane geometry, and count
+    /// revisions independently — so a switch between them can arrive with every
+    /// number unchanged while the pixels belong to the other machine. `bootId` is
+    /// stamped at daemon boot and never shared, which is what separates them.
+    public static func projectionChanged(
+        previous: ProjectionIdentity?,
+        current: ProjectionIdentity
+    ) -> Bool {
+        guard let previous else { return true }
+        return previous.bootId != current.bootId
+            || previous.revision != current.revision
+    }
+
     /// Whether a frame has to be parked because the terminal has no grid yet.
     ///
     /// Ghostty attaches its surface asynchronously. A frame that arrives before

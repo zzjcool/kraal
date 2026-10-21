@@ -41,6 +41,17 @@ public final class PaneTerminalModel {
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
+    /// The projection the renderer's baseline belongs to.
+    ///
+    /// Nothing else the pane compares can see a workspace or machine switch.
+    /// `contentRevision` keeps climbing across the whole daemon session and is
+    /// not reset by a re-projection, and the grid is *identical* by design — two
+    /// machines name their first workspace's first pane the same way and split it
+    /// the same way. So a switch can arrive with every number unchanged, get
+    /// judged "nothing to do", and leave the previous machine's picture on
+    /// screen. `bootId` is stamped at daemon boot and never shared, which is the
+    /// one field that separates them.
+    private var lastProjection: SurfaceGeometry.ProjectionIdentity?
     /// A frame that arrived before Ghostty's surface existed, or before its grid
     /// caught up with the frame's size.
     private var pendingFrame: FrameData?
@@ -87,18 +98,35 @@ public final class PaneTerminalModel {
             return
         }
         let frame = paneFrame(from: surface, geometry: geometry)
+        // A different projection means the screen this renderer built its
+        // baseline from is gone, whatever the numbers say. It has to be taken as
+        // a whole frame, not diffed against cells that came from somewhere else.
+        let projection = SurfaceGeometry.ProjectionIdentity(
+            bootId: surface.bootId,
+            revision: surface.projectionRevision
+        )
+        let projectionChanged = SurfaceGeometry.projectionChanged(
+            previous: lastProjection,
+            current: projection
+        )
+        lastProjection = projection
+
         // A pane's content revision only moves when its *content* changes, so the
         // same revision is normal for a pane that merely got a new grid: going
         // from a split to full width changes every row's width but not one cell
         // of text. Skipping those frames on the revision alone left the pane blank
         // until it printed something. The grid is what decides whether the frame
         // already on screen is still valid.
-        guard SurfaceGeometry.needsRepaint(
+        //
+        // The projection is a third reason to repaint, and the one that covers a
+        // workspace or machine switch: the same cells have to be re-taken whole
+        // rather than diffed onto a baseline from another projection.
+        guard projectionChanged || SurfaceGeometry.needsRepaint(
             contentRevisionChanged: geometry.contentRevision != lastRevision,
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
             currentGrid: (width: Int(frame.width), height: Int(frame.height))
         ) else { return }
-        if SurfaceGeometry.needsScreenReset(
+        if projectionChanged || SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
                 previousRevision: lastRevision,
                 incomingRevision: geometry.contentRevision
@@ -313,6 +341,7 @@ public final class PaneTerminalModel {
         renderer.reset()
         lastRevision = 0
         frameGrid = nil
+        lastProjection = nil
         pendingFrame = nil
         needsCleanRepaint = false
         // The view this chain was polling for is gone. Its successor runs
@@ -325,6 +354,7 @@ public final class PaneTerminalModel {
     func reset() {
         renderer.reset()
         lastRevision = 0
+        lastProjection = nil
         frameGrid = nil
     }
 
@@ -465,6 +495,19 @@ public struct GhosttyPaneView: View {
                 }
             }
             .onChange(of: surface.surfaceRevision) { _, _ in
+                model.apply(surface: surface)
+            }
+            // A *different daemon* can hand this pane a surface whose revision
+            // and geometry are both identical to the one already on screen, and
+            // then nothing above fires: `surfaceRevision` did not move, the
+            // inner rect did not move, and SwiftUI keeps the same `ForEach` id
+            // because two machines name their first workspace's first pane the
+            // same way. The picture stays frozen on the other machine's cells.
+            //
+            // `bootId` is the field that differs, so keying a repaint on it
+            // closes the gap. `apply` treats a changed boot as a fresh
+            // projection and takes the frame whole.
+            .onChange(of: surface.bootId) { _, _ in
                 model.apply(surface: surface)
             }
             // A reconnect restarts the surface revision counter from 1, so a
