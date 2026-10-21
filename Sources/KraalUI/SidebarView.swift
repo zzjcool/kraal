@@ -148,14 +148,18 @@ struct SidebarView: View {
                         ? Color.red : Color.green)
             }
         }
+        // Same insets and same full-width frame as a workspace row: the machine
+        // header and the rows under it are one list, so their left edges and
+        // their clickable area have to line up.
         .padding(.vertical, 2)
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
                 .fill(endpoint.id == store.activeEndpointID
                     ? Color.accentColor.opacity(0.10) : .clear)
         }
-        .contentShape(Rectangle())
         .onTapGesture { store.collapsedEndpoints.formSymmetricDifference([endpoint.id]) }
     }
 
@@ -333,9 +337,22 @@ private struct WorkspaceRowView: View {
                     }
                 }
             }
+            // The row is as wide as the sidebar, not as wide as its text.
+            //
+            // Without this the highlight wrapped the label and stopped, so a row
+            // read as a chip floating in the list, and the empty space to its
+            // right belonged to no row at all: clicking beside a workspace did
+            // nothing, while clicking beside a machine row (which already had a
+            // trailing `Spacer`) toggled it. Two rows in one list must not
+            // disagree about where they end.
+            Spacer(minLength: 0)
         }
         .padding(.vertical, 2)
         .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Hit testing follows the drawn rect, so the whole row is clickable
+        // rather than just the glyphs SwiftUI happened to layout.
+        .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
                 .fill(workspace.focused && isActiveMachine
