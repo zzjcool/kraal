@@ -92,6 +92,61 @@ final class HerdrMachineClientTests: XCTestCase {
         XCTAssertNil(client)
     }
 
+    // MARK: - Isolation
+
+    func testDiscoverPassesIsolatedHomeWhenRequested() throws {
+        let (stubClient, _) = try stub()
+        let client = HerdrMachineClient.discover(
+            environment: [
+                "KRAAL_HERDR_BIN": stubClient.executable.path,
+                "KRAAL_HERDR_HOME": "/tmp/kraal-scratch-home",
+            ]
+        )
+        XCTAssertEqual(client?.home, "/tmp/kraal-scratch-home")
+    }
+
+    func testDiscoverLeavesHomeNilByDefault() throws {
+        let (stubClient, _) = try stub()
+        let client = HerdrMachineClient.discover(
+            environment: ["KRAAL_HERDR_BIN": stubClient.executable.path]
+        )
+        // Inheriting `$HOME` is the normal path: a packaged app must see the same
+        // roster the user's terminal sees.
+        XCTAssertNil(client?.home)
+    }
+
+    func testDiscoverTreatsEmptyHomeAsUnset() throws {
+        let (stubClient, _) = try stub()
+        let client = HerdrMachineClient.discover(
+            environment: [
+                "KRAAL_HERDR_BIN": stubClient.executable.path,
+                "KRAAL_HERDR_HOME": "",
+            ]
+        )
+        // An empty value would make "$HOME/.local/..." resolve against the
+        // filesystem root; inheriting is strictly better than that.
+        XCTAssertNil(client?.home)
+    }
+
+    func testIsolatedHomeReachesTheChildProcess() throws {
+        let script = directory.appendingPathComponent("herdr")
+        let out = directory.appendingPathComponent("home.txt")
+        let body = """
+        #!/bin/sh
+        printf '%s' "$HOME" > '\(out.path)'
+        exit 0
+        """
+        try body.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let client = HerdrMachineClient(executable: script, home: "/tmp/kraal-scratch-home")
+        _ = try client.list()
+
+        // The child must actually see it; storing the value on the struct alone
+        // would leave the real roster exposed.
+        XCTAssertEqual(try String(contentsOf: out, encoding: .utf8), "/tmp/kraal-scratch-home")
+    }
+
     // MARK: - Listing
 
     func testListDecodesJSON() throws {

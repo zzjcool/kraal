@@ -90,6 +90,14 @@ DEFAULT_SOCKET="\${KRAAL_HERDR_SOCKET:-/tmp/kraal-mine/herdr-client.sock}"
 # A hand-set KRAAL_DEV_SESSION still wins.
 export KRAAL_HERDR_SOCKET="\$DEFAULT_SOCKET"
 export KRAAL_DEV_BACKGROUND="\${KRAAL_DEV_BACKGROUND:-1}"
+# Machine profiles are shared by every Herdr process on the account (one
+# endpoints.json, no --socket flag), so a dev session that adds a throwaway
+# machine would edit the real roster. Give the child a scratch HOME instead;
+# `herdr` honours \$HOME for that path and the app's own window frame and log
+# stay on the real one.
+DEFAULT_HERDR_HOME="\${KRAAL_HERDR_HOME:-/tmp/kraal-mine/herdr-home}"
+mkdir -p "\$DEFAULT_HERDR_HOME" 2>/dev/null
+export KRAAL_HERDR_HOME="\$DEFAULT_HERDR_HOME"
 if [ -n "\${KRAAL_DEV_SESSION:-}" ]; then
     export KRAAL_DEV_SESSION
 fi

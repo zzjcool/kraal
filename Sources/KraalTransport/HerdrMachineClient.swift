@@ -102,8 +102,27 @@ public struct HerdrMachineClient: Sendable {
     /// Absolute path to the `herdr` executable, resolved once at init.
     public let executable: URL
 
-    public init(executable: URL) {
+    /// Directory to present to `herdr` as `$HOME`, or nil to inherit ours.
+    ///
+    /// Machine profiles are **not** scoped to a daemon: they live in one file,
+    /// `~/.local/state/herdr/client/endpoints.json`, that every Herdr process on
+    /// the account shares. `herdr machine` has no `--socket` flag and never opens
+    /// a connection, so pointing the app at an isolated daemon does *not* isolate
+    /// this list. Adding a throwaway machine for a test would therefore write into
+    /// the real roster, and every other Herdr window would pick it up.
+    ///
+    /// `KRAAL_HERDR_HOME` fixes that: `herdr` honours `$HOME` for this path
+    /// (verified — a fake home with an empty `endpoints.json` reports "No saved SSH
+    /// machines." while the real roster is untouched), so a dev session can point
+    /// it at a scratch directory and manage its own machines in isolation.
+    ///
+    /// Only the child process gets this home; the app's own window frame and log
+    /// paths keep using the real one.
+    public let home: String?
+
+    public init(executable: URL, home: String? = nil) {
         self.executable = executable
+        self.home = home
     }
 
     /// Resolves `herdr` from the environment, then from the usual install spots.
@@ -117,7 +136,7 @@ public struct HerdrMachineClient: Sendable {
         if let override = environment["KRAAL_HERDR_BIN"], !override.isEmpty {
             let url = URL(fileURLWithPath: override)
             if FileManager.default.isExecutableFile(atPath: url.path) {
-                return HerdrMachineClient(executable: url)
+                return HerdrMachineClient(executable: url, home: isolatedHome(environment))
             }
         }
 
@@ -136,9 +155,21 @@ public struct HerdrMachineClient: Sendable {
         ])
 
         for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return HerdrMachineClient(executable: URL(fileURLWithPath: candidate))
+            return HerdrMachineClient(
+                executable: URL(fileURLWithPath: candidate),
+                home: isolatedHome(environment)
+            )
         }
         return nil
+    }
+
+    /// `KRAAL_HERDR_HOME`, when set, becomes `$HOME` for the `herdr` child only.
+    ///
+    /// Empty is treated as unset: an empty `$HOME` would make "$HOME/.local/..."
+    /// resolve to a filesystem-root path, which is a worse failure than inheriting.
+    private static func isolatedHome(_ environment: [String: String]) -> String? {
+        guard let home = environment["KRAAL_HERDR_HOME"], !home.isEmpty else { return nil }
+        return home
     }
 
     // MARK: Reads
@@ -230,7 +261,11 @@ public struct HerdrMachineClient: Sendable {
         // A GUI process may have no HOME-derived config path set up the way a
         // shell does; passing the environment through unchanged keeps `herdr`
         // reading the same config the user's terminal would.
-        process.environment = ProcessInfo.processInfo.environment
+        var childEnvironment = ProcessInfo.processInfo.environment
+        if let home {
+            childEnvironment["HOME"] = home
+        }
+        process.environment = childEnvironment
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

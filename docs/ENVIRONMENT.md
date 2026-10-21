@@ -174,6 +174,38 @@ Ghostty Metal 画的，AX 树几乎为空。
 > **Two machines may both contain `w1:p1`**
 > —— `docs/next/website/src/content/docs/connecting-machines.mdx:118`
 
+#### 机器列表是全局的，不属于哪个 daemon
+
+这一步很容易踩：机器 profile 存在**一份**文件里，
+`~/.local/state/herdr/client/endpoints.json`，账号下所有 Herdr 进程共用。
+`herdr machine` 没有 `--socket` 选项，它根本不开连接——所以**把 app 指向沙箱
+daemon 并不会隔离这份列表**。
+
+后果是：为了测试加一台临时机器，写的是真实名册；删掉时删的也是真实名册。
+别人开着 Herdr 时会看到你的临时机器冒出来，你也可能删掉别人正在用的条目。
+
+`Scripts/build-app.sh` 生成的 debug launcher 因此默认把
+`KRAAL_HERDR_HOME=/tmp/kraal-mine/herdr-home` 交给 `herdr` 子进程当 `$HOME`
+（只有子进程，app 自己的窗口位置和日志仍用真实 home）。于是开发会话里的机器
+列表是空的、跟真实名册完全分开：
+
+```bash
+herdr machine list                                     # 你的真实名册，6 台
+HOME=/tmp/kraal-mine/herdr-home herdr machine list     # 开发会话看到的，空的
+```
+
+`herdr` 读的是 `$HOME/.local/state/...`，实测空目录下会报 "No saved SSH
+machines."，真实名册不受影响。
+
+**想在开发会话里验多机**，就把这个隔离关掉、或指到你自己的一份配置：
+
+```bash
+KRAAL_HERDR_HOME=/tmp/my-test-home ./Scripts/dev-session.sh start
+```
+
+但那样加的机器会进你自己的名册，验完记得删。想彻底不碰真实名册，就复制一份
+到临时目录再指过去。
+
 也就是说 pane id 只在单台 daemon 内唯一。凡是按 `paneId` 建索引的地方——终端池、
 SwiftUI 的 `ForEach` 身份、复用判断——都可能把两台机器当成同一台。而两台机器的
 **几何完全相同**（第一个 workspace 的第一个 pane 都是 `w1:p1`、同样的分屏比例、
