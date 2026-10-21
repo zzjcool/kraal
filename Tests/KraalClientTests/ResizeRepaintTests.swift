@@ -141,6 +141,50 @@ struct ResizeRepaintTests {
         #expect(large.rows > small.rows)
     }
 
+    /// A grid negotiated against one cell size must not survive a cell-size
+    /// change just because the container grew to fit it.
+    ///
+    /// This is the feedback loop that left panes running past the right edge of
+    /// the window. Launch negotiates the first grid against fallback metrics
+    /// (15.6x34pt); when Ghostty reports the real ones (17x37pt) the same 128
+    /// columns are suddenly wider than the window. The panes overflow, the
+    /// container is measured as the overflowed width, and measuring that width
+    /// asks for those same 128 columns — the container confirming its own size
+    /// back to itself, so nothing ever pulls it back.
+    ///
+    /// The numbers below are from a real run: a 1004pt window, fallback metrics
+    /// giving 128 columns, and the inflated 1088pt width those columns measure.
+    @Test("a grid too wide for the window is not confirmed by the overflow it caused")
+    func overwideGridConvergesInsteadOfHolding() {
+        let fallback = CGSize(width: 15.6, height: 34)
+        let real = CGSize(width: 17, height: 37)
+        let windowWidth: CGFloat = 1004
+
+        let first = SurfaceGeometry.cells(
+            for: CGSize(width: windowWidth, height: 742),
+            cellSize: fallback,
+            scale: 2
+        )
+        #expect(first.cols == 128)
+
+        // What those 128 columns measure at the real cell size: wider than the
+        // window, which is the overflow the container used to report back.
+        let overflowedWidth = CGFloat(first.cols) * real.width / 2
+        #expect(overflowedWidth > windowWidth)
+
+        // Negotiating against the honest window width must come back down.
+        let corrected = SurfaceGeometry.cells(
+            for: CGSize(width: windowWidth, height: 742),
+            cellSize: real,
+            scale: 2
+        )
+        #expect(corrected.cols == 118)
+        #expect(corrected.cols < first.cols)
+
+        // And the corrected grid has to actually fit, or the loop comes back.
+        #expect(CGFloat(corrected.cols) * real.width / 2 <= windowWidth)
+    }
+
     /// Rounding down is deliberate: asking for one column more than fits is what
     /// makes every row wrap, which is the failure this geometry exists to avoid.
     @Test("cells round down so the grid always fits")

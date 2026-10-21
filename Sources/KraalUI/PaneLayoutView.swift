@@ -104,6 +104,33 @@ struct PaneLayoutView: View {
                     placeholder
                 }
             }
+            // Pin the pane container to the size the window actually offers, and
+            // clip to it.
+            //
+            // Without this the container reports whatever its content demands. A
+            // grid wider than the window pushes the panes past the right edge,
+            // the container grows to fit them, and the negotiation in
+            // `negotiatingSurfaceGeometry()` then measures that inflated width and
+            // asks the daemon for the same over-wide grid again — the container
+            // proving its own size back to itself, so it never recovers.
+            //
+            // Measured, not theorised: with the window offering 1004pt the
+            // negotiation was being handed 1088pt, which at the real 8.5pt cell
+            // is 128 columns — the very grid that made it 1088pt wide. Panes ran
+            // 58.5pt past the right edge.
+            //
+            // Clipping is the second half. AppKit does not clip a pane's surface
+            // on its own (no `masksToBounds` on the Ghostty view, and its
+            // `IOSurfaceLayer` is top-left anchored and opaque), so an oversized
+            // pane paints over its neighbour instead of being cut off at its own
+            // edge. That is what makes an overflow read as one pane's content
+            // appearing in another.
+            .frame(
+                width: proxy.size.width,
+                height: proxy.size.height,
+                alignment: .topLeading
+            )
+            .clipped()
             .negotiatingSurfaceGeometry()
             .task(id: store.surface?.surfaceRevision) {
                 // One line per surface change, not per frame: this is the data
