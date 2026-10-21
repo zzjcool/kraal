@@ -140,11 +140,37 @@ Homebrew Python 是 PEP 668 externally-managed，**必须用 venv**，不能直�
 `DeveloperTool` 拒绝是 macOS 27 对非标准开发者工具入口的安全限制，会影响
 GUI 型自动化，**不影响 `swift build` / `xcodebuild` 命令行**。可忽略。
 
-### 4.3 网络
+### 4.3 多会话开发（多人 / 多 agent 同机）
+
+实测记录：2026-10-21
+
+第二个 `Kraal.app` 会抢焦点、覆盖窗口、`rotate()` 掉别人的日志。隔离方式与
+实测结论：
+
+| 隔离点 | 机制 | 实测 |
+|---|---|---|
+| 前台焦点 | `KRAAL_DEV_BACKGROUND=1` → 跳过 `NSApp.activate(ignoringOtherApps:)` | ✅ 启动后前台 app 未改变 |
+| 窗口层级 | `window.orderBack(nil)` 而非 `makeKeyAndOrderFront` + `orderFrontRegardless` | ✅ 日志打印 `ordered back` |
+| Dock / ⌘Tab | `NSApp.setActivationPolicy(.accessory)` | ✅ `lsappinfo` 报 `type="UIElement"` |
+| 窗口位置 | `KraalWindowFrame.<session>` | ✅ 两个 session 拿到不同 key |
+| 日志 | `~/Library/Logs/Kraal-<session>.log` | ✅ 与 `Kraal.log` 并存 |
+| 收尸 | `dev-session.sh stop` 按 pid 文件 | ✅ 只杀自己，用户实例存活 |
+| 视觉验证 | `screencapture -l <windowNumber>` | ✅ 2360×1520（非全屏 3456×2234），窗口被压下面也能截 |
+
+**没有采用的做法**：`open -g` 单独用无效，因为 app 自己会 `activate`；
+`pkill -f KraalMac` 会误杀用户实例；Accessibility 驱动不可行——pane 内容是
+Ghostty Metal 画的，AX 树几乎为空。
+
+**macOS VM 方案的已知局限**：Tart / VirtualBuddy / UTM 都能给 agent 一个完全
+独立的桌面，但虚拟 GPU 下 `NSVisualEffectView` 的 `.behindWindow` 材质与真机
+不一致。功能回归可以在 VM 里跑，**透明/模糊的视觉定稿必须在真机上做**。
+
+### 4.4 网络
 
 - GitHub HTTPS / SSH 均通，release 资产下载实测 ~8.7 MB/s
 - 无系统代理；`swcdn.apple.com` 可达
 - 远端 herdr 通过 `ssh -o BatchMode=yes` 免交互认证
+- 本机 `nj-rssyes` 是 **Debian Linux**（非 macOS），不能跑 macOS GUI 隔离
 
 ---
 

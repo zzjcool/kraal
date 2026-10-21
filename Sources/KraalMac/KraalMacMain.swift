@@ -25,6 +25,14 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private let windowActions = WindowActions()
     private var menuBar: MacMenuBar?
 
+    /// Whether this launch is allowed to take the desktop.
+    ///
+    /// A background dev session (see `DevSession`) skips every call that would
+    /// move the pointer, raise its window over the user's work or steal keyboard
+    /// focus: `activate(ignoringOtherApps:)`, `makeKeyAndOrderFront` and the
+    /// `.regular` activation policy that puts it in the Dock and the ⌘-Tab list.
+    private let runsInBackground = DevSession.runsInBackground
+
     /// The daemon to open on launch.
     ///
     /// Honours `KRAAL_HERDR_SOCKET` so a development build can be pointed at a
@@ -43,10 +51,18 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // An accessory launch has no Dock tile and never activates, which is what
+        // keeps a second copy from pulling focus away from the first. It still
+        // has a menu bar while its window is key, so ⌘Q and ⌘W keep working when
+        // the user does bring it forward.
+        NSApp.setActivationPolicy(runsInBackground ? .accessory : .regular)
+        if !runsInBackground {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         KraalLog.shared.rotate()
         kraalLog("launch: bundle=\(Bundle.main.bundleIdentifier ?? "none") bundlePath=\(Bundle.main.bundlePath)")
+        kraalLog("launch: session=\(KraalLog.shared.sessionName ?? "(none)") "
+            + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
 
         let pool = PaneTerminalPool { [weak self] paneId, data in
@@ -138,7 +154,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Kraal"
+        window.title = DevSession.title(name: DevSession.name, background: runsInBackground)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         // Vibrancy detail that is easy to miss: an `NSVisualEffectView` with
@@ -205,8 +221,27 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + "backgroundColor=\(window.backgroundColor.alphaComponent) "
             + "titlebarTransparent=\(window.titlebarAppearsTransparent) "
             + "fullSizeContent=\(window.styleMask.contains(.fullSizeContentView))")
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
+        // `orderBack` puts the window on screen without making it key or main:
+        // the session can still render, and window-level capture still finds it
+        // (the window server draws it whether or not it is frontmost), but the
+        // user's pointer, keyboard focus and front window are untouched.
+        // `orderFrontRegardless` is exactly the call a background session must
+        // not make — it raises the window over the active app.
+        if runsInBackground {
+            window.orderBack(nil)
+            kraalLog("window: ordered back (background session, no focus taken)")
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+        // The window number is how a screenshot of *this* window is taken without
+        // screen recording and without the window being frontmost:
+        //   screencapture -l <windowNumber> …
+        // An off-screen or ordered-back window keeps its number, so a background
+        // session can still prove what it rendered while the user works in front
+        // of it. Accessibility is not needed for any of that, which matters here
+        // because the terminal is drawn by Metal and has no useful AX tree.
+        kraalLog("window: number=\(window.windowNumber) pid=\(ProcessInfo.processInfo.processIdentifier)")
         return window
     }
 
@@ -287,8 +322,12 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The frame from the previous session, if it was saved.
+    ///
+    /// Keyed by dev session so a background copy cannot restore itself onto the
+    /// frame the user left their own window at.
     static func savedFrame() -> NSRect? {
-        guard let frame = UserDefaults.standard.string(forKey: "KraalWindowFrame") else {
+        let key = DevSession.windowFrameDefaultsKey(name: DevSession.name)
+        guard let frame = UserDefaults.standard.string(forKey: key) else {
             return nil
         }
         let rect = NSRectFromString(frame)
@@ -299,7 +338,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         guard let window else { return }
         UserDefaults.standard.set(
             NSStringFromRect(window.frame),
-            forKey: "KraalWindowFrame"
+            forKey: DevSession.windowFrameDefaultsKey(name: DevSession.name)
         )
     }
 

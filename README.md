@@ -121,6 +121,43 @@ debug 包里的 `Kraal.app` 由 `Scripts/build-app.sh` 自动带上这个变量�
 这个默认值必须是**只为此目的存在**的路径。写错或写旧的路径比不写更危险：
 它会静默解析到该路径上碰巧在监听的 daemon，而不是报错。
 
+### 桌面侧隔离（多人 / 多 agent 同机）
+
+daemon 隔离了，桌面还没隔离：第二个 `Kraal.app` 启动时会
+`activate(ignoringOtherApps:)` 抢焦点、把窗口盖到你的窗口上、`rotate()` 掉你的
+日志。同机并行开发一律走 `Scripts/dev-session.sh`，不要自己 `open build/Kraal.app`：
+
+```bash
+./Scripts/dev-session.sh start        # 后台会话启动，不抢焦点
+./Scripts/dev-session.sh status       # pid / 日志路径 / 窗口号
+./Scripts/dev-session.sh shot a.png   # 只截自己那个窗口
+./Scripts/dev-session.sh log 60       # 看自己的日志
+./Scripts/dev-session.sh stop         # 只杀自己启动的 pid
+```
+
+它靠四个环境变量划清边界，都由 `Scripts/build-app.sh` 生成的 debug launcher
+预置（release 包一个都不带，行为不变）：
+
+| 变量 | 作用 | debug 默认 |
+|---|---|---|
+| `KRAAL_HERDR_SOCKET` | 连哪个 daemon | `/tmp/kraal-mine/herdr-client.sock` |
+| `KRAAL_DEV_BACKGROUND` | `1` = 不 activate、不 `orderFrontRegardless`、`.accessory`（不进 Dock/⌘Tab） | `1` |
+| `KRAAL_DEV_SESSION` | 隔离窗口位置与日志文件名 | 由 socket 路径派生（`dev-<base36>`） |
+| `KRAAL_DEV_BACKGROUND=0` | 想手动看界面时显式恢复前台行为 | — |
+
+窗口位置存 `KraalWindowFrame.<session>`、日志写 `~/Library/Logs/Kraal-<session>.log`，
+所以两个会话不会互相踩。**注意 `pkill -f KraalMac` 会把你自己的实例一起杀掉**
+——这是 `dev-session.sh stop` 按 pid 文件收尸的原因。
+
+在后台会话里做视觉验证不要截全屏，用日志里那行 `window: number=<id>`：
+
+```bash
+screencapture -x -o -l "$WINDOW_NUMBER" out.png   # 只截该窗口，压在你窗口下面也行
+```
+
+这样 agent 可以自证渲染结果，不需要把窗口提到前面，也不需要 Accessibility
+（Ghostty 由 Metal 绘制，AX 树几乎是空的）。
+
 ---
 
 ## 仓库结构
