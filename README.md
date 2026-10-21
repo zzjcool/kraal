@@ -186,7 +186,7 @@ Fixtures 在 Tests/KraalProtocolTests/Fixtures/
 ## 验证
 
 ```bash
-swift test      # 60 个测试
+swift test      # 132 个测试
 ```
 
 真正重要的是这几条：
@@ -216,16 +216,39 @@ swift test      # 60 个测试
 
 以 **Apache License, Version 2.0** 发布，全文见 [LICENSE](LICENSE)。
 
-协议类型的结构定义衍生自 [herdrdev/herdr](https://github.com/herdrdev/herdr)
-与 [penso/herdr-gpui](https://github.com/penso/herdr-gpui)（均为 Apache-2.0）。
+协议类型与行为的权威依据是 [herdrdev/herdr](https://github.com/herdrdev/herdr)
+（Apache-2.0），部分结构定义另参考 [penso/herdr-gpui](https://github.com/penso/herdr-gpui)。
 归属声明见 [NOTICE](NOTICE)；贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 
-## 致谢
+## 致谢与参考来源
 
-Kraal 的实现参考了以下开源项目。它们的作者在同样没有官方客户端文档的情况下，
-把这些协议与渲染问题想清楚并写了下来，读它们的代码省下了大量试错。
+Kraal 不是照着文档写的——官方没有客户端协议文档。以下项目按重要性排列，
+它们的源码是这份实现的事实依据。
+
+### [herdrdev/herdr](https://github.com/herdrdev/herdr)（Apache-2.0）—— 一手依据
+
+**官方实现，本项目的权威依据。** 协议语义、wire 字段、连接生命周期、侧边栏
+渲染规则，全部以它为准，不以我们的猜测为准。
+
+本文档写作时对照的是 `v0.9.5`（commit `143bf5f`），约 29 万行 Rust、399 个源文件。
+几个反复回来查的地方：
+
+| 官方位置 | 我们从中确认的事实 |
+|---|---|
+| `src/client/endpoint/supervisor.rs` | 每个 enabled endpoint 启动即连（`next_attempt: Some(now)`），握手一律 `surface_active: false`；退避 500ms→120s，稳定 60s 才重置 |
+| `src/client/endpoint/activation.rs` | 切换机器 = 翻转 surface 租约（`surface.set(false)` → `set(true)`），**全程不 disconnect transport** |
+| `src/client/endpoint/registry.rs` | `set_surface_active` 只改一个 bool |
+| `src/server/headless/render.rs` | 所有 shell client 都持续收 snapshot；只有非 active 的跳过 pane surface |
+| `src/client/shell/sidebar.rs`、`endpoint_sidebar.rs` | 侧栏行规则、`├─`/`└─` 嵌套、`↑ahead`/`↓behind` 双色 |
+| `src/client/shell/render.rs` | `endpoints.len() > 1` 是「多机」的唯一判据 |
+| `src/client/shell/settings.rs` | 设置是一个带页签的浮层，`prefix+s` 打开 |
+| `src/client/endpoint/catalog.rs`、`src/cli/machine.rs` | 机器增删只走 CLI，写入 `endpoints.json`，客户端 1s 轮询感知 |
+
+一条工作方法也来自它：**先读官方源码，再动手**。之前有次判断「终端版没有
+机器分组」，因为只 grep 了 `sidebar.rs` 而漏了 `endpoint_sidebar.rs`，结论正好
+相反——那次之后，凡是「官方有没有 X」的问题都必须给出 文件:行号 作为证据。
 
 ### [penso/herdr-gpui](https://github.com/penso/herdr-gpui)（Apache-2.0）
 
