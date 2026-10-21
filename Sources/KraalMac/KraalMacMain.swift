@@ -417,9 +417,14 @@ extension KraalAppDelegate: PaneContextMenuProviding, PaneContextTarget {
         // right-click in a background pane would silently act on another one.
         store.focus(paneId: paneId)
 
+        // Commands go to the menu bar, not to `self`: `MacMenuBar` is the object
+        // that answers `validateMenuItem` and implements `runCommand`. Pointing
+        // them at the delegate instead left them greyed out, because AppKit
+        // disables an item whose target does not respond to its selector.
         let menu = PaneContextMenuBar.menu(
             paneId: paneId,
             target: self,
+            commandTarget: menuBar ?? self,
             commandSelector: #selector(MacMenuBar.runCommand(_:))
         )
         // Anchor the menu to the click, not to the view's origin: this is what

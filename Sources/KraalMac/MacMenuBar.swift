@@ -246,6 +246,14 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
     @objc func runCommand(_ sender: NSMenuItem) {
         guard let store, let raw = sender.representedObject as? String,
               let command = AppCommand(rawValue: raw) else { return }
+        // A context menu carries the pane it was raised over, and that is more
+        // trustworthy than "whatever is focused now": the menu bar's items mean
+        // the focused pane, but a right-click means the pane under the pointer.
+        // Adopting it here keeps one selector honest for both callers without
+        // letting the two meanings drift apart.
+        if let paneId = sender.menu?.owningPaneId, command.isPaneScoped {
+            store.focus(paneId: paneId)
+        }
         KraalUI.perform(command, on: store, env: commandEnvironment())
     }
 
@@ -334,7 +342,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
     }
 }
 
-private extension AppCommand {
+extension AppCommand {
     /// Commands that need a focused pane to act on.
     var isPaneScoped: Bool {
         switch self {

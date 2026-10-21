@@ -25,11 +25,23 @@ import AppKit
 /// two menus silently diverge the moment one changed.
 @MainActor
 public enum PaneContextMenuBar {
-    /// Builds the menu for `paneId`, bound to `target` (the app delegate, which
-    /// owns the store and the command environment).
+    /// Builds the menu for `paneId`.
+    ///
+    /// Two targets, because the two halves of this menu travel different paths:
+    ///
+    /// * `target` receives the `PaneContextTarget` selectors — the actions that
+    ///   only a pane can serve (the clipboard reaches a Ghostty surface, and the
+    ///   rename prompt belongs to the window).
+    /// * `commandTarget` receives the `AppCommand` items and must implement
+    ///   `validateMenuItem` and the selector, because `autoenablesItems` is on by
+    ///   default: AppKit asks the target whether an item is enabled, and a target
+    ///   that does not respond to the selector gets its item greyed out. Routing
+    ///   commands to a target without menu validation makes every one of them
+    ///   permanently disabled, which is what this parameter exists to prevent.
     public static func menu(
         paneId: String,
         target: AnyObject,
+        commandTarget: AnyObject,
         commandSelector: Selector
     ) -> NSMenu {
         let menu = NSMenu()
@@ -48,20 +60,20 @@ public enum PaneContextMenuBar {
         menu.addItem(focus)
         menu.addItem(.separator())
 
-        menu.addItem(command: .splitRight, target: target, selector: commandSelector)
-        menu.addItem(command: .splitDown, target: target, selector: commandSelector)
-        menu.addItem(command: .toggleZoom, target: target, selector: commandSelector)
+        menu.addItem(command: .splitRight, target: commandTarget, selector: commandSelector)
+        menu.addItem(command: .splitDown, target: commandTarget, selector: commandSelector)
+        menu.addItem(command: .toggleZoom, target: commandTarget, selector: commandSelector)
         menu.addItem(.separator())
 
         let focusDirection = NSMenu(title: "Focus Pane")
         for command in AppCommand.paneMoveItems {
-            focusDirection.addItem(command: command, target: target, selector: commandSelector)
+            focusDirection.addItem(command: command, target: commandTarget, selector: commandSelector)
         }
         menu.addItem(submenu: focusDirection, title: "Focus Pane Direction")
 
         let swap = NSMenu(title: "Swap Pane")
         for command in AppCommand.paneSwapItems {
-            swap.addItem(command: command, target: target, selector: commandSelector)
+            swap.addItem(command: command, target: commandTarget, selector: commandSelector)
         }
         menu.addItem(submenu: swap, title: "Swap Pane")
 
@@ -86,7 +98,7 @@ public enum PaneContextMenuBar {
         menu.addItem(paste)
 
         menu.addItem(.separator())
-        menu.addItem(command: .clearPane, target: target, selector: commandSelector)
+        menu.addItem(command: .clearPane, target: commandTarget, selector: commandSelector)
         let rename = NSMenuItem(
             title: "Rename Pane…",
             action: #selector(PaneContextTarget.renamePane(_:)),
@@ -96,7 +108,7 @@ public enum PaneContextMenuBar {
         menu.addItem(rename)
 
         menu.addItem(.separator())
-        menu.addItem(command: .closePane, target: target, selector: commandSelector)
+        menu.addItem(command: .closePane, target: commandTarget, selector: commandSelector)
         return menu
     }
 }

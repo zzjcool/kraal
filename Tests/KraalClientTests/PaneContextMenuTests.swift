@@ -70,18 +70,38 @@ import AppKit
 
 /// A stand-in target: the menu only stores it, so any object works.
 @MainActor
-private final class StubTarget: NSObject {
+private final class StubTarget: NSObject, PaneContextTarget {
     @objc func runCommand(_ sender: NSMenuItem) {}
+    @objc func focusPane(_ sender: NSMenuItem) {}
+    @objc func copySelection(_ sender: NSMenuItem) {}
+    @objc func pasteIntoPane(_ sender: NSMenuItem) {}
+    @objc func renamePane(_ sender: NSMenuItem) {}
+}
+
+/// The target the command items are actually bound to. Kept distinct from
+/// `StubTarget` so the routing test below can tell the two apart.
+@MainActor
+private final class StubCommandTarget: NSObject, NSMenuItemValidation {
+    @objc func runCommand(_ sender: NSMenuItem) {}
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { true }
 }
 
 @Suite("Pane context menu contents")
 @MainActor
 struct PaneContextMenuContentsTests {
+    /// `NSMenuItem.target` is unretained, so the targets have to outlive the call
+    /// that binds them. Holding them in the struct keeps them alive for the whole
+    /// test; without that the items come back with a nil target and look broken
+    /// when they are not.
+    private let commandTarget = StubCommandTarget()
+    private let paneTarget = StubTarget()
+
     private func makeMenu() -> NSMenu {
         PaneContextMenuBar.menu(
             paneId: "w1:p7",
-            target: StubTarget(),
-            commandSelector: #selector(StubTarget.runCommand(_:))
+            target: paneTarget,
+            commandTarget: commandTarget,
+            commandSelector: #selector(StubCommandTarget.runCommand(_:))
         )
     }
 
@@ -146,6 +166,35 @@ struct PaneContextMenuContentsTests {
         for item in commandItems {
             let raw = item.representedObject as? String
             #expect(raw.flatMap(AppCommand.init(rawValue:)) != nil, "bad command on \(item.title)")
+        }
+    }
+
+    /// Regression test for panes whose menu opened with Split Right greyed out.
+    ///
+    /// `NSMenu.autoenablesItems` is on by default, so AppKit asks the *target*
+    /// whether each item is enabled and disables anything whose target does not
+    /// respond to the selector. The command items were pinned to the app delegate,
+    /// which relays to the menu bar through `representedObject` and therefore
+    /// implements neither `runCommand:` nor `validateMenuItem:` — every command
+    /// item rendered disabled while the pane-scoped ones (Focus, Copy, Paste,
+    /// Rename) stayed live, because those really are the delegate's selectors.
+    ///
+    /// The rule this pins: command items must target an object that both responds
+    /// to the command selector and validates menu items.
+    @Test("command items are bound to a target that can enable them")
+    func commandItemsTargetAValidatingObject() {
+        let menu = makeMenu()
+        let commandItems = menu.items.filter { $0.representedObject is String }
+        #expect(!commandItems.isEmpty)
+        for item in commandItems {
+            guard let target = item.target as? NSObject else {
+                Issue.record("command item \(item.title) has no target")
+                continue
+            }
+            #expect(target.responds(to: #selector(StubCommandTarget.runCommand(_:))),
+                    "\(item.title) targets an object that cannot receive its action")
+            #expect(target is NSMenuItemValidation,
+                    "\(item.title) targets an object AppKit cannot validate, so it stays greyed out")
         }
     }
 }
