@@ -399,12 +399,24 @@ public final class AppStore {
     }
 
     public func setSplitRatio(path: [Bool], ratio: Double) {
-        Task {
-            await call("layout.set_split_ratio", [
-                "path": path,
-                "ratio": ratio,
-            ])
-        }
+        let params = Self.splitRatioParams(path: path, ratio: ratio)
+        Task { await call("layout.set_split_ratio", params) }
+    }
+
+    /// The `layout.set_split_ratio` params, as a pure function.
+    ///
+    /// Follows the same pattern as `splitParams`: the body of a request that
+    /// silently targets the wrong thing is only testable as a value, and the
+    /// daemon does not reject a wrong or missing key.
+    ///
+    /// `SplitRatioPortTests` pins this against
+    /// `rootshell/rootshellTests/HerdrProtocolTests.swift:29`, which asserts the
+    /// exact param shape — including a `tab_id` this function does not send yet.
+    static func splitRatioParams(path: [Bool], ratio: Double) -> [String: Any] {
+        [
+            "path": path,
+            "ratio": ratio,
+        ]
     }
 
     public func invoke(commandId: String) {

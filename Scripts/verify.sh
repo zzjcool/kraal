@@ -29,8 +29,13 @@ swift build 2>&1 | tail -3
 check "${PIPESTATUS[0]}" "swift build"
 
 section "tests"
-swift test 2>&1 | grep -E "✔ Test run|✘|error:" | tail -8
-check "${PIPESTATUS[0]}" "swift test"
+# `swift test` is red on purpose: the tests ported from herdr / herdr-gpui /
+# rootshell pin behaviour this client does not have yet (docs/PORTED-TESTS.md).
+# The gate is "everything outside that known list stays green", which is what
+# test-baseline.sh asserts — otherwise a real regression is indistinguishable
+# from the 25 expected failures.
+./Scripts/test-baseline.sh 2>&1 | grep -E "✔ Test run|✘|error:" | tail -4
+check "${PIPESTATUS[0]}" "swift test (excluding known-ported reds)"
 
 # Scratch files go under a per-user directory. A fixed /tmp name collides across
 # users (and with leftovers from a root debug run), and the failed redirect then
