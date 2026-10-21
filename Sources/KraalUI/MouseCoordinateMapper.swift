@@ -100,4 +100,69 @@ public enum PaneMouse {
     public static func scrollLines(from delta: CGFloat) -> UInt16 {
         UInt16(max(1, min(Int(abs(delta).rounded()), 20)))
     }
+
+    /// Where a scroll gesture should move the pane's viewport.
+    ///
+    /// The pane's scrollback lives in the daemon, not in Ghostty: the renderer
+    /// paints a fixed screen with absolute cursor addressing and never emits a
+    /// newline, so the local terminal never accumulates history to scroll through
+    /// (measured — see `docs/DEBUGGING.md`). A wheel event therefore has to become
+    /// a `pane.scroll` request carrying an absolute offset, not a mouse report.
+    public enum ScrollTarget {
+        /// The offset to ask the daemon for, clamped to what exists.
+        ///
+        /// `offsetFromBottom` is where the viewport is now, `lines` is how far the
+        /// gesture moved (positive scrolls up). Clamping matters: overshooting the
+        /// top would make the daemon jump to the end of its history, so a fast
+        /// flick past the start would land somewhere unrelated.
+        public static func offset(
+            current: UInt64,
+            lines: Int,
+            maxOffset: UInt64
+        ) -> UInt64 {
+            let moved = Int64(current) + Int64(lines)
+            guard moved > 0 else { return 0 }
+            return min(UInt64(moved), maxOffset)
+        }
+
+        /// Whether a scroll is worth sending at all.
+        ///
+        /// A pane with one screenful of output has no history, and asking the
+        /// daemon to stay at offset 0 is a round trip that changes nothing.
+        public static func shouldSend(current: UInt64, lines: Int, maxOffset: UInt64) -> Bool {
+            guard maxOffset > 0, lines != 0 else { return false }
+            return offset(current: current, lines: lines, maxOffset: maxOffset) != current
+        }
+    }
+
+    /// Turns a stream of trackpad deltas into whole lines to scroll.
+    ///
+    /// A trackpad emits one event per frame, each a point or two, so rounding
+    /// every event up to a line makes a three-line flick scroll thirty — the
+    /// complaint that started this. The remainder is carried instead, the way
+    /// Ghostty's own `pending_scroll_y` does for its local scrollback.
+    public struct ScrollAccumulator: Sendable {
+        private var pending: CGFloat = 0
+        /// Height of one cell in points; the divisor that makes pixels into rows.
+        public let cellHeight: CGFloat
+
+        public init(cellHeight: CGFloat) {
+            self.cellHeight = max(cellHeight, 1)
+        }
+
+        /// Signed whole lines covered by this delta; zero means "not yet a row".
+        public mutating func lines(for delta: CGFloat) -> Int {
+            guard delta.isFinite, delta != 0 else { return 0 }
+            pending += delta
+            // Toward zero so a partial row keeps its sign instead of being lost.
+            let whole = (pending / cellHeight).rounded(.towardZero)
+            guard whole != 0 else { return 0 }
+            pending -= whole * cellHeight
+            return Int(whole)
+        }
+
+        public mutating func reset() {
+            pending = 0
+        }
+    }
 }

@@ -469,6 +469,69 @@ struct MouseMappingTests {
         #expect(PaneMouse.scrollLines(from: 999) == 20)
     }
 
+    @Test("scrolling up asks the daemon for a higher offset")
+    func scrollTargetMovesTowardHistory() {
+        // `pane.scroll` takes an absolute offset from the bottom, so a wheel-up
+        // gesture has to be turned into a position, not a delta.
+        #expect(PaneMouse.ScrollTarget.offset(current: 0, lines: 3, maxOffset: 100) == 3)
+        #expect(PaneMouse.ScrollTarget.offset(current: 10, lines: 3, maxOffset: 100) == 13)
+        #expect(PaneMouse.ScrollTarget.offset(current: 10, lines: -4, maxOffset: 100) == 6)
+    }
+
+    @Test("scrolling never crosses either end of the history")
+    func scrollTargetClamps() {
+        // Past the top: stay at the oldest row rather than wrapping to zero,
+        // which would look like a jump to the bottom.
+        #expect(PaneMouse.ScrollTarget.offset(current: 2, lines: 500, maxOffset: 100) == 100)
+        // Past the bottom: the newest row is offset 0, and it is a floor, not a
+        // wrap to `maxOffset`.
+        #expect(PaneMouse.ScrollTarget.offset(current: 1, lines: -50, maxOffset: 100) == 0)
+    }
+
+    @Test("a pane with no history never sends a scroll")
+    func scrollTargetSkipsHistorylessPane() {
+        // The daemon reports maxOffset 0 for a pane whose output fits on one
+        // screen. Asking it to move would be a round trip that changes nothing.
+        #expect(PaneMouse.ScrollTarget.shouldSend(current: 0, lines: 3, maxOffset: 0) == false)
+        // Already pinned at the top and scrolling further up: also nothing to do.
+        #expect(PaneMouse.ScrollTarget.shouldSend(current: 100, lines: 3, maxOffset: 100) == false)
+        // A real move.
+        #expect(PaneMouse.ScrollTarget.shouldSend(current: 10, lines: 3, maxOffset: 100) == true)
+        // No movement at all.
+        #expect(PaneMouse.ScrollTarget.shouldSend(current: 10, lines: 0, maxOffset: 100) == false)
+    }
+
+    @Test("a trackpad flick scrolls by distance, not by event count")
+    func scrollAccumulatorFollowsDistance() {
+        // A light flick is ~60 frames of a point or two. Rounding each frame up
+        // to a row turned 3 rows of movement into 60, which is the "much too
+        // fast" complaint. Banking the remainder gives the 3 it deserves.
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 18.5)
+        let lines = Array(repeating: 1.0, count: 60).map { accumulator.lines(for: $0) }
+        #expect(lines.reduce(0, +) == 3)
+    }
+
+    @Test("sub-row deltas are banked, not dropped or rounded up")
+    func scrollAccumulatorKeepsRemainder() {
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 10)
+        #expect(accumulator.lines(for: 4) == 0)
+        #expect(accumulator.lines(for: 4) == 0)
+        // 4 + 4 + 4 crosses one row, leaving 2 banked.
+        #expect(accumulator.lines(for: 4) == 1)
+        // The 2 still counts: 2 + 9 crosses another.
+        #expect(accumulator.lines(for: 9) == 1)
+    }
+
+    @Test("a zero cell height cannot turn every point into a row")
+    func scrollAccumulatorGuardsCellHeight() {
+        // A pane reporting no rows would divide to infinity and emit a row per
+        // event, which is the runaway this type exists to prevent.
+        var accumulator = PaneMouse.ScrollAccumulator(cellHeight: 0)
+        #expect(accumulator.cellHeight == 1)
+        #expect(accumulator.lines(for: 1) == 1)
+        #expect(accumulator.lines(for: 0.5) == 0)
+    }
+
     @Test("a lower content revision means the delta stream restarted")
     func streamRestarted() {
         // A tab switch makes the daemon re-project the pane and renumber from

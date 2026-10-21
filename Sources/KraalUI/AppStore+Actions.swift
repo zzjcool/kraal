@@ -68,8 +68,14 @@ extension AppStore {
         Task { await call("pane.clear", ["pane_id": paneId]) }
     }
 
-    public func scrollPane(paneId: String, delta: Int) {
-        Task { await call("pane.scroll", ["pane_id": paneId, "delta": delta]) }
+    /// Scrolls a pane's own history to an absolute position.
+    ///
+    /// The daemon's `pane.scroll` takes `offset_from_bottom`, not a delta: it sets
+    /// where the viewport should sit rather than moving it by some amount. Sending
+    /// a delta would be read literally as "jump to line N", which jumps to the top
+    /// of history on any upward scroll.
+    public func scrollPane(paneId: String, toOffsetFromBottom offset: UInt64) {
+        Task { await call("pane.scroll", ["pane_id": paneId, "offset_from_bottom": offset]) }
     }
 
     /// Re-reads config.toml on the daemon side (theme, keybindings, sidebar).

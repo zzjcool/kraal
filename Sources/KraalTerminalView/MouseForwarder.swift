@@ -46,6 +46,9 @@ public final class MouseForwarder {
     /// and neither should keep the other alive.
     private weak var paneActions: (any PaneContextMenuProviding)?
 
+    /// Points banked per pane between whole-row scrolls.
+    private var scrollAccumulators: [String: PaneMouse.ScrollAccumulator] = [:]
+
     public init(store: AppStore, paneActions: (any PaneContextMenuProviding)? = nil) {
         self.store = store
         self.paneActions = paneActions
@@ -124,6 +127,16 @@ public final class MouseForwarder {
             return true
         }
 
+        // A program that reports the mouse owns its own scrolling (a TUI's pager,
+        // a file list); the wheel belongs to it, not to the pane's history. Every
+        // other pane scrolls the daemon's scrollback instead — Ghostty has none
+        // to scroll, because the renderer paints a fixed screen with absolute
+        // cursor addressing and never emits a newline.
+        if event.type == .scrollWheel, !paneReportsMouse(location.paneId) {
+            scrollDaemonBacklog(for: event, location: location)
+            return false
+        }
+
         let kind = mouseKind(for: event)
         let modifiers = MouseModifiers.bits(from: event.modifierFlags)
         let lines = event.type == .scrollWheel
@@ -142,6 +155,66 @@ public final class MouseForwarder {
             lines: lines
         )
         return false
+    }
+
+    /// Scrolls the pane's own history by `pane.scroll`.
+    ///
+    /// `pane.scroll` takes an absolute `offset_from_bottom`, not a delta, so the
+    /// target is computed from the offset the daemon last reported. Sending a
+    /// delta would be read as "jump to line N", which is a different movement.
+    private func scrollDaemonBacklog(for event: NSEvent, location: PaneLocation) {
+        let paneId = location.paneId
+        guard let metrics = store.paneGeometry(for: paneId)?.scroll else {
+            // No metrics yet: the daemon has not reported this pane's history, so
+            // there is nothing to compute a target against.
+            return
+        }
+        let lines = scrollLines(for: event, paneId: paneId, viewSize: location.size)
+        guard PaneMouse.ScrollTarget.shouldSend(
+            current: metrics.offsetFromBottom,
+            lines: lines,
+            maxOffset: metrics.maxOffsetFromBottom
+        ) else { return }
+        // Bank what was actually asked for, not what was requested: asking for 20
+        // rows when only 5 remain would otherwise leave the accumulator thinking
+        // it moved 20 and swallow the next gesture.
+        let applied = Int(PaneMouse.ScrollTarget.offset(
+            current: metrics.offsetFromBottom,
+            lines: lines,
+            maxOffset: metrics.maxOffsetFromBottom
+        )) - Int(metrics.offsetFromBottom)
+        store.scrollPane(paneId: paneId, toOffsetFromBottom: UInt64(
+            Int(metrics.offsetFromBottom) + applied
+        ))
+    }
+
+    /// Whole lines for one scroll event, carrying the sub-line remainder.
+    ///
+    /// A wheel with detents already reports whole notches, so its delta is a line
+    /// count; a trackpad reports points and has to be banked until it covers a
+    /// cell. Treating them the same either loses the wheel or floods the trackpad.
+    private func scrollLines(for event: NSEvent, paneId: String, viewSize: CGSize) -> Int {
+        let delta = event.scrollingDeltaY
+        guard event.hasPreciseScrollingDeltas else {
+            scrollAccumulators[paneId]?.reset()
+            return delta > 0 ? 1 : (delta < 0 ? -1 : 0)
+        }
+        guard let rows = store.paneGeometry(for: paneId)?.innerRect.height, rows > 0 else {
+            return 0
+        }
+        // Cell height in points: `scrollingDeltaY` is points for a precise device,
+        // and the ratio of the view's height to its row count is scale-free.
+        let cellHeight = viewSize.height / CGFloat(rows)
+        var accumulator = scrollAccumulators[paneId]
+            ?? PaneMouse.ScrollAccumulator(cellHeight: cellHeight)
+        let lines = accumulator.lines(for: delta)
+        scrollAccumulators[paneId] = accumulator
+        return lines
+    }
+
+    /// Whether the program in this pane asked to receive mouse events itself.
+    private func paneReportsMouse(_ paneId: String) -> Bool {
+        store.paneGeometry(for: paneId)?.mouseReporting == true
     }
 
     /// Whether the program in `paneId` asked to receive mouse buttons itself.
