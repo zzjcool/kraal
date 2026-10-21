@@ -18,6 +18,14 @@ public enum BridgeError: Error, CustomStringConvertible {
     case wire(WireDecodeError)
     case transport(String)
     case requestTimeout(method: String)
+    /// The daemon answered with an `error` envelope instead of a result.
+    ///
+    /// This is a *reply*, not a transport failure, so nothing throws at the
+    /// socket layer — the envelope has to be inspected. Missing that is how a
+    /// refused `pane.split` looked like a success: the body carried
+    /// `{"error":{"code":"endpoint_busy"}}` and every caller that only checked
+    /// for a thrown error treated it as done.
+    case daemon(method: String, code: String, message: String)
 
     public var description: String {
         switch self {
@@ -37,6 +45,8 @@ public enum BridgeError: Error, CustomStringConvertible {
             detail
         case let .requestTimeout(method):
             "the daemon did not answer \(method) within the timeout"
+        case let .daemon(method, code, message):
+            "\(method) refused by the daemon: \(code) — \(message)"
         }
     }
 }

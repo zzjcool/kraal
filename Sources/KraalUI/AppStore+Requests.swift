@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import KraalClient
 
 extension AppStore {
     /// Whether the daemon lets this client say which surface it wants.
@@ -65,11 +66,49 @@ extension AppStore {
     /// after switching machines, which the UI showed as a permanent error even
     /// though the connection was live and correct.
     func call(_ method: String, _ params: [String: Any]) async {
-        guard let connection, await connection.currentBootId != nil else { return }
-        do {
-            _ = try await connection.request(method, params: params)
-        } catch {
-            lastError = "\(method): \(error)"
+        guard let connection, await connection.currentBootId != nil else {
+            // Silent by design when the handshake is still opening, but a pane
+            // command that reaches here is a dropped user action. Logging it is
+            // the difference between "the menu did nothing" and knowing why.
+            kraalLog("call: skipped \(method) (no boot id yet)")
+            return
         }
+        // One connection, one command at a time. Two calls issued in the same
+        // tick — focus followed by the action that focus was for — race, and the
+        // loser is refused with `endpoint_busy`. Retrying is correct and cheap:
+        // the refusal means nothing happened, so it is safe to send again.
+        for attempt in 0..<Self.busyRetryLimit {
+            do {
+                let response = try await connection.request(method, params: params)
+                kraalLog("call: ok \(method) \(Self.describe(params))"
+                    + (attempt > 0 ? " (retry \(attempt))" : ""))
+                _ = response
+                return
+            } catch where EndpointConnection.isBusyRefusal(error) {
+                if attempt == Self.busyRetryLimit - 1 {
+                    lastError = "\(method): the daemon stayed busy"
+                    kraalLog("call: BUSY \(method) \(Self.describe(params)) — gave up")
+                    return
+                }
+                // Short and increasing: the holder is a command the user just
+                // triggered, so it completes in milliseconds.
+                try? await Task.sleep(for: .milliseconds(20 * (attempt + 1)))
+            } catch {
+                lastError = "\(method): \(error)"
+                kraalLog("call: FAILED \(method) \(Self.describe(params)): \(error)")
+                return
+            }
+        }
+    }
+
+    /// How many times a refused-for-busy command is resent.
+    private static let busyRetryLimit = 4
+
+    /// Renders request params for the log without dumping every value: pane and
+    /// tab ids are what matter when a command lands somewhere unexpected.
+    nonisolated static func describe(_ params: [String: Any]) -> String {
+        params.keys.sorted()
+            .map { "\($0)=\(params[$0] ?? "nil")" }
+            .joined(separator: " ")
     }
 }

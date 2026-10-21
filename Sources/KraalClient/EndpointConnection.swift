@@ -253,7 +253,38 @@ public actor EndpointConnection {
                 continuation.resume(throwing: error)
             }
         }
+        try Self.throwIfErrorEnvelope(data, method: method)
         return data
+    }
+
+    /// Turns an `{"error":{...}}` reply body into a thrown error.
+    ///
+    /// The endpoint protocol reports refusals *in band*: the daemon answers the
+    /// request it was given, the frame arrives complete, and the failure lives in
+    /// the JSON body. Every caller that only checked for a thrown error therefore
+    /// treated a refusal as success. `pane.split` failed this way — the reply was
+    /// `{"error":{"code":"endpoint_busy","message":"this endpoint is still
+    /// processing another command"}}`, the app logged `call: ok`, and the split
+    /// silently never happened.
+    public static func throwIfErrorEnvelope(_ data: Data, method: String) throws {
+        guard !data.isEmpty else { return }
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let envelope = object as? [String: Any],
+              let error = envelope["error"] as? [String: Any] else { return }
+        let code = error["code"] as? String ?? "unknown"
+        let message = error["message"] as? String ?? ""
+        throw BridgeError.daemon(method: method, code: code, message: message)
+    }
+
+    /// Whether an error is the daemon's "one command at a time" refusal.
+    ///
+    /// Worth retrying, and worth retrying *here* rather than at each call site:
+    /// a single connection serves one request at a time, so any two commands
+    /// issued in the same tick race for it. Sending focus and then acting on the
+    /// result of that focus is exactly that pattern.
+    public static func isBusyRefusal(_ error: Error) -> Bool {
+        guard case let BridgeError.daemon(_, code, _) = error else { return false }
+        return code == "endpoint_busy"
     }
 
     // MARK: - Receiving

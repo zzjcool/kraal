@@ -45,6 +45,14 @@ public enum PaneContextMenuBar {
         commandSelector: Selector
     ) -> NSMenu {
         let menu = NSMenu()
+        // The menu bar's own menus disable AppKit's automatic validation because
+        // their items are driven by `validateMenuItem` on a target that always
+        // exists. A context menu has no such luxury: without this, AppKit asks
+        // the target about every item as the menu opens, and an item whose
+        // answer is "no" is silently greyed out — which looks exactly like a
+        // split that does nothing. Enabling is decided once, when the menu is
+        // built, from state the caller already knows.
+        menu.autoenablesItems = false
         // Pinning the pane id here is what makes the commands act on the pane that
         // was clicked rather than whichever one happened to be focused.
         menu.paneId = paneId
@@ -79,14 +87,18 @@ public enum PaneContextMenuBar {
 
         menu.addItem(.separator())
         // Copy is Ghostty's, not the daemon's: the selection lives in the terminal
-        // surface, so the menu item has to reach that view. It is disabled when
-        // there is nothing selected, which is why it is validated by the target.
+        // surface, so the menu item has to reach that view. `autoenablesItems` is
+        // off for this menu, so its enabled state has to be set here instead of
+        // being asked for at open time.
         let copy = NSMenuItem(
             title: "Copy",
             action: #selector(PaneContextTarget.copySelection(_:)),
             keyEquivalent: ""
         )
         copy.target = target
+        if let validating = target as? PaneContextMenuValidating {
+            copy.isEnabled = validating.paneHasSelection(paneId)
+        }
         menu.addItem(copy)
 
         let paste = NSMenuItem(
@@ -125,6 +137,16 @@ public protocol PaneContextTarget: AnyObject {
     func copySelection(_ sender: NSMenuItem)
     func pasteIntoPane(_ sender: NSMenuItem)
     func renamePane(_ sender: NSMenuItem)
+}
+
+/// What the menu needs to know about a pane before it opens.
+///
+/// Separate from `PaneContextTarget` because it is a question about state, not
+/// an action, and the caller may answer it without being the action target.
+@MainActor
+public protocol PaneContextMenuValidating: AnyObject {
+    /// Whether the pane has a selection to copy.
+    func paneHasSelection(_ paneId: String) -> Bool
 }
 
 // MARK: - Pane identity on the menu

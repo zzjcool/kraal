@@ -249,22 +249,59 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         // A context menu carries the pane it was raised over, and that is more
         // trustworthy than "whatever is focused now": the menu bar's items mean
         // the focused pane, but a right-click means the pane under the pointer.
-        // Adopting it here keeps one selector honest for both callers without
-        // letting the two meanings drift apart.
-        if let paneId = sender.menu?.owningPaneId, command.isPaneScoped {
-            store.focus(paneId: paneId)
-        }
-        KraalUI.perform(command, on: store, env: commandEnvironment())
+        //
+        // The id is handed to `perform` instead of being applied by focussing
+        // first. `store.focus(paneId:)` only *sends* a request on a Task, so
+        // calling it here and then reading `actionPaneId` inside the command
+        // still saw the previous focus — every pane action from a context menu
+        // ran against the wrong pane, which is why split and close appeared to
+        // do nothing when the menu was raised over an unfocused pane.
+        let target = command.isPaneScoped ? sender.menu?.owningPaneId : nil
+        dispatch(command, target: target)
     }
 
-    private func commandEnvironment() -> CommandEnvironment {
+    /// Runs a command as if a context menu over `paneId` had raised it.
+    ///
+    /// Exists so a scripted probe can exercise the real dispatch path instead of
+    /// reimplementing it. Everything a click goes through — target resolution,
+    /// `CommandEnvironment`, `perform` — is the same code.
+    func runProbe(command: AppCommand, paneId: String?) {
+        dispatch(command, target: command.isPaneScoped ? paneId : nil)
+    }
+
+    /// The one place a menu command becomes a store action.
+    private func dispatch(_ command: AppCommand, target: String?) {
+        guard let store else { return }
+        // The command below is dispatched with `target`, so focus does not have
+        // to be applied first — and must not be: one connection serves one
+        // command at a time, so firing `pane.focus` and the real action in the
+        // same tick made the daemon refuse the *action* with `endpoint_busy`.
+        // The refused split then looked like a split that did nothing.
+        //
+        // Focus still follows the click, after the command has been sent, so a
+        // pane action lands on the pane the user chose and the focused pane
+        // catches up afterwards.
+        kraalLog("runCommand: \(command.rawValue) target=\(target ?? "nil") "
+            + "focused=\(store.actionPaneId ?? "nil")")
+        KraalUI.perform(
+            command,
+            on: store,
+            env: commandEnvironment(targetPaneId: target)
+        )
+        if let target {
+            store.focus(paneId: target)
+        }
+    }
+
+    private func commandEnvironment(targetPaneId: String? = nil) -> CommandEnvironment {
         CommandEnvironment(
             prompt: { [weak self] prompt in self?.presentRename(prompt) },
             toggleSidebar: actions.toggleSidebar,
             toggleStatusBar: actions.toggleStatusBar,
             showCommands: actions.showCommands,
             showShortcuts: actions.showShortcuts,
-            showSettings: actions.showSettings
+            showSettings: actions.showSettings,
+            targetPaneId: targetPaneId
         )
     }
 
@@ -344,18 +381,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
 
 extension AppCommand {
     /// Commands that need a focused pane to act on.
-    var isPaneScoped: Bool {
-        switch self {
-        case .closePane, .clearPane, .toggleZoom, .renamePane,
-             .splitRight, .splitDown, .previousPane, .nextPane,
-             .focusLeft, .focusRight, .focusUp, .focusDown,
-             .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
-             .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown:
-            return true
-        default:
-            return false
-        }
-    }
+    var isPaneScoped: Bool { AppCommand.paneScopedCommands.contains(self) }
 
     var isSwap: Bool {
         switch self {

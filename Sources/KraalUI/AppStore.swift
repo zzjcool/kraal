@@ -300,7 +300,7 @@ public final class AppStore {
     /// Split the pane the user is actually in.
     public func splitActionPane(_ orientation: SplitOrientation = .right) {
         guard let paneId = actionPaneId else { return }
-        Task { await call("pane.split", ["pane_id": paneId, "direction": orientation.rawValue]) }
+        splitPane(paneId: paneId, orientation: orientation)
     }
 
     public func toggleZoomActionPane() {
@@ -359,13 +359,39 @@ public final class AppStore {
         Task { await call("workspace.create", [:]) }
     }
 
+    /// Splits `paneId`, placing the new pane beside it.
+    ///
+    /// The parameter is `target_pane_id`, not `pane_id`. `PaneSplitParams` has
+    /// no `pane_id` field at all — every other pane method takes one, so the
+    /// mistake is invisible: the daemon drops the unknown key as it does any
+    /// other, `direction` alone satisfies the request, and the split lands on
+    /// whatever tab the daemon considers focused instead of the pane the user
+    /// clicked. Measured against 0.9.5: `pane_id: wS:p1` from workspace `wS`
+    /// created a pane in `wT:t1`; `target_pane_id: wS:p1` created it in `wS:t1`.
+    ///
+    /// Pass `AppStore.splitParams(..)` rather than building the dictionary here:
+    /// the wire names have to stay testable without a live daemon.
     public func splitPane(paneId: String, orientation: SplitOrientation = .right) {
+        let params = Self.splitParams(paneId: paneId, orientation: orientation)
         Task {
-            await call("pane.split", [
-                "pane_id": paneId,
-                "direction": orientation.rawValue,
-            ])
+            await call("pane.split", params)
+            // The daemon does not announce the new pane on its own: without an
+            // explicit re-projection the split stayed invisible until the next
+            // unrelated snapshot. Matches what `focus(tabId:)` already does.
+            await reprojectSurface()
         }
+    }
+
+    /// The wire body of `pane.split`, kept separate so a test can assert the
+    /// field name without opening a connection.
+    public nonisolated static func splitParams(
+        paneId: String,
+        orientation: SplitOrientation = .right
+    ) -> [String: Any] {
+        [
+            "target_pane_id": paneId,
+            "direction": orientation.rawValue,
+        ]
     }
 
     public func toggleZoom(paneId: String) {

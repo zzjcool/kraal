@@ -233,6 +233,46 @@ public enum CommandPrompt: Identifiable, Sendable {
     }
 }
 
+// MARK: - Pane scoping
+
+public extension AppCommand {
+    /// Commands that act on one pane.
+    ///
+    /// Kept as data rather than a `switch` so the same list answers two
+    /// questions that must never disagree: which commands carry a context menu's
+    /// pane id into `perform`, and which ones `validateMenuItem` disables when
+    /// there is no pane to act on. When these were separate switches, a command
+    /// could be routed with a pane and validated without one.
+    static let paneScopedCommands: Set<AppCommand> = [
+        .closePane, .clearPane, .toggleZoom, .renamePane,
+        .splitRight, .splitDown, .previousPane, .nextPane,
+        .focusLeft, .focusRight, .focusUp, .focusDown,
+        .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
+        .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown,
+    ]
+}
+
+/// Which pane a command should act on.
+///
+/// A context menu names its pane; the menu bar means the focused one. The
+/// precedence has to be decided *synchronously*, at the moment the command is
+/// dispatched. The previous implementation instead set focus first and let the
+/// command read it back, which silently lost the menu's pane: `focus(paneId:)`
+/// is a request on a `Task`, so `snapshot.focusedPaneId` had not moved yet.
+///
+/// An empty string is treated as absent because that is what `NSMenu.paneId`
+/// holds for a menu that was never given one.
+public enum AppCommands {
+    public static func resolveTargetPane(
+        contextPaneId: String?,
+        focusedPaneId: String?
+    ) -> String? {
+        if let contextPaneId, !contextPaneId.isEmpty { return contextPaneId }
+        if let focusedPaneId, !focusedPaneId.isEmpty { return focusedPaneId }
+        return nil
+    }
+}
+
 // MARK: - Performing a command
 
 /// Applies a command to the store. Kept as a free function so the menu bar,
@@ -250,6 +290,17 @@ public struct CommandEnvironment {
     /// machines are configuration, and a File-menu dialog put them next to the
     /// everyday workspace actions.
     public var showSettings: () -> Void
+    /// The pane a context menu was raised over, when there was one.
+    ///
+    /// A right-click means "the pane under the pointer", not "whatever is
+    /// focused now" — and those two can differ, especially across machines.
+    /// This used to be applied by calling `store.focus(paneId:)` before
+    /// `perform`, which does not work: focus is a request on a `Task`, so
+    /// `actionPaneId` still read the *old* `snapshot.focusedPaneId` by the time
+    /// the command ran, and every pane action landed on the previously focused
+    /// pane. Passing the id through the environment keeps the decision
+    /// synchronous and explicit.
+    public var targetPaneId: String?
 
     public init(
         prompt: @escaping (CommandPrompt) -> Void = { _ in },
@@ -257,7 +308,8 @@ public struct CommandEnvironment {
         toggleStatusBar: @escaping () -> Void = {},
         showCommands: @escaping () -> Void = {},
         showShortcuts: @escaping () -> Void = {},
-        showSettings: @escaping () -> Void = {}
+        showSettings: @escaping () -> Void = {},
+        targetPaneId: String? = nil
     ) {
         self.prompt = prompt
         self.toggleSidebar = toggleSidebar
@@ -265,6 +317,7 @@ public struct CommandEnvironment {
         self.showCommands = showCommands
         self.showShortcuts = showShortcuts
         self.showSettings = showSettings
+        self.targetPaneId = targetPaneId
     }
 }
 
@@ -295,7 +348,7 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
          .focusLeft, .focusRight, .focusUp, .focusDown,
          .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
          .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown:
-        performPaneAction(command, on: store)
+        performPaneAction(command, on: store, target: env.targetPaneId)
 
     case .toggleSidebar, .toggleStatusBar, .commandPalette,
          .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
@@ -324,7 +377,13 @@ private func performCreateRenameClose(
             env.prompt(.renameTab(tabId: tab.tabId, current: tab.label))
         }
     case .renamePane:
-        if let paneId = store.actionPaneId {
+        // The pane the menu was raised over, when there was one; otherwise the
+        // focused pane. Reading `actionPaneId` alone is what renamed the wrong
+        // pane from a context menu.
+        if let paneId = AppCommands.resolveTargetPane(
+            contextPaneId: env.targetPaneId,
+            focusedPaneId: store.actionPaneId
+        ) {
             env.prompt(.renamePane(
                 paneId: paneId,
                 current: store.paneLabel(paneId) ?? ""
@@ -332,7 +391,15 @@ private func performCreateRenameClose(
         }
     case .closeWorkspace: store.closeActionWorkspace()
     case .closeTab: store.closeActionTab()
-    case .closePane: store.closeActionPane()
+    case .closePane:
+        // Same reason as rename: a menu names its pane, a chord means the
+        // focused one. `closeActionPane()` alone closed whatever was focused
+        // when the right-click landed on a different pane.
+        if let paneId = env.targetPaneId {
+            store.close(paneId: paneId)
+        } else {
+            store.closeActionPane()
+        }
     default: break
     }
 }
@@ -358,13 +425,26 @@ private func performNavigation(_ command: AppCommand, on store: AppStore) {
 }
 
 @MainActor
-private func performPaneAction(_ command: AppCommand, on store: AppStore) {
+private func performPaneAction(
+    _ command: AppCommand,
+    on store: AppStore,
+    target paneId: String?
+) {
+    // A context menu names its pane; the menu bar does not, and means the
+    // focused one.
+    let target = AppCommands.resolveTargetPane(
+        contextPaneId: paneId,
+        focusedPaneId: store.actionPaneId
+    )
     switch command {
-    case .splitRight: store.splitActionPane(.right)
-    case .splitDown: store.splitActionPane(.down)
+    case .splitRight:
+        if let target { store.splitPane(paneId: target, orientation: .right) }
+    case .splitDown:
+        if let target { store.splitPane(paneId: target, orientation: .down) }
     case .clearPane:
-        if let paneId = store.actionPaneId { store.clearPane(paneId: paneId) }
-    case .toggleZoom: store.toggleZoomActionPane()
+        if let target { store.clearPane(paneId: target) }
+    case .toggleZoom:
+        if let target { store.toggleZoom(paneId: target) }
     default:
         guard let direction = command.direction else { return }
         switch command {
