@@ -269,6 +269,40 @@ kraal --socket <B> send-text --pane w1:p1 --text "clear; echo MACHINE_B"
 - 远端 herdr 通过 `ssh -o BatchMode=yes` 免交互认证
 - 本机 `nj-rssyes` 是 **Debian Linux**（非 macOS），不能跑 macOS GUI 隔离
 
+### 4.6 Tart VM（`tahoe-base`）作为验证环境
+
+宿主机上有一个常驻的 Tart VM，验证优先级高于直接动宿主机：真正 macOS 语义
+（TCC、签名、Spotlight、`darwin` 行为）在宿主机上改东西代价大，在 VM 里毁掉重来
+很便宜。
+
+```bash
+tart list                      # 确认 tahoe-base 是 running
+tart ip tahoe-base             # 例如 192.168.64.4
+tart exec tahoe-base uname -a  # 不要写 `--`，会 exit 125
+```
+
+VM 没起来时无头启动（不抢焦点，和在跑的桌面并存）：
+
+```bash
+tart run --no-graphics tahoe-base
+```
+
+**限制（2026-10 实测，本机 Tart 2.41.1 / macOS 26.6.2 build 25G83）**
+
+| 项 | 实际情况 | 影响 |
+| --- | --- | --- |
+| Xcode | **没有**。`xcode-select -p` = `/Library/Developer/CommandLineTools`，`xcodebuild` 报 “requires Xcode” | 能跑 `swift build` / `swift test`，**不能** `xcodebuild`、不能出 `.app` 包 |
+| Swift | 有。`/usr/bin/swift`，Swift 6.4，target `arm64-apple-macosx26.0` | 纯 SwiftPM 验证可行 |
+| 共享目录 | **没有**。`/Volumes` 只有 `Macintosh HD`，无 VirtioFS | 宿主机↔guest 传文件只能靠 `tart exec` 的 stdio 管道或走网络 |
+| Automation Mode | **关着**。有 `TCC.db` 但没有自动化/辅助功能授权 | 需要 UI 自动化的验证（点按、截图驱动）在 guest 里做不了 |
+| 常用命令 | 缺 `mount`、部分 `system_profiler` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf` |
+
+**不要拉 `macos-tahoe-xcode` 大镜像**，除非明确需要 Xcode 且用户同意——它几十 GB，
+而这里的绝大多数验证（SwiftPM 构建、纯逻辑、协议）用不上 Xcode。
+
+因此分工是：**逻辑与测试放 VM**（`swift test` 全绿），**app 打包与 GUI/点击类验证
+仍留在宿主机**（要 `xcodebuild` 和 Automation Mode）。
+
 ---
 
 ## 5. 已知待验证项（承接 DESIGN.md §12）
