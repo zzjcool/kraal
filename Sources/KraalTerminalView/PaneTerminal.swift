@@ -411,30 +411,70 @@ public final class PaneTerminalModel {
 }
 
 /// Hosts the pane models for one window and keeps them in sync with the store.
+///
+/// Keys are `(machine, paneId)`, not `paneId` alone. Pane ids are scoped to one
+/// daemon — upstream says so outright: "Workspace, tab, pane IDs, and agent names
+/// are scoped to one server. Two machines may both contain `w1:p1`"
+/// (`docs/next/website/src/content/docs/connecting-machines.mdx:118`). Keying on
+/// the pane id alone made two machines' `w1:p1` share one model, and with it one
+/// Ghostty `InMemoryTerminalSession`: the scrollback, the alternate-screen state
+/// and the cursor of the machine you just left were still inside the surface that
+/// went on to render the new one. A full-screen program like btop lives entirely
+/// in the alternate screen, so that leak showed up as its picture surviving into
+/// the other machine's pane.
 @MainActor
 @Observable
 public final class PaneTerminalPool {
-    private var models: [String: PaneTerminalModel] = [:]
+    private var models: [Key: PaneTerminalModel] = [:]
     private let onInput: @Sendable (String, Data) -> Void
+
+    /// Which machine a model belongs to, plus the pane inside it.
+    private struct Key: Hashable {
+        let machine: String
+        let paneId: String
+    }
+
+    /// The machine whose panes the pool currently holds.
+    ///
+    /// A switch drops every model: their surfaces belong to another daemon's
+    /// session, so there is nothing in them worth carrying across, and keeping
+    /// them alive is how the previous machine's screen state leaked into the next.
+    private var machine: String?
 
     public init(onInput: @escaping @Sendable (String, Data) -> Void) {
         self.onInput = onInput
     }
 
+    /// Points the pool at the machine whose panes it is about to be asked for.
+    ///
+    /// Called before any model is handed out for a new machine. A switch retires
+    /// every model unconditionally: they are bound to the other daemon's session,
+    /// and the whole reason `w1:p1` on two machines must not share a surface is
+    /// that the Ghostty state inside it belongs to exactly one of them.
+    ///
+    /// Staying on the same machine is a no-op, which is the normal case —
+    /// switching workspaces never reaches this.
+    public func selectMachine(_ identifier: String) {
+        guard machine != identifier else { return }
+        machine = identifier
+        models.removeAll()
+    }
+
     public func model(for paneId: String) -> PaneTerminalModel {
-        if let existing = models[paneId] {
+        let key = Key(machine: machine ?? "", paneId: paneId)
+        if let existing = models[key] {
             return existing
         }
         let model = PaneTerminalModel(paneId: paneId) { [weak self] data in
             self?.onInput(paneId, data)
         }
-        models[paneId] = model
+        models[key] = model
         return model
     }
 
     /// Drops terminals for panes that no longer exist, releasing their surfaces.
     public func prune(keeping paneIds: Set<String>) {
-        for key in models.keys where !paneIds.contains(key) {
+        for key in models.keys where !paneIds.contains(key.paneId) {
             models.removeValue(forKey: key)
         }
     }

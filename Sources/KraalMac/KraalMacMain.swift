@@ -81,6 +81,11 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             guard let surface = store.surface else {
                 return AnyView(Color(nsColor: .textBackgroundColor))
             }
+            // Point the pool at whichever machine this surface came from before
+            // asking it for a model. Pane ids are only unique within one daemon
+            // (two machines can both have `w1:p1`), so the pool keys on the pair
+            // and drops everything when the machine actually changes.
+            pool.selectMachine(surface.bootId)
             let model = pool.model(for: paneId)
             model.onCellMetrics = { [weak store] cellSize in
                 guard let store else { return }
