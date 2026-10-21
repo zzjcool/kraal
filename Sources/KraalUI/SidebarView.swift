@@ -186,10 +186,31 @@ struct SidebarView: View {
                 }
             }
         }
+        // The row looks like one 20pt band — it has a rounded highlight of that
+        // height when active — so every part of that band has to respond. It
+        // used to depend on `padding(.vertical, 2)` sitting *inside* a
+        // `contentShape` that carried no gesture: the 2pt above and below the
+        // 16pt hit areas were dead, and because the list spaces rows by 0 that
+        // made a 4pt dead strip between every pair of machines. Clicking a row
+        // near its edge silently did nothing, or landed on its neighbour.
         .padding(.vertical, 2)
-        .padding(.horizontal, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .onTapGesture {
+            // The band itself falls back to the label's action. The fold square
+            // sits above this and keeps its own tap, so a click on the arrow
+            // still only folds — `onTapGesture` does not report a location, which
+            // is why the two targets are siblings rather than one hit-tested view.
+            if isActive {
+                store.collapsedEndpoints.remove(endpoint.id)
+            } else {
+                store.selectEndpoint(endpoint)
+            }
+        }
+        .padding(.horizontal, 6)
+        // The label's `Spacer` only stretches the label against its siblings;
+        // the row itself still needs to claim the sidebar's full width or its
+        // highlight would stop short of the right edge.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
                 .fill(isActive ? Color.accentColor.opacity(0.10) : .clear)
