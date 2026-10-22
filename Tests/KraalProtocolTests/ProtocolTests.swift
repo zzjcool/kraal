@@ -537,6 +537,22 @@ struct ClientMessageEncodingTests {
         #expect(Array(payload) == [13, 1, 0x70, 1, 3, 4, 0x61, 0x0A, 0x62, 0x0A])
     }
 
+    /// A popup's keystrokes go out as tag 14, addressed by *terminal id*, not as
+    /// tag 13 addressed by pane id.
+    ///
+    /// The distinction is the whole feature. `tag 13` names a pane, and there is no
+    /// pane for a popup — sending these there would type them into whatever is
+    /// focused underneath the popup. The encoder has carried tag 14 all along; no
+    /// caller ever sent it, so nothing pinned what the bytes look like.
+    @Test("popup input encodes as tag 14 with the terminal id")
+    func popupInputEvent() {
+        let payload = ClientMessageEncoder.encode(
+            .clientShellPopupInput(terminalId: "t1", events: [.paste("hi")])
+        )
+        // tag 14 | "t1" | 1 event | paste(3) | len 2 | "hi"
+        #expect(Array(payload) == [14, 2, 0x74, 0x31, 1, 3, 2, 0x68, 0x69])
+    }
+
     /// Why the contrast is worth stating: the decoder coalesces runs of text into
     /// one `textCommit`, so sending a paste as bytes does *not* produce a
     /// per-character event stream on this side. The damage happens at the daemon:

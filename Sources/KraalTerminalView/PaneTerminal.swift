@@ -68,6 +68,36 @@ public final class PaneTerminalModel {
     /// incremental repaint only touches rows that changed — so the skew survives
     /// every later update until the screen is explicitly cleared.
     private var needsCleanRepaint = false
+    /// Paints a popup's own grid.
+    ///
+    /// A popup carries a complete `FrameData` of its own — it is a separate terminal
+    /// on the daemon, not a crop of the surface — so this bypasses the whole
+    /// crop/diff/geometry path in `apply(surface:)` and paints the frame directly.
+    ///
+    /// The diffing is skipped on purpose. A popup is short-lived and small, its
+    /// revision numbering is its own (not the surface's), and diffing it against the
+    /// previous popup's baseline across an open/close cycle would paint one popup's
+    /// cells onto another's. Repainting whole costs a few hundred cells per frame.
+    ///
+    /// - Parameter revision: the daemon's `contentRevision` for this popup, used only
+    ///   to skip frames that changed nothing.
+    public func applyPopup(frame: FrameData, revision: UInt64) {
+        guard revision != lastRevision || frameGrid == nil else { return }
+        lastRevision = revision
+        frameGrid = frame
+
+        // Same reason as `apply(surface:)`: the terminal attaches asynchronously, and
+        // a frame that arrives before the grid exists has nowhere to go.
+        guard let grid = state.surfaceSize, grid.columns > 0, grid.rows > 0 else {
+            pendingFrame = frame
+            return
+        }
+        pendingFrame = nil
+        renderer.reset()
+        session.receive(Data(clearScreenSequence.utf8))
+        session.receive(renderer.render(frame))
+    }
+
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 

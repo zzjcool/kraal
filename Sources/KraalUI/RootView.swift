@@ -36,16 +36,23 @@ public struct RootView: View {
     /// copy mode — the status bar simply has one less thing to show.
     private let copyModeBanner: CopyModeBanner?
 
+    /// Builds the popup's terminal view. Injected like `paneContent` so this file
+    /// stays free of the Ghostty dependency.
+    private let popupPaneContent: (AppStore, ClientShellPopupSurface, PopupGeometry) -> AnyView
+
     public init(
         store: AppStore,
         windowActions: WindowActions? = nil,
         copyModeBanner: CopyModeBanner? = nil,
-        paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView
+        paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView,
+        popupPaneContent: @escaping (AppStore, ClientShellPopupSurface, PopupGeometry) -> AnyView
+            = { _, _, _ in AnyView(Color(nsColor: .textBackgroundColor)) }
     ) {
         _store = State(initialValue: store)
         self.windowActions = windowActions ?? WindowActions()
         self.copyModeBanner = copyModeBanner
         self.paneContent = paneContent
+        self.popupPaneContent = popupPaneContent
     }
 
     private var content: some View {
@@ -64,9 +71,14 @@ public struct RootView: View {
                     TabBarView()
                         .environment(store)
                     Divider()
-                    PaneLayoutView { paneId, geometry in
-                        paneContent(store, paneId, geometry)
-                    }
+                    PaneLayoutView(
+                        paneContent: { paneId, geometry in
+                            paneContent(store, paneId, geometry)
+                        },
+                        popupContent: { popup, geometry in
+                            popupPaneContent(store, popup, geometry)
+                        }
+                    )
                     .environment(store)
                     Divider()
                 }
