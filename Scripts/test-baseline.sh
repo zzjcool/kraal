@@ -74,7 +74,8 @@ REDS=(
     # Split request shape — rootshell HerdrProtocolTests:29
     "KraalClientTests.SplitRatioPortTests/ratioRequestShape()"
     # Backoff reporting — herdr supervisor.rs:1132
-    "KraalClientTests.ConnectionLimitTests/backoffIsBounded()"
+    # backoffIsBounded used to be here: issue #9 made scheduleEndpointRetry the
+    # single source of the delay, so the countdown now matches the sleep.
 )
 
 if [ "${1:-}" = "--list" ]; then
