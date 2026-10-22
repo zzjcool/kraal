@@ -18,8 +18,8 @@ SPDX-FileCopyrightText: 2026 zzjcool
 协议层和渲染层已经对得上，**差的几乎全是"客户端自己该实现的东西"**：
 copy mode、滚动条、popup 浮层、通知/声音、OSC 8 链接、光标形状、鼠标增强手势。
 
-§7 列了 9 个当时定位到的错误。**其中 7 个已修**（下表），剩下的 7-5/7-6/7-7
-属于输入语义，见 issue #20。复核时间 2026-10-22，对照 `origin/main`。
+§7 列了 9 个当时定位到的错误。**全部已修**（下表）。复核时间 2026-10-22，
+对照 `origin/main`。
 
 ### §7 现状
 
@@ -29,9 +29,9 @@ copy mode、滚动条、popup 浮层、通知/声音、OSC 8 链接、光标形�
 | 7-2 | `pane.split` 传 `pane_id` | ✅ 已修（`AppStore.swift:368-396` 改用 `target_pane_id`） |
 | 7-3 | `workspace.close` 漏 `close_group` | ✅ 已修 |
 | 7-4 | 端点请求不解析 `ErrorBody` | ✅ 已修（`EndpointConnection.throwIfErrorEnvelope`） |
-| 7-5 | SS3 修饰符写死 0 | ❗ 仍在（`TerminalInputDecoder.swift:177`） |
-| 7-6 | 粘贴没走 `paste` 语义 | ❗ 仍在（`MacMenuBar.swift:459-463`） |
-| 7-7 | `clientShellKeyboardReportAll` 被丢弃 | ❗ 仍在（`EndpointConnection.swift:474`） |
+| 7-5 | SS3 修饰符写死 0 | ✅ 已修（SS3 与 CSI 共用参数扫描） |
+| 7-6 | 粘贴没走 `paste` 语义 | ✅ 已修（`AppStore.sendPaste`，⌘V 与右键同路） |
+| 7-7 | `clientShellKeyboardReportAll` 被丢弃 | ✅ 已修（驱动 `tracksRelease`） |
 | 7-8 | 侧边栏 rules 用了 `when`/`value` | ✅ **已修 → PR #17** |
 | 7-9 | endpoint 命令通道并发撞 `endpoint_busy` | ✅ 已修（`EndpointConnection.isBusyRefusal` + 4 次退避重试） |
 
@@ -232,17 +232,33 @@ bit4=SLOW_BLINK、**bit5=RAPID_BLINK**、**bit6=REVERSED**。
 转成 `BridgeError.daemon(method:code:message)`，`AppStore.call` 会记日志并
 把 code 露出来。
 
-### ⚠️ 7-5 `parseCSI` 把修饰符写死为 0（SS3 分支）
+### ✅ 7-5（已修）`parseCSI` 把修饰符写死为 0（SS3 分支）
 `TerminalInputDecoder.swift:177` `let modifiers: UInt8 = 0`，`ss3Event` 全部收到 0。
 xterm 的 SS3 形如 `ESC O 1;5 P`（F1+Ctrl），我方只解析 3 字节 `ESC O <final>`，
 所以**带修饰的 F1–F4 会丢修饰符，甚至把 `1;5` 当文本打进 pane**。
 （CSI 分支正确走 `modifiers(fromXterm:)`，只有 SS3 这条路径有问题。）
 
-### ⚠️ 7-6 粘贴路径没走 `paste` 事件
+**修法**：SS3 与 CSI 共用同一段「参数 + final byte」扫描，只是 final 交给
+`ss3Event`。`ss3Event` 按 CSI 的同一规则读 `;N` 并调
+`modifiers(fromXterm:)`。`ESC O P`（无参数）与 `ESC O 1;1 P`（xterm 写「无修饰」）
+都必须是 m0 —— 测试两种都钉了。
+
+### ✅ 7-6（已修）粘贴路径没走 `paste` 事件
 `KraalMacMain.swift:456-463` 的 Paste 直接 `sendInput(Data(text.utf8))`，
 经 `TerminalInputDecoder` 变成一串 `textCommit`。上游 `ClientPaneInputEvent::Paste`
 （`wire.rs:145-147`）是给 bracketed paste 用的独立语义，我方 `Encoder.swift:307`
 能编码但**没有任何调用点** → 多行粘贴进 shell 会被逐行执行。
+
+**修法**：新增 `AppStore.sendPaste(_:to:)`（不解码，否则粘贴文本里的字面 ESC
+会变成方向键）。两个入口都改走 `AppCommand.paste`：⌘V 原来是
+`NSText.paste` → responder chain（pane 里没有视图实现它，等于什么都没发生），
+右键菜单原来直接 `sendInput`。经 `AppCommand` 统一后两处同路。
+
+**实测差异**（`scripts` 未覆盖的部分）：`TerminalInputDecoder` 会把连续文本合并成
+**一个** `textCommit`，所以差别不在事件数量，而在 wire tag（1 vs 3）与 daemon
+侧的语义——所以测试钉的是 tag。
+
+### ✅ 7-7（已修）`clientShellKeyboardReportAll` 被丢弃
 
 ### ⚠️ 7-7 `clientShellKeyboardReportAll` 被丢弃
 `EndpointConnection.swift:442-447` 把 tag17 归进"byte-level terminal traffic"直接
@@ -250,6 +266,16 @@ xterm 的 SS3 形如 `ESC O 1;5 P`（F1+Ctrl），我方只解析 3 字节 `ESC 
 （`render.rs:205-226`），并在重放时重发（`surface_interest.rs:801`）。
 我方不需要 prefix 模式，但 **Kitty keyboard 模式的 pane 是否拿到 key release
 完全取决于这个开关**；丢掉的直接后果是需要 release 的 TUI 收到不完整事件。
+
+**修法**：事件改成 `ConnectionEvent.keyboardReportAll(enabled:)`，存进
+`AppStore.keyboardReportAll`，`sendInput` 每次把它写进新的
+`TerminalInputDecoder.reportsAllKeys`，由后者决定所有 `key` 事件的
+`tracksRelease`（7 处硬编码 `false` 全部替换）。
+
+**未做**：`directTerminalKeyboardProtocol`（kitty flags / modifyOtherKeys）仍在
+"byte-level traffic" 分组里被忽略。Kraal 不把键盘协议转发给宿主终端，而是自己
+编码按键；把它接上需要改按键编码器（非 Latin-1 键怎么发），是独立的一块，不在
+issue #20 的验收范围内。
 
 ### ✅ 7-8（已修 · PR #17）侧边栏 rules 用了不存在的 `when`/`value` 键
 `SidebarConfig.swift:160` 读 `ruleTable["when"]` + `["value"]`；

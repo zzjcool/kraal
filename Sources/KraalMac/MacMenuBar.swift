@@ -128,7 +128,11 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        // Paste is a Kraal command, not `NSText.paste`: the responder chain has
+        // nobody in the pane to receive it (the terminal view does not implement
+        // it), and even if it did, the text has to reach the daemon as a paste
+        // event rather than as keystrokes. See `AppStore.sendPaste`.
+        menu.addItem(command: .paste, target: self)
         menu.addItem(
             withTitle: "Select All",
             action: #selector(NSText.selectAll(_:)),

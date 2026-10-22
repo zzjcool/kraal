@@ -1023,7 +1023,49 @@ print(json.load(sys.stdin)["result"]["workspace"]["workspace_id"])
     }
 }
 
-# ---------------------------------------------------------------- runner
+# Paste must go out as a paste event, not as keystrokes.
+#
+# Issue #20: `NSText.paste` through the responder chain did nothing at all (no
+# view in the pane implements it) and the context menu called `sendInput(Data)`
+# directly, so a pasted newline arrived as Enter and a multi-line paste ran every
+# line. The wire has a separate `paste` event; this case pins that the app uses it.
+#
+# Asserted on the app's own log (`paste: N chars to <pane>`, written by
+# `AppStore.sendPaste`) plus the negative: no `clientShellPaneInput` carrying text
+# commits may be logged for the same paste. Both halves matter — a build that
+# logged the paste line and *also* sent the bytes would look fixed and still run
+# the user's command twice.
+case_paste() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" -ge 1 ] || return 1
+        # Put multi-line text on the pasteboard inside the guest. A single line
+        # would pass even with the bug, because the only difference is what a
+        # newline means.
+        case "$BACKEND" in
+        vm) printf 'echo AAA\necho BBB\n' | tart exec -i "$VM" /bin/bash -lc "pbcopy" ;;
+        local) printf 'echo AAA\necho BBB\n' | pbcopy ;;
+        esac
+    }
+    action() {
+        driver menu --menu Edit --item "Paste"
+        sleep 2
+    }
+    assert() {
+        local log="$host_dir/kraal.log"
+        check "the app sent the text as a paste event" \
+            "$(grep -q 'paste: .* chars to ' "$log" 2>/dev/null && echo 0 || echo 1)" \
+            "$(grep -o 'paste: [0-9]* chars to [a-zA-Z0-9:]*' "$log" 2>/dev/null | tail -1)"
+        check "no raw text commit carried the same paste" \
+            "$(grep -q 'sendInput: .* bytes' "$log" 2>/dev/null && echo 1 || echo 0)" \
+            "$(grep -o 'sendInput: .*' "$log" 2>/dev/null | tail -1)"
+    }
+}
+
+# ---------------------------------------------------------------- runner# ---------------------------------------------------------------- runner
 
 # Reads a case's declared requirement without executing the case.
 #
@@ -1177,6 +1219,14 @@ run_case() {
     after=$(pane_count)
     local status="passed"
     local code=0
+    # A case whose `assert` recorded a failed `check` is failed, even though the
+    # function returned 0. Without this, an `assert` that ends on a passing check
+    # after a failing one reported the case as passed — observed directly: the
+    # `paste` case printed "✗ the app sent the text as a paste event" and exited 0,
+    # so the gate could not fail on the very bug it was written for.
+    if [ -z "$failure" ] && [ "$ASSERTION_FAILURES" -gt 0 ]; then
+        failure="assert"
+    fi
     if [ -n "$failure" ]; then
         status="failed"; code=1
         # Only on failure: a screenshot costs a second and proves least.
@@ -1231,7 +1281,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group drag-divider"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider"; }
 
 # ---------------------------------------------------------------- entrypoint
 

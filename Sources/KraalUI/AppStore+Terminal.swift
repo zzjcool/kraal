@@ -90,6 +90,9 @@ extension AppStore {
     public func sendInput(_ data: Data, to paneId: String?) {
         guard let paneId else { return }
         var decoder = inputDecoders[paneId] ?? TerminalInputDecoder()
+        // Fresh each call: the program can toggle report-all at any moment, and a
+        // decoder captured once would keep answering with the old mode.
+        decoder.reportsAllKeys = keyboardReportAll
         var events = decoder.decode(data)
         if events.isEmpty {
             // A lone Esc produces a single byte and no follow-up; flush it once
@@ -106,6 +109,29 @@ extension AppStore {
                 try await connection?.sendPaneInput(paneId, events: events)
             } catch {
                 lastError = "\(error)"
+            }
+        }
+    }
+
+    /// Sends pasted text to a pane as a paste, not as keystrokes.
+    ///
+    /// Why it matters: bytes sent as input are indistinguishable from typing, so
+    /// a program with `bracketed-paste` disabled on its side still sees every
+    /// newline as Enter — pasting three shell commands ran all three. The wire has
+    /// a separate `paste` event (`Encoder.swift`, tag 3) that carries the text as
+    /// one unit, which is what lets a shell offer "paste N lines?" instead of
+    /// executing them.
+    ///
+    /// No `TerminalInputDecoder` on this path: the text is not a key sequence, and
+    /// decoding it would turn a literal `ESC` in the pasted text into an arrow key.
+    public func sendPaste(_ text: String, to paneId: String?) {
+        guard let paneId, !text.isEmpty else { return }
+        kraalLog("paste: \(text.count) chars to \(paneId)")
+        Task {
+            do {
+                try await connection?.sendPaneInput(paneId, events: [.paste(text)])
+            } catch {
+                lastError = "paste: \(error)"
             }
         }
     }

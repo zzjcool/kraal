@@ -20,6 +20,9 @@ public enum ConnectionEvent: Sendable {
     case response(bootId: String, requestId: String, data: Data, finalChunk: Bool)
     case windowTitle(String?)
     case mouseCapture(enabled: Bool, sgrPixels: Bool)
+    /// The focused program asked the host to report every key, including bare
+    /// modifiers and key releases (`ServerMessage::ClientShellKeyboardReportAll`).
+    case keyboardReportAll(enabled: Bool)
     case notification(SemanticNotification)
     case bell(count: UInt16)
     case serverShutdown(String?)
@@ -470,8 +473,13 @@ public actor EndpointConnection {
             if let error {
                 eventHandler(.error("daemon: \(error)"))
             }
+        case let .clientShellKeyboardReportAll(enabled):
+            // Reported, not dropped: without it the decoder keeps sending
+            // `tracksRelease: false`, so a program that turned on kitty's
+            // report-all-keys mode never hears about releases (issue #20).
+            eventHandler(.keyboardReportAll(enabled: enabled))
         case .terminal, .graphics, .graphicsFile, .graphicsTransmissionRetired, .clipboard,
-             .directTerminalKeyboardProtocol, .clientShellKeyboardReportAll:
+             .directTerminalKeyboardProtocol:
             // Byte-level terminal traffic belongs to the per-pane channels, and
             // the optional surface encodings are off, so these arrive only
             // unsolicited (or not at all) on this connection.

@@ -470,13 +470,17 @@ extension KraalAppDelegate: PaneContextMenuProviding, PaneContextTarget, PaneCon
         copySelection(in: paneId)
     }
 
-    /// Paste is sent as input rather than through Ghostty's paste binding: the
-    /// daemon owns the pane's content, so bytes have to go back over the
-    /// connection for the program to see them.
+    /// Paste is sent as a *paste* event, not as keystrokes.
+    ///
+    /// The daemon owns the pane's content, so the text has to go back over the
+    /// connection — but as `.paste(text)` (wire tag 3), not as raw bytes through
+    /// the key decoder. Sending bytes made a paste indistinguishable from typing:
+    /// every newline arrived as Enter, so pasting a three-line command ran all
+    /// three (issue #20).
     func pasteIntoPane(_ sender: NSMenuItem) {
         guard let paneId = sender.menu?.owningPaneId else { return }
         guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
-        store.sendInput(Data(text.utf8), to: paneId)
+        store.sendPaste(text, to: paneId)
     }
 
     func renamePane(_ sender: NSMenuItem) {

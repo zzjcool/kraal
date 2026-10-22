@@ -93,6 +93,9 @@ public final class EndpointState {
     /// the right one.
     public internal(set) var profile: HerdrMachine?
     public internal(set) var enabled: Bool
+    /// Whether the focused program asked for every key event
+    /// (`ClientShellKeyboardReportAll`). Connection level, like the daemon's own.
+    public internal(set) var keyboardReportAll = false
 
     /// This machine's own connection.
     ///
@@ -404,6 +407,8 @@ public extension AppStore {
             endpoint.status = .attention("! error")
             kraalLog("endpoint \(endpoint.label): error \(message)")
             if isActive { lastError = message }
+        case let .keyboardReportAll(enabled):
+            applyKeyboardReportAll(enabled, from: endpoint, isActive: isActive)
         case .serverShutdown:
             endpoint.status = .reconnecting
             endpoint.connectionTask = nil
@@ -411,6 +416,26 @@ public extension AppStore {
         default:
             break
         }
+    }
+
+    /// Records the daemon's `ClientShellKeyboardReportAll` for one machine.
+    ///
+    /// Connection level, matching the daemon: the message carries no pane id — it
+    /// reports the mode of whichever program is focused now
+    /// (`server/headless/render.rs:211-214`). Kept per machine so switching
+    /// machines restores each side's answer instead of leaking one machine's
+    /// keyboard mode into the other's panes.
+    ///
+    /// Split out of `applyEndpointEvent` rather than inlined: that switch is one
+    /// branch per event and adding two pushed it past the complexity limit.
+    private func applyKeyboardReportAll(
+        _ enabled: Bool,
+        from endpoint: EndpointState,
+        isActive: Bool
+    ) {
+        endpoint.keyboardReportAll = enabled
+        kraalLog("endpoint \(endpoint.label): keyboard report-all \(enabled)")
+        if isActive { keyboardReportAll = enabled }
     }
 
     /// Retries one machine's connection, with the same backoff the store used for

@@ -35,6 +35,11 @@ public final class AppStore {
     /// True while the frame on screen belongs to a connection that has dropped.
     public internal(set) var surfaceIsStale = false
     public internal(set) var lastError: String?
+    /// Whether the focused program asked for every key event, including bare
+    /// modifiers and releases. Fed to `TerminalInputDecoder.reportsAllKeys` so the
+    /// key events carry `tracksRelease`, which is what the setting means on the
+    /// wire. Previously the daemon's message was dropped on the floor.
+    public internal(set) var keyboardReportAll = false
     /// A close the daemon refused because it would take a worktree group with it,
     /// waiting for the user to say yes.
     ///
