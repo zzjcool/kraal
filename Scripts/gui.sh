@@ -842,7 +842,7 @@ sys.exit(0 if len(layout["panes"]) == 2 and layout["splits"] else 1)
         verdict=$(python3 - "$host_dir/kraal.log" <<'PYEOF'
 import re, sys
 
-# scrollbar: w1:p1 lane=[x,y w x h] pane=[x,y w x h] cells=N
+# scrollbar: w1:p1 lane=[x,y w x h] pane=WxH cells=N
 pattern = re.compile(
     r"scrollbar: (\S+) lane=\[(-?\d+),(-?\d+) (\d+)x(\d+)\] "
     r"pane=(\d+)x(\d+) cells=(\d+)"
