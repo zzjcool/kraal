@@ -107,15 +107,31 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 /usr/bin/swift build                     # 全部 target
-/usr/bin/swift test                      # 228 个 @Test + 26 个 XCTest，38 个套件
+/usr/bin/swift test                      # 全绿；汇总行说 180 tests / 29 suites（参数化用例会被并成一个）
 export PATH="$HOME/.pi-lens/bin:$PATH"   # swiftlint 不在默认 PATH
 swiftlint --quiet Sources Tests          # 必须零违规
+for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 ./Scripts/build-app.sh                   # 打包 build/Kraal.app（ad-hoc 签名）
 
-./Scripts/verify.sh                      # 上面全部 + GUI 门禁（推荐）
+./Scripts/verify.sh                      # 六道门禁全跑（推荐）
 ./Scripts/gui.sh run split-right         # 单个 UI 用例（需已 build-app.sh）
 ./Scripts/gui.sh list                    # 现有用例
+
+./Scripts/vm-bootstrap.sh                # 幂等：建/查 VM、验 Aqua、验三条 TCC 授权
+./Scripts/vm-bootstrap.sh --fix-tcc      # 授权丢了才用（升级 guest 内 Homebrew 包后会丢）
+./Scripts/vm-bootstrap.sh export FILE    # 自己换机器：22GB / 32s
+./Scripts/vm-bootstrap.sh import FILE    # 换机器另一端：17s
 ```
+
+`verify.sh` 六道门禁：`swift build` → `swift test` → `swiftlint` → `shellcheck`
+→ `build-app.sh` → `gui.sh run`。`--fast` 跳过最后两道，`KRAAL_SKIP_GUI=1` 只跳 GUI。
+
+**给别人的时候不要传 .tvm**：公开的基础镜像已自带 Aqua 会话、SIP 关闭、四条 TCC
+授权，他跑一次 `vm-bootstrap.sh` 就行（拉 26.4GB，实测 25 分钟）。传 .tvm 会让
+他的镜像永久冻结在你的 macOS 补丁级别上。细节见 `docs/RUNNING.md` §7。
+
+**`shellcheck` 缺失时门禁判 FAILED**，和 `swiftlint` 同样的策略（`KRAAL_SKIP_LINT=1`
+可跳过）。脚本本身就是门禁的一部分——`gui.sh` 坏了等于 GUI 门禁坏了。
 
 ### GUI 门禁：`gui.sh` 能证明界面动作真的改了 daemon
 

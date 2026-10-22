@@ -47,7 +47,7 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 | 门禁 | 检查什么 |
 | --- | --- |
 | `swift build` | 全部 target 编译 |
-| `swift test` | 228 个 `@Test` + 26 个 XCTest |
+| `swift test` | 全绿（228 个 `@Test` + 26 个 XCTest 方法；汇总行按参数化合并后报 180 tests / 29 suites） |
 | `swiftlint` | 零违规（不在默认 PATH，脚本自己加 `~/.pi-lens/bin`） |
 | `shellcheck` | `Scripts/*.sh` 零警告（脚本本身就是门禁的一部分） |
 | `build-app.sh` | 打出 `build/Kraal.app` |
