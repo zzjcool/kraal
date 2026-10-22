@@ -38,8 +38,14 @@ public enum PaneContextMenuBar {
     ///   that does not respond to the selector gets its item greyed out. Routing
     ///   commands to a target without menu validation makes every one of them
     ///   permanently disabled, which is what this parameter exists to prevent.
+    /// - Parameter rightClickPassthrough: whether this pane currently sends
+    ///   right-clicks to its program. Drives the toggle item's title, exactly as
+    ///   upstream's `"Use Herdr right-click menu"` / `"Send right-clicks to pane"`
+    ///   pair does (`client/shell/context_menu.rs:75-82`): one verb that is right
+    ///   half the time is worse than naming the state the item will produce.
     public static func menu(
         paneId: String,
+        rightClickPassthrough: Bool = false,
         target: AnyObject,
         commandTarget: AnyObject,
         commandSelector: Selector
@@ -119,6 +125,18 @@ public enum PaneContextMenuBar {
         rename.target = target
         menu.addItem(rename)
 
+        // The per-pane right-click routing. Without this item the setting exists
+        // only in the daemon's config file, and the mouse path had no way to act
+        // on it — the snapshot field was decoded and never read.
+        menu.addItem(.separator())
+        let togglePassthrough = NSMenuItem(
+            title: rightClickPassthrough ? "Use Kraal Right-Click Menu" : "Send Right-Clicks to Pane",
+            action: #selector(PaneContextTarget.toggleRightClickPassthrough(_:)),
+            keyEquivalent: ""
+        )
+        togglePassthrough.target = target
+        menu.addItem(togglePassthrough)
+
         menu.addItem(.separator())
         menu.addItem(command: .closePane, target: commandTarget, selector: commandSelector)
         return menu
@@ -137,6 +155,7 @@ public protocol PaneContextTarget: AnyObject {
     func copySelection(_ sender: NSMenuItem)
     func pasteIntoPane(_ sender: NSMenuItem)
     func renamePane(_ sender: NSMenuItem)
+    func toggleRightClickPassthrough(_ sender: NSMenuItem)
 }
 
 /// What the menu needs to know about a pane before it opens.

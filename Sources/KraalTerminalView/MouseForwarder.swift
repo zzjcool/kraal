@@ -246,9 +246,15 @@ public final class MouseForwarder {
     /// Read from the daemon's geometry rather than from Ghostty: the daemon is
     /// what decoded the program's escape sequences, and `sendMouse` already
     /// gates on this same flag, so the two decisions cannot disagree.
+    ///
+    /// `rightClickPassthrough` comes from the snapshot rather than the surface:
+    /// it is a per-pane setting the daemon persists, not something the terminal
+    /// stream reports. Before this was passed in, the setting had no effect and
+    /// a pane with `right_click = "pane"` still opened Kraal's menu.
     private func paneShowsMenu(_ paneId: String) -> Bool {
         KraalUI.PaneContextRouting.shouldShowPaneMenu(
-            programReportsMouse: store.paneGeometry(for: paneId)?.mouseReporting == true
+            programReportsMouse: store.paneGeometry(for: paneId)?.mouseReporting == true,
+            rightClickPassthrough: store.rightClickPassthrough(paneId: paneId)
         )
     }
 

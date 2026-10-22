@@ -14,6 +14,7 @@ import SwiftUI
 
 struct ShortcutsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppStore.self) private var store
 
     private struct Section: Identifiable {
         var id: String { title }
@@ -21,21 +22,43 @@ struct ShortcutsView: View {
         var rows: [(String, String)]
     }
 
+    /// The daemon's own keybinding profile, when it sent one.
+    ///
+    /// Read from the snapshot (the field `server_keybindings_toml` that used to be
+    /// decoded and dropped). Non-nil means the daemon has an opinion about the
+    /// bindings and the panel should show *its* answer.
+    private var profile: String? {
+        SnapshotNotices.serverKeybindings(in: store.snapshot)
+    }
+
+    /// The binding the daemon reports for `name`, falling back to `builtIn`.
+    ///
+    /// Overlay rather than replace: the built-in table covers actions the daemon's
+    /// profile may not mention (this client's own menu commands), and a missing
+    /// entry must not blank a row. When the daemon does mention an action, its
+    /// answer wins — that is the entire point, because a user who remapped
+    /// `new_tab` in `[keys]` is looking at this panel to confirm what they got.
+    private func binding(_ builtIn: String, _ name: String) -> String {
+        KeybindingProfile.binding(for: name, in: profile) ?? builtIn
+    }
+
     private var sections: [Section] {
         [
             Section(title: "Workspaces & Panes", rows: [
-                ("New Workspace", "⌘N"),
-                ("New Tab", "⌘T"),
-                ("Split Right", "⌘D"),
-                ("Split Down", "⇧⌘D"),
-                ("Close Pane", "⇧⌘W"),
-                ("Close Tab", "⌘W"),
-                ("Toggle Pane Zoom", "⇧⌘↵"),
+                ("New Workspace", binding("⌘N", "new_workspace")),
+                ("New Tab", binding("⌘T", "new_tab")),
+                ("Split Right", binding("⌘D", "split_vertical")),
+                ("Split Down", binding("⇧⌘D", "split_horizontal")),
+                ("Close Pane", binding("⇧⌘W", "close_pane")),
+                ("Close Tab", binding("⌘W", "close_tab")),
+                ("Toggle Pane Zoom", binding("⇧⌘↵", "toggle_zoom")),
                 ("Clear Pane", "—"),
             ]),
             Section(title: "Navigation", rows: [
-                ("Next / Previous Tab", "⇧⌘] / ⇧⌘["),
-                ("Next / Previous Workspace", "⌘] / ⌘["),
+                ("Go To Pane…", binding("⌘K", "goto")),
+                ("Next / Previous Tab", "\(binding("⇧⌘]", "next_tab")) / \(binding("⇧⌘[", "previous_tab"))"),
+                ("Next / Previous Workspace",
+                 "\(binding("⌘]", "next_workspace")) / \(binding("⌘[", "previous_workspace"))"),
                 ("Next / Previous Pane", "⌥⌘] / ⌥⌘["),
                 ("Focus Pane by Direction", "⌥⌘←↑↓→"),
                 ("Move Tab Left / Right", "⇧⌘, / ⇧⌘."),
@@ -46,7 +69,7 @@ struct ShortcutsView: View {
                 ("Command Palette", "⌘K"),
                 ("Toggle Sidebar", "⌘B"),
                 ("Toggle Status Bar", "⇧⌘B"),
-                ("Keyboard Shortcuts", "⌘/"),
+                ("Keyboard Shortcuts", binding("⌘/", "help")),
                 ("Reconnect", "⌘R"),
                 ("Quit", "⌘Q"),
             ]),
@@ -93,6 +116,25 @@ struct ShortcutsView: View {
                 }
                 .padding(KraalTheme.Space.loose)
             }
+
+            Divider()
+
+            // Say where the numbers came from. Without this the panel looks
+            // identical whether it is showing this client's menu shortcuts or the
+            // daemon's remapped `[keys]`, and a user who edited the config has no
+            // way to tell whether it took effect.
+            HStack(spacing: KraalTheme.Space.snug) {
+                Image(systemName: profile == nil ? "menubar.rectangle" : "checkmark.seal")
+                    .font(.system(size: 9))
+                Text(profile == nil
+                    ? "Menu shortcuts (the daemon sent no keybinding profile)"
+                    : "Bindings from the daemon's [keys] config")
+                    .font(.system(size: 10))
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, KraalTheme.Space.loose)
+            .padding(.vertical, KraalTheme.Space.snug)
         }
         .frame(width: 460, height: 520)
         .glassChrome(.sheet, rim: false)

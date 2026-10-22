@@ -383,6 +383,38 @@ public final class AppStore {
         Task { await call("pane.focus", ["pane_id": paneId]) }
     }
 
+    /// Jumps to a navigator target, switching machines when it lives on another
+    /// one.
+    ///
+    /// The order matters and is the reason this is one method rather than three
+    /// calls at the call site: focusing a pane whose machine is not on screen
+    /// sends `pane.focus` to the *wrong daemon*. Switching first means the
+    /// subsequent focus reaches the machine that owns the pane.
+    ///
+    /// Workspace and tab are focused before the pane so the pane's tab is
+    /// actually on screen when it becomes focused — the daemon will happily focus
+    /// a pane in a background tab, which looks like nothing happened.
+    public func goTo(_ target: NavigatorTarget) {
+        if let endpoint = endpoints.first(where: { $0.id.storageKey == target.machineId }) {
+            selectEndpoint(endpoint)
+        }
+        guard let paneId = target.paneId else {
+            if target.kind == .workspace {
+                focus(workspaceId: target.workspaceId)
+            } else if !target.tabId.isEmpty {
+                focus(tabId: target.tabId)
+            }
+            return
+        }
+        if !target.workspaceId.isEmpty {
+            focus(workspaceId: target.workspaceId)
+        }
+        if !target.tabId.isEmpty {
+            focus(tabId: target.tabId)
+        }
+        focus(paneId: paneId)
+    }
+
     public func close(tabId: String) {
         closeAfterChecking(tabId: tabId)
     }
@@ -571,6 +603,31 @@ public final class AppStore {
 
     public func toggleZoom(paneId: String) {
         Task { await call("pane.zoom", ["pane_id": paneId]) }
+    }
+
+    /// Sets whether right-clicks on this pane go to its program.
+    ///
+    /// `pane.input.set` is the daemon's per-pane input routing
+    /// (`api/schema/panes.rs:44-47`). It is **not** a client-side preference:
+    /// the daemon stores it, applies it to the pane, and reports it back as
+    /// `right_click_passthrough` in the snapshot. So the menu item sends the
+    /// request and lets the snapshot be the source of truth — toggling a local
+    /// flag would show a checkmark the daemon never agreed to.
+    public func setRightClickPassthrough(paneId: String, passthrough: Bool) {
+        let params = Self.rightClickParams(paneId: paneId, passthrough: passthrough)
+        Task { await call("pane.input.set", params) }
+    }
+
+    /// The wire body of `pane.input.set`, kept separate so a test can assert the
+    /// field names without a live daemon (`splitParams` follows the same rule).
+    public nonisolated static func rightClickParams(
+        paneId: String,
+        passthrough: Bool
+    ) -> [String: Any] {
+        [
+            "pane_id": paneId,
+            "right_click": PaneContextRouting.target(for: passthrough).rawValue,
+        ]
     }
 
     public func setSplitRatio(path: [Bool], ratio: Double) {

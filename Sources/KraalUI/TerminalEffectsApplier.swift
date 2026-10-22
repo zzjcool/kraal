@@ -48,7 +48,15 @@ public final class TerminalEffectsApplier {
         guard !effects.isEmpty else { return [] }
         var done: [String] = []
 
-        if let text = effects.clipboard, text != lastClipboard {
+        // Each switch is read at apply time, not cached: the settings page
+        // writes to `UserDefaults` while this object is alive, and a cached value
+        // would make a toggle appear to need a relaunch.
+        let clipboardEnabled = KraalEffectSettings.isEnabled(KraalEffectSettings.clipboardEnabled)
+        let titleEnabled = KraalEffectSettings.isEnabled(KraalEffectSettings.windowTitleEnabled)
+        let bellEnabled = KraalEffectSettings.isEnabled(KraalEffectSettings.bellEnabled)
+        let noticesEnabled = KraalEffectSettings.isEnabled(KraalEffectSettings.notificationsEnabled)
+
+        if let text = effects.clipboard, text != lastClipboard, clipboardEnabled {
             // Upstream sends the payload already decoded. An empty string is a
             // legitimate "copy nothing": clear rather than skip, otherwise the
             // clipboard keeps whatever was there before and looks stuck.
@@ -61,18 +69,18 @@ public final class TerminalEffectsApplier {
             done.append("clipboard=\(text.count)B")
         }
 
-        if let title = effects.windowTitle, let window, window.title != title {
+        if let title = effects.windowTitle, let window, window.title != title, titleEnabled {
             window.title = title
             done.append("title=\(title)")
         }
 
         // Bells were already coalesced by the reducer; one sound per batch.
-        if effects.bells > 0 {
+        if effects.bells > 0, bellEnabled {
             NSSound.beep()
             done.append("bell")
         }
 
-        if let notification = effects.notification {
+        if let notification = effects.notification, noticesEnabled {
             let key = "\(notification.kind)|\(notification.title)|\(notification.body ?? "")"
             if key != lastNotification {
                 lastNotification = key
@@ -80,7 +88,7 @@ public final class TerminalEffectsApplier {
                 // `needsAttention`. Deliberately not a notification-centre
                 // post: that needs a bundle identifier and a user grant, and
                 // pretending to have posted one is worse than ringing.
-                if notification.kind == .needsAttention || notification.sound != nil {
+                if bellEnabled, notification.kind == .needsAttention || notification.sound != nil {
                     NSSound.beep()
                     done.append("bell(notification)")
                 }

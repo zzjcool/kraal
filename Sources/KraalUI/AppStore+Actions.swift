@@ -48,6 +48,65 @@ extension AppStore {
         Task { await call("workspace.move", ["workspace_id": workspaceId, "insert_index": index]) }
     }
 
+    /// Moves a whole block of workspaces so it sits before `beforeWorkspaceId`.
+    ///
+    /// This is what a sidebar drag reorders: `workspace.move` takes one id and an
+    /// index, which cannot express "take these three linked worktrees and drop
+    /// them together" — the linked group is a block, and moving it one id at a
+    /// time would have the daemon re-derive the group between calls. Upstream has
+    /// the same split (`workspace.move_block`, `api/workspaces.rs:171-230`).
+    ///
+    /// `beforeWorkspaceId == nil` means "to the end", which is how the daemon
+    /// reads a missing `before_workspace_id`.
+    ///
+    /// The request is not sent when the daemon would reject it — empty block, or
+    /// a `before` that is itself in the block — because the daemon's answer to
+    /// both is an error the user cannot act on, and a drag that does nothing is
+    /// less confusing than a red banner for a gesture that was already a no-op.
+    public func moveWorkspaceBlock(_ workspaceIds: [String], before beforeWorkspaceId: String?) {
+        guard Self.isValidWorkspaceBlock(
+            workspaceIds,
+            before: beforeWorkspaceId
+        ) else { return }
+        Task {
+            await call(
+                "workspace.move_block",
+                Self.workspaceBlockParams(workspaceIds, before: beforeWorkspaceId)
+            )
+        }
+    }
+
+    /// The wire body of `workspace.move_block`, so the shape is testable without
+    /// a daemon. `before_workspace_id` is omitted rather than sent as `null`:
+    /// the daemon's field is `Option` with `skip_serializing_if`, and a literal
+    /// `null` would have to be decoded as `Some(None)`-shaped noise.
+    public nonisolated static func workspaceBlockParams(
+        _ workspaceIds: [String],
+        before beforeWorkspaceId: String?
+    ) -> [String: Any] {
+        var params: [String: Any] = ["workspace_ids": workspaceIds]
+        if let beforeWorkspaceId {
+            params["before_workspace_id"] = beforeWorkspaceId
+        }
+        return params
+    }
+
+    /// Whether the daemon would accept this block move.
+    ///
+    /// Mirrors the two rejections in `api/workspaces.rs:176-217`: an empty block,
+    /// and a `before` that is part of the block. Duplicate ids are also rejected
+    /// there; they cannot come from a sidebar drag, but checking is free and keeps
+    /// the guard honest if a caller ever builds the list differently.
+    public nonisolated static func isValidWorkspaceBlock(
+        _ workspaceIds: [String],
+        before beforeWorkspaceId: String?
+    ) -> Bool {
+        guard !workspaceIds.isEmpty else { return false }
+        guard Set(workspaceIds).count == workspaceIds.count else { return false }
+        if let beforeWorkspaceId, workspaceIds.contains(beforeWorkspaceId) { return false }
+        return true
+    }
+
     // MARK: - Naming
 
     public func rename(tabId: String, to label: String) {
