@@ -784,6 +784,116 @@ print("1 pane, 0 splits")
 }
 
 
+# Assert the pane scrollbar is drawn inside its own pane.
+#
+# Why this needs a GUI case at all: the lane's position is `rect(for:)` (container
+# coordinates) rebased onto the pane, and that rebase is invisible to `swift test`
+# — a SwiftUI `body` has no inspectable output. An early version attached the
+# overlay *after* `.position`, where the view's bounds are the whole pane
+# container, so subtracting the pane origin a second time put every lane one
+# pane-width to the left and pinned it to the container's top edge. The pane at the
+# origin looked right, which is why the unit tests passed.
+#
+# The assertion reads the app's own `scrollbar:` log line, which prints both
+# rectangles. That is a measurement of what SwiftUI actually laid out, not a
+# re-statement of the arithmetic under test.
+case_scrollbar() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        # Two panes, because the bug is invisible with one: the pane at the origin
+        # is exactly the case where a doubled subtraction still gives the right
+        # answer.
+        if [ "$(pane_count)" = "1" ]; then
+            herdr pane split --pane "$(first_pane_id)" --direction right >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "2" ] || return 1
+        # Scrollback is what makes the daemon send a `scrollbar_rect` at all:
+        # without history there is no lane, and the case would assert nothing.
+        herdr pane run "$(first_pane_id)" "seq 1 300" >/dev/null 2>&1 || true
+        sleep 2
+        pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+sys.exit(0 if len(layout["panes"]) == 2 and layout["splits"] else 1)
+'
+    }
+    action() {
+        # Nothing to do: the scrollbar is drawn by the pane's own view, so all this
+        # case needs is for a frame to have been laid out. The `sleep` gives the
+        # next surface frame — and therefore the next scrollbar log line — time to
+        # arrive.
+        sleep 2
+        return 0
+    }
+    assert() {
+        local lines verdict
+        # `collect_app_log` takes a **host** directory (`host_dir`), not the guest
+        # one: with the vm backend it pipes the log out of the guest. Passing
+        # `$dir` here wrote nothing and the case failed with "no such file" — the
+        # same shape of bug this exercise treats as a gate failure.
+        collect_app_log "$host_dir"
+        lines=$(grep -c 'scrollbar: ' "$host_dir/kraal.log" 2>/dev/null || echo 0)
+        check "the app laid out at least one scrollbar" \
+            "$([ "$lines" -gt 0 ] && echo 0 || echo 1)" "$lines log lines"
+
+        verdict=$(python3 - "$host_dir/kraal.log" <<'PYEOF'
+import re, sys
+
+# scrollbar: w1:p1 lane=[x,y w x h] pane=[x,y w x h] cells=N
+pattern = re.compile(
+    r"scrollbar: (\S+) lane=\[(-?\d+),(-?\d+) (\d+)x(\d+)\] "
+    r"pane=(\d+)x(\d+) cells=(\d+)"
+)
+problems = []
+seen = 0
+for line in open(sys.argv[1], errors="replace"):
+    match = pattern.search(line)
+    if not match:
+        continue
+    seen += 1
+    pane_id = match.group(1)
+    lx, ly = int(match.group(2)), int(match.group(3))
+    lw, lh = int(match.group(4)), int(match.group(5))
+    pw, ph = int(match.group(6)), int(match.group(7))
+    cells = int(match.group(8))
+
+    if cells <= 0:
+        continue
+    # The lane lives inside the pane's own box. A doubled rebase makes lx negative
+    # by one pane width, which this catches.
+    if lx < 0 or ly < 0:
+        problems.append(f"{pane_id}: lane origin {lx},{ly} is outside the pane")
+    if lw > pw or lh > ph:
+        problems.append(f"{pane_id}: lane {lw}x{lh} is larger than pane {pw}x{ph}")
+    # The lane abuts the *outer* rect's last column, while `pane` here is the
+    # inner rect the daemon already narrowed by that same column
+    # (`ui/panes.rs:290-311`). So `lx + lw == pw + lane_width` is correct, and the
+    # tolerance is one lane width, not one point.
+    #
+    # The doubled-rebase bug this guards makes `lx` negative (shifted left by a
+    # whole pane) or `ly` negative (pinned to the container's top for every pane
+    # below the first), which these two checks still catch.
+    if lx + lw > pw + lw + 1:
+        problems.append(f"{pane_id}: lane right edge {lx + lw} past pane width {pw}")
+    if ly + lh > ph + 1:
+        problems.append(f"{pane_id}: lane bottom {ly + lh} past pane height {ph}")
+
+if seen == 0:
+    problems.append("no scrollbar geometry was logged (no lane, or no scrollback)")
+if problems:
+    print("; ".join(problems[:4]))
+    sys.exit(1)
+print(f"{seen} lane(s) inside their pane")
+PYEOF
+)
+        check "every scrollbar lane sits inside its own pane" "$?" "$verdict"
+    }
+}
+
+
 # Drag the divider, then assert the daemon's ratio moved.
 #
 # This case replaced `KRAAL_PROBE_DIVIDER_DRAG`, which was the only end-to-end
@@ -1281,7 +1391,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar"; }
 
 # ---------------------------------------------------------------- entrypoint
 
