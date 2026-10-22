@@ -21,6 +21,23 @@ extension AppStore {
         panes.first { $0.paneId == paneId }?.label
     }
 
+    /// The snapshot record for a pane.
+    ///
+    /// `paneGeometry` answers questions about the *surface* (size, mouse mode);
+    /// this answers questions about the pane itself (label, cwd, and the
+    /// `right_click` setting). The two were easy to conflate, which is how
+    /// `right_click_passthrough` ended up decoded and never read: the only pane
+    /// lookup the mouse path had access to was the surface one.
+    public func pane(_ paneId: String) -> ClientShellPane? {
+        panes.first { $0.paneId == paneId }
+    }
+
+    /// Whether this pane sends right-clicks to its program instead of opening
+    /// the pane menu.
+    public func rightClickPassthrough(paneId: String) -> Bool {
+        pane(paneId)?.rightClickPassthrough ?? false
+    }
+
     /// Whether the pane is the zoomed one. Herdr's menu renames the item between
     /// "Zoom" and "Unzoom" rather than leaving a single verb that lies half the
     /// time, so the same distinction is made here.

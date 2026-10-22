@@ -30,6 +30,7 @@ import KraalTransport
 public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
     case machines
     case terminal
+    case effects
 
     public var id: String { rawValue }
 
@@ -38,6 +39,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .machines: "Machines"
         case .terminal: "Terminal"
+        case .effects: "Clipboard & Bell"
         }
     }
 
@@ -45,8 +47,16 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .machines: "server.rack"
         case .terminal: "terminal"
+        case .effects: "bell.badge"
         }
     }
+
+    /// Whether this page is tall enough to need the machines list's room.
+    ///
+    /// Kept on the tab rather than at the call site: a new page silently getting
+    /// the wrong height is the kind of thing nobody notices until a row is
+    /// clipped.
+    public var wantsTallSheet: Bool { self == .machines }
 }
 
 public struct SettingsView: View {
@@ -91,13 +101,15 @@ public struct SettingsView: View {
                 )
             case .terminal:
                 TerminalSettingsPane()
+            case .effects:
+                EffectsSettingsPane()
             }
         }
         .frame(width: 640)
         // Height follows the tab: the machines list needs the room it always had,
         // while terminal settings is a short stack of rows. A fixed height would
         // leave the second tab padded with emptiness.
-        .frame(height: tab == .machines ? 460 : 300)
+        .frame(height: tab.wantsTallSheet ? 460 : 330)
         .glassChrome(.sheet, rim: false)
     }
 
@@ -134,6 +146,89 @@ public struct SettingsView: View {
 /// Kept deliberately short: these are the switches that already exist elsewhere
 /// in the app and were reachable only through a menu or an environment variable.
 /// Moving them here does not add new behaviour — it makes what exists findable.
+/// The four things a pane can ask the desktop to do, and which of them are
+/// allowed to interrupt.
+///
+/// These correspond one-for-one to `TerminalEffects` (#34): before those were
+/// wired up there was nothing to configure, and a settings page for a feature
+/// that does not work is worse than no page. The toggles are `@AppStorage`, so
+/// they are read by `TerminalEffectsApplier` through the same keys rather than
+/// being written into a config file this app does not own.
+private struct EffectsSettingsPane: View {
+    @AppStorage(KraalEffectSettings.clipboardEnabled) private var clipboardEnabled = true
+    @AppStorage(KraalEffectSettings.bellEnabled) private var bellEnabled = true
+    @AppStorage(KraalEffectSettings.notificationsEnabled) private var notificationsEnabled = true
+    @AppStorage(KraalEffectSettings.windowTitleEnabled) private var windowTitleEnabled = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row(
+                title: "Remote clipboard (OSC 52)",
+                detail: "Lets a program in a pane put text on this Mac's clipboard "
+                    + "— how `pbcopy` and tmux copy work over SSH."
+            ) {
+                Toggle("", isOn: $clipboardEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            Divider()
+            row(
+                title: "Window title follows the pane",
+                detail: "Use the focused pane's reported title as the window title."
+            ) {
+                Toggle("", isOn: $windowTitleEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            Divider()
+            row(
+                title: "Bell",
+                detail: "Sound the system alert when a program in a pane rings."
+            ) {
+                Toggle("", isOn: $bellEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            Divider()
+            row(
+                title: "Notifications",
+                detail: "Show the daemon's own notices (updates, announcements). "
+                    + "These never become Notification Center banners."
+            ) {
+                Toggle("", isOn: $notificationsEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, KraalTheme.Space.roomy)
+        .padding(.vertical, KraalTheme.Space.base)
+    }
+
+    private func row(
+        title: String,
+        detail: String,
+        @ViewBuilder control: () -> some View
+    ) -> some View {
+        HStack(alignment: .top, spacing: KraalTheme.Space.base) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(KraalTheme.Font.rowTitle)
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: KraalTheme.Space.base)
+            control()
+        }
+        .padding(.vertical, KraalTheme.Space.snug)
+    }
+}
+
 private struct TerminalSettingsPane: View {
     @AppStorage("kraal.verboseLogging") private var verboseLogging = false
 

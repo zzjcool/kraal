@@ -111,6 +111,7 @@ private final class StubTarget: NSObject, PaneContextTarget {
     @objc func copySelection(_ sender: NSMenuItem) {}
     @objc func pasteIntoPane(_ sender: NSMenuItem) {}
     @objc func renamePane(_ sender: NSMenuItem) {}
+    @objc func toggleRightClickPassthrough(_ sender: NSMenuItem) {}
 }
 
 /// The target the command items are actually bound to. Kept distinct from

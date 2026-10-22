@@ -98,6 +98,13 @@ struct CommandPalette: View {
     private var items: [Item] {
         var all: [Item] = []
 
+        // Go To comes first, and it is the only part of this palette that spans
+        // machines: with six configured, "the pane running the tests" has to be
+        // reachable without knowing which machine it is on. Upstream keys the
+        // same overlay off ⌘K on the client side
+        // (`client/shell/overlay_input.rs:194-210`).
+        all.append(contentsOf: navigatorItems)
+
         for command in store.commands {
             let title = command.description ?? command.commandId
             all.append(Item(
@@ -144,6 +151,59 @@ struct CommandPalette: View {
         let needle = query.lowercased().trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return all }
         return all.filter { $0.title.lowercased().contains(needle) }
+    }
+
+    /// Every jumpable pane/tab/workspace across all machines, as palette rows.
+    ///
+    /// Built from `Navigator`, which is pure: the ordering rules (current first,
+    /// active machine wins ties, panes before tabs before workspaces) are
+    /// asserted in tests rather than implied by the order this loop happens to
+    /// run in.
+    private var navigatorItems: [Item] {
+        let machines = store.endpoints.map { endpoint in
+            NavigatorMachine(
+                id: endpoint.id.storageKey,
+                label: endpoint.label,
+                snapshot: endpoint.snapshot,
+                isActive: endpoint.id == store.activeEndpointID
+            )
+        }
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targets = Navigator.filtered(Navigator.targets(for: machines), query: query)
+        // The palette is a list, not a database: 400 rows of scrollback would make
+        // the commands unreachable. The navigator's own ordering decides what
+        // survives the cut.
+        return targets.prefix(40).map { target in
+            Item(
+                id: "goto.\(target.id)",
+                title: target.isCurrent ? "\(target.title) (current)" : target.title,
+                symbol: symbol(for: target.kind),
+                hint: hint(for: target),
+                action: { store.goTo(target) }
+            )
+        }
+    }
+
+    private func symbol(for kind: NavigatorTarget.Kind) -> String {
+        switch kind {
+        case .pane: "rectangle"
+        case .tab: "rectangle.on.rectangle"
+        case .workspace: "square.grid.2x2"
+        }
+    }
+
+    /// The kind and machine, shown on the right.
+    ///
+    /// The machine is never omitted: a row that only says "vim" is ambiguous the
+    /// moment two machines are connected, and jumping to the wrong one is worse
+    /// than not jumping at all.
+    private func hint(for target: NavigatorTarget) -> String {
+        let kind = switch target.kind {
+        case .pane: "pane"
+        case .tab: "tab"
+        case .workspace: "workspace"
+        }
+        return "\(kind) · \(target.machineLabel)"
     }
 
     private func run(_ item: Item?) {

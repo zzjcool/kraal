@@ -450,6 +450,7 @@ extension KraalAppDelegate: PaneContextMenuProviding, PaneContextTarget, PaneCon
         // disables an item whose target does not respond to its selector.
         let menu = PaneContextMenuBar.menu(
             paneId: paneId,
+            rightClickPassthrough: store.rightClickPassthrough(paneId: paneId),
             target: self,
             commandTarget: menuBar ?? self,
             commandSelector: #selector(MacMenuBar.runCommand(_:))
@@ -504,6 +505,21 @@ extension KraalAppDelegate: PaneContextMenuProviding, PaneContextTarget, PaneCon
     func renamePane(_ sender: NSMenuItem) {
         guard let paneId = sender.menu?.owningPaneId else { return }
         presentPaneRename(paneId: paneId)
+    }
+
+    /// Flips this pane's right-click routing via `pane.input.set`.
+    ///
+    /// Deliberately does not flip a local flag: the daemon owns this setting and
+    /// reports it back as `right_click_passthrough` in the next snapshot. A local
+    /// flip would put a checkmark on screen that the daemon never agreed to, and
+    /// the pane would keep opening the menu because `MouseForwarder` reads the
+    /// snapshot. Sending the request and letting the snapshot land is the only
+    /// version where the menu and the behaviour cannot disagree.
+    func toggleRightClickPassthrough(_ sender: NSMenuItem) {
+        guard let paneId = sender.menu?.owningPaneId else { return }
+        let current = store.rightClickPassthrough(paneId: paneId)
+        store.setRightClickPassthrough(paneId: paneId, passthrough: !current)
+        kraalLog("contextmenu: right_click pane=\(paneId) \(current) -> \(!current)")
     }
 
     /// The menu bar's rename flow, reused so a rename started from a pane looks
