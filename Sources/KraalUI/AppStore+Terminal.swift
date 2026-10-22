@@ -33,7 +33,11 @@ extension AppStore {
     /// the panes follow the window on the very next frame instead of after a
     /// reconnect.
     public func resizeSurface(cols: UInt16, rows: UInt16) {
-        guard cols > 0, rows > 0 else { return }
+        // The daemon's own limits, not just non-zero: a bogus cell metric can
+        // produce a huge grid, and sending it means a silent refusal.
+        guard SurfaceGeometry.isAcceptableGrid(cols: Int(cols), rows: Int(rows)) else {
+            return
+        }
         let clamped = ClientSurfaceSize(cols: cols, rows: rows)
         guard clamped != surfaceSize else { return }
         kraalLog("geometry: \(surfaceSize.cols)x\(surfaceSize.rows) -> \(cols)x\(rows)")

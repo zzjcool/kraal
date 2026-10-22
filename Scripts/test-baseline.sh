@@ -65,14 +65,17 @@ REDS=(
     "KraalClientTests.CompatibilityPortTests/generationBeatsError()"
     "KraalClientTests.CompatibilityPortTests/olderDaemon()"
     "KraalClientTests.CompatibilityPortTests/versionFloor()"
-    "KraalClientTests.CompatibilityPortTests/gridLimit()"
+    # gridLimit used to be here: issue #8 added the per-axis and total-cell
+    # ceiling to resizeSurface (SurfaceGeometry.isAcceptableGrid).
     # Snapshot fences — session_state.rs / rootshell snapshot validation
     "KraalClientTests.SnapshotFencePortTests/revisionRegression()"
     "KraalClientTests.SnapshotFencePortTests/duplicatePaneIDs()"
     # Drag arithmetic — rootshell TmuxDividerResizeTests:66
-    "KraalClientTests.SplitRatioPortTests/nonFiniteDrag()"
+    # nonFiniteDrag used to be here: issue #8 refuses a non-finite drag delta
+    # before it can reach the ratio.
     # Split request shape — rootshell HerdrProtocolTests:29
-    "KraalClientTests.SplitRatioPortTests/ratioRequestShape()"
+    # ratioRequestShape used to be here: issue #8 sends the tab id (and omits it,
+    # rather than blank, when there is no snapshot yet).
     # Backoff reporting — herdr supervisor.rs:1132
     # backoffIsBounded used to be here: issue #9 made scheduleEndpointRetry the
     # single source of the delay, so the countdown now matches the sleep.

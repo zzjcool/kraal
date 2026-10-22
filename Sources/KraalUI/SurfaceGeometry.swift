@@ -26,6 +26,33 @@ import SwiftUI
 /// cell metrics used must be the ones the renderer actually reports, never a
 /// guess — `fallbackCellSize` exists only to bootstrap the first handshake.
 public enum SurfaceGeometry {
+    /// The daemon's hard limits on a surface grid.
+    ///
+    /// `herdr-gpui/crates/herdr-client/src/options.rs:22` `validate_options`: at
+    /// most 4096 per axis and 1 000 000 cells in total. Asking for more is not a
+    /// harmless probe — the request goes out and the daemon refuses it, and the
+    /// refusal is invisible in the UI.
+    public static let maxCols = 4096
+    public static let maxRows = 4096
+    public static let maxCells = 1_000_000
+
+    /// What this window can actually show. Tighter than the daemon's ceiling on
+    /// purpose: a window bigger than this many cells means the cell metrics are
+    /// wrong, not that the user wants a 4096-column terminal.
+    public static let windowColsLimit = 500
+    public static let windowRowsLimit = 200
+
+    /// Whether a grid is one the daemon will accept.
+    ///
+    /// Both bounds matter. Zero is the obvious one; the ceiling is the quiet one
+    /// — a bogus cell size produces a huge `cols`, and without this guard that
+    /// travels to the daemon as a real request.
+    public static func isAcceptableGrid(cols: Int, rows: Int) -> Bool {
+        cols > 0 && rows > 0
+            && cols <= maxCols && rows <= maxRows
+            && cols * rows <= maxCells
+    }
+
     /// Whether an incoming content revision means the delta stream was renumbered.
     ///
     /// Revisions only ever increase within one projection. A smaller one means
@@ -178,8 +205,8 @@ public enum SurfaceGeometry {
         // be a handful of cells wide, and raising the floor there would ask the
         // daemon for more columns than fit, which is exactly the wrapping bug.
         return ClientSurfaceSize(
-            cols: UInt16(min(max(cols, 4), 500)),
-            rows: UInt16(min(max(rows, 2), 200))
+            cols: UInt16(min(max(cols, 4), windowColsLimit)),
+            rows: UInt16(min(max(rows, 2), windowRowsLimit))
         )
     }
 
