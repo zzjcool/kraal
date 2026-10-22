@@ -66,6 +66,25 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 它做五件事：检查 `tart` → 没有就 clone（走 `ghcr.nju.edu.cn` 镜像源）→
 headless 启动 → **确认 `launchctl managername` 是 `Aqua`** → 检查三条 TCC 授权。
 
+### 第四条它不查：guest 的实际分辨率
+
+`vm-bootstrap.sh` 不检查这一项，因为 `tart get` 会让人误以为已经对了。
+**`tart get` 报 1920x1200 不代表 guest 跑在 1920x1200**：macOS 把实际显示模式
+存在 `/Library/Preferences/com.apple.windowserver.displays.plist` 里，那份偏好
+优先，`tart set --display` 改不动它。
+
+```bash
+tart exec kraal-agent /bin/bash -lc \
+  'plutil -p /Library/Preferences/com.apple.windowserver.displays.plist' \
+  | grep -E 'Wide|High'
+#   "Wide" => 1024 / "High" => 768      ← 这就是窗口会被压到 1004x660 的原因
+```
+
+偏差症状：`split-right` / `menu-split` / `split-down` / `close-pane` 四个全绿，
+**只有 `drag-divider` 报 `stuck: the drag never reached the daemon`**。看起来像
+拖拽回归，实际是屏幕太小。修法（在 guest 里用 CoreGraphics 切模式并
+`permanently` 保存）见 `docs/ENVIRONMENT.md` §4.6。
+
 ### 三条前置条件，缺了会表现为「产品 bug」
 
 | 检查 | 为什么必需 | 缺了的表现 |

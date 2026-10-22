@@ -405,6 +405,56 @@ tart run --no-graphics kraal-agent
 | pi | 1.3.0，`/opt/homebrew/bin/pi`，带完整配置与 SOP 库 |
 | node | v24.22.0（镜像自带 `node@24`） |
 
+#### ⚠️ `tart set --display` 不会改 guest 已保存的分辨率（2026-10-22 实测）
+
+这是换机器后最容易踩的一步，表现和产品 bug 一模一样。
+
+`tart get kraal-agent` 报 `Display 1920x1200`，VM 配置
+`~/.tart/vms/kraal-agent/config.json` 里也是 `1920x1200`，
+但 guest **实际**运行在 `1024×768`：
+
+```bash
+tart exec kraal-agent /bin/bash -lc 'plutil -p /Library/Preferences/com.apple.windowserver.displays.plist' \
+  | grep -E 'Wide|High|Scale'
+#   "Wide" => 1024 / "High" => 768 / "Scale" => 2      ← 实际生效的模式
+```
+
+原因：`tart set --display` 只改**虚拟显示器支持的尺寸**，而 macOS 把自己的
+显示模式存在 `windowserver.displays.plist` 里；那份偏好优先。停 VM、
+`tart set --display 1920x1200`、重启，**仍然是 1024×768**（实测）。
+
+**这条为什么危险**：Kraal 默认窗口 1180×760，屏幕只有 1024×768 时窗口被压成
+1004×660。而 `drag-divider` 当时把终端容器宽度写死成 959pt（1180pt 窗口下
+sidebar 221pt 的值），窗口一窄，算出的分隔条坐标就落进右侧 pane，拖拽打在终端
+上而不是分隔条上。用例报的却是「stuck: the drag never reached the daemon」——
+读起来像产品回归，实际是环境。其余 4 个用例照旧全绿，更容易误判。
+
+**修法**：在 guest 里用 CoreGraphics 切到目标模式并永久保存。
+
+```bash
+cat > /tmp/setmode.swift <<'EOF'
+import CoreGraphics
+import Foundation
+let d = CGMainDisplayID()
+guard let modes = CGDisplayCopyAllDisplayModes(d, nil) as? [CGDisplayMode],
+      let m = modes.first(where: { $0.width == 1920 && $0.height == 1200 })
+else { print("no such mode"); exit(1) }
+var cfg: CGDisplayConfigRef?
+guard CGBeginDisplayConfiguration(&cfg) == .success, let c = cfg else { exit(1) }
+CGConfigureDisplayWithDisplayMode(c, d, m, nil)
+print(CGCompleteDisplayConfiguration(c, CGConfigureOption.permanently).rawValue)
+EOF
+tar -czf - -C /tmp setmode.swift | tart exec -i kraal-agent /bin/bash -lc \
+  'mkdir -p /tmp/dd && cd /tmp/dd && tar -xzf - && /usr/bin/swift setmode.swift'
+```
+
+`permanently` 是必需的，否则重启回 1024×768（`permanently` 已实测跨重启保持）。
+guest 里没有 Xcode 但**有** `swift`，所以这段能直接跑；`swift -e` 也行。
+
+可用的模式共 16 个，含 `1280x800` / `1600x1200` / `1920x1200` / `2560x1600`。
+检查当前值最快的方式是读 `windowserver.displays.plist` 里的 `Wide`/`High`，
+不要信 `tart get`。
+
 #### 限制（实测）
 
 | 项 | 实际情况 | 影响 |
@@ -821,3 +871,45 @@ translation 就是重复计算；用起始 position 使计算幂等，同一 tra
 ≤0.005（约 5pt 常数），而 2x bug 在同样条件下是 +0.046。容差宽到能吸收 2x
 就等于给这个 bug 盖章——这也是为什么这个用例第一次跑出偏差时没有调容差，
 而是去查换算公式。
+
+### 8.10 坐标换算不能写死窗口尺寸（2026-10-22 实测并修复）
+
+`drag-divider` 一开始把终端容器宽度写成常量 `959`，依据是「1180pt 窗口 -
+221pt sidebar」，并且正确跑通过很多次。但那个值只在默认窗口尺寸下成立；
+**它是一个被记住的测量值，不是一个不变量**。
+
+实测：VM 屏幕变成 1024×768 后，Kraal 窗口被压到 1004×660，容器宽 783pt
+（= 1004 − 221），而算式仍然是 `origin_x + 221 + ratio*959`：
+
+```text
+正确：221 + 0.500 × 783 = 612
+写死：221 + 0.500 × 959 = 700     ← 偏 +88pt
+```
+
+窗口相对坐标 700 落在容器内部，换算成比例是 `(700−221)/783 = 0.612`，也就是
+按在了分隔条右侧 88pt 的终端区域上。拖拽打在终端上，daemon 的 ratio 一动不动。
+表现是用例报 `stuck: ratio 0.500 -> 0.500, the drag never reached the daemon`。
+
+**修法**：容器尺寸改为从 app 自己的日志读（`layout: container=WxH`），
+sidebar 宽度取 `window_w - container_w`，期望 ratio 用 `80/container_w`
+而不是 `80/959`。`gui.sh` 里的 `container_size()` 就是做这件事。
+
+**注入验证**（§0.3，1024×768 屏幕下）：
+
+| 注入点 | 结果 |
+| --- | --- |
+| `float('$coords') * $container_w` → `* 959`，且 expected 仍用 `/959` | `exit 1`，`stuck: ratio 0.500 -> 0.500` |
+| 恢复为 `$container_w` | `exit 0`，`0.500 -> 0.608`（expected 0.602，误差 +0.006） |
+| 恢复后在 1920×1200 下重跑 | `exit 0`，`0.500 -> 0.588`（误差 +0.005） |
+
+所以这条用例现在两种屏幕尺寸下都过，而写死的旧版本只在小屏下挂—— 这正是
+「门禁自己也包含了一个被记住的测量值」该有的表现。
+
+一个失败模式变体值得记：第一次尝试注入时改的是 `sidebar_w = 221`（常量），
+用例仍然全绿——因为 sidebar **确实**是 221。真正的常量是容器宽 959，不是
+sidebar。注入必须改在被断言的量上，否则“验证过了”是一句空话。
+
+同一个改动还修了一个静默失败：失败分支的 `driver shot -o "$dir/shot-failure.png"`
+把 **guest** 路径交给了宿主 shell 的重定向（`>>"$dir/app.out"`），于是每次失败
+都多打印一行 `app.out: No such file or directory`，截图本身的报错反而丢了。
+现在重定向到 `$host_dir/failure-shot.log`。
