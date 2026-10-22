@@ -12,11 +12,12 @@
 | [kitknox/rootshell](https://github.com/kitknox/rootshell) | MIT | 同为 libghostty 的 Apple 客户端：几何、拖拽、分屏、快照校验 |
 
 本轮**只移植测试**，不修实现。按约定，红是预期的：每条红的测试都指向一个
-具体的、可以用一句话说清的差异，修不修、什么时候修由后续决定。
+具体的、可以用一句话说清的差异。
 
-> **2026-10-22 起数字变了**：合并 main 时 issue #2 已经合入（diff 帧包同步
-> 输出、resize 不再清 scrollback），对应的 3 条转绿并从 skip 名单里删掉。
-> 现在是 **22 条红**；`--compare` 之后为空，说明名单不再陈。
+> **这些差异已经全部修完了。** 移植当时是 29 绿 / 25 红；随后 issue #1、#3–#10、
+> #18、#19 逐条修掉，`Scripts/test-baseline.sh` 的已知红名单**现在是空的**，
+> `swift test` 直接跑就是全绿。下面第三节保留的是每条测试当时指向的差异、以及
+> 修法要点 —— 它是这些测试存在的原因，改那段代码前值得先读。
 
 ---
 
@@ -62,7 +63,9 @@ main 合入 issue #2 后是 **32 绿 / 22 红**。
 
 ---
 
-## 三、当前是红的（22 条，每条一个具体差异，均已拆成 issue）
+## 三、移植时是红的（25 条，每条一个具体差异）—— 现已全部修好
+
+下面每条都附了当时的差异和修法；能否复核的最直接方式是看对应 issue。
 
 ### 3.1 渲染（6 条）
 
@@ -138,8 +141,8 @@ tracking issue 是 #11。
 | [#4](https://github.com/zzjcool/kraal/issues/4) | host theme 的 u8 写成 varint | `fix/host-theme-u8` | 3 |
 | [#10](https://github.com/zzjcool/kraal/issues/10) | Hello 缺 serde 默认值 | `fix/hello-serde-defaults` | 1 |
 
-合并任何一个 PR 后，记得从 `Scripts/test-baseline.sh` 的名单里删掉对应的条目
-（`--compare` 会告诉你哪条已经转绿），否则名单变陈、真回归会被吞。
+名单现在已经清空。**如果它重新长出条目**，先看 `--compare`：报告「名单里但其实
+已经绿了」说明名单陈旧（白丢护栏），一声不响地红着说明有真回归。
 
 ## 四、看过但**没有**移植的（附理由）
 
@@ -159,20 +162,16 @@ tracking issue 是 #11。
 ## 五、怎么跑
 
 ```bash
-swift test                                    # 全部：283 条，其中 22 条故意红
+swift test                                    # 全绿
 swift test --filter "Handshake compatibility"  # 按 suite
-./Scripts/test-baseline.sh                    # 除已知红外全绿（CI / verify.sh 用这个）
-./Scripts/test-baseline.sh --list             # 打印那 22 条
-./Scripts/test-baseline.sh --compare          # 哪些已经修好了（该从名单里删掉）
+./Scripts/test-baseline.sh                    # 全量 + 跳过 REDS 名单（现为空）
+./Scripts/test-baseline.sh --list             # 打印名单（现为空）
+./Scripts/test-baseline.sh --compare          # 名单里有没有「其实已经绿了」的
 ```
 
-红的那 22 条**全部来自本轮新增文件**，原有测试保持全绿 ——
-所以「红」不是回归，是这一轮把差异暴露出来了。
-
-`swift test` 直接跑会红，这会让「有没有真回归」失去信号。所以：
-
-- `./Scripts/test-baseline.sh` 是现在的门禁：跳过已知的 22 条，其余必须全绿；
-- `Scripts/verify.sh` 已经改用这个脚本，所以你仍然可以一条命令拿到完整信号；
+`swift test` 曾经是红的（25 → 22 → … → 0），那段时间靠 `test-baseline.sh`
+跳过已知红，才让「有没有真回归」仍有信号。名单清空后它退化成一条普通的
+`swift test`；`Scripts/verify.sh` 一直用它，所以命令不用变。
 - 修好一条后跑 `--compare`，它会告诉你哪条该从名单里删掉 —— 避免名单变陈。
 
 只看新增部分的红：
