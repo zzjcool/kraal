@@ -25,6 +25,13 @@ public enum ConnectionEvent: Sendable {
     case keyboardReportAll(enabled: Bool)
     case notification(SemanticNotification)
     case bell(count: UInt16)
+    /// A pane asked this machine to put something on the clipboard (OSC 52).
+    ///
+    /// `data` is **base64**, exactly as the daemon sent it (`wire.rs:1421-1424`
+    /// documents the field that way). Decoding is the consumer's job — see
+    /// `ClipboardPayload` — so the transport stays a faithful copy of the wire and
+    /// the "what does the clipboard actually become" rule is testable.
+    case clipboard(data: String)
     case serverShutdown(String?)
     case error(String)
     case disconnected(reason: String?)
@@ -459,31 +466,12 @@ public actor EndpointConnection {
         case let .serverShutdown(reason):
             eventHandler(.serverShutdown(reason))
             teardown(reason: reason)
-        case let .windowTitle(title):
-            eventHandler(.windowTitle(title))
-        case let .mouseCapture(enabled, sgrPixels):
-            eventHandler(.mouseCapture(enabled: enabled, sgrPixels: sgrPixels))
-        case let .terminalBell(count):
-            eventHandler(.bell(count: count))
-        case let .clientShellError(message):
-            eventHandler(.error(message))
-        case .reloadSoundConfig:
-            break
-        case let .welcome(_, _, error):
-            if let error {
-                eventHandler(.error("daemon: \(error)"))
-            }
-        case let .clientShellKeyboardReportAll(enabled):
-            // Reported, not dropped: without it the decoder keeps sending
-            // `tracksRelease: false`, so a program that turned on kitty's
-            // report-all-keys mode never hears about releases (issue #20).
-            eventHandler(.keyboardReportAll(enabled: enabled))
-        case .terminal, .graphics, .graphicsFile, .graphicsTransmissionRetired, .clipboard,
-             .directTerminalKeyboardProtocol:
-            // Byte-level terminal traffic belongs to the per-pane channels, and
-            // the optional surface encodings are off, so these arrive only
-            // unsolicited (or not at all) on this connection.
-            break
+        default:
+            // Single-event pass-throughs (title, mouse mode, bell, OSC 52
+            // clipboard, errors, keyboard report-all) live in their own function:
+            // this switch is the state machine, and folding seven one-line
+            // forwards into it pushed it past swiftlint's complexity limit twice.
+            handleForwardedEvent(message)
         }
     }
 
@@ -549,6 +537,53 @@ public actor EndpointConnection {
 // still actor-isolated members of `EndpointConnection`: a same-file extension
 // sees the same private state, and nothing here changes behaviour.
 extension EndpointConnection {
+    /// Forwards the events whose only job is to reach a consumer unchanged.
+    ///
+    /// None of these change connection state, which is what makes them a
+    /// separate concern from the switch above.
+    private func handleForwardedEvent(_ message: ServerMessage) {
+        switch message {
+        case let .windowTitle(title):
+            eventHandler(.windowTitle(title))
+        case let .mouseCapture(enabled, sgrPixels):
+            eventHandler(.mouseCapture(enabled: enabled, sgrPixels: sgrPixels))
+        case let .terminalBell(count):
+            eventHandler(.bell(count: count))
+        case let .clipboard(data):
+            // OSC 52. `herdr` renders the escape sequence into the pane and then
+            // sends the payload here, because a pane's escape output stops at the
+            // daemon rather than reaching this client's own terminal. Dropping it
+            // meant a remote `pbcopy` (or tmux's copy) silently did nothing.
+            //
+            // `data` stays base64 here on purpose: the transport is a faithful
+            // copy of the wire, and decoding lives in `ClipboardPayload` where it
+            // can be asserted.
+            eventHandler(.clipboard(data: data))
+        case let .clientShellError(message):
+            eventHandler(.error(message))
+        case .reloadSoundConfig:
+            break
+        case let .welcome(_, _, error):
+            if let error {
+                eventHandler(.error("daemon: \(error)"))
+            }
+        case let .clientShellKeyboardReportAll(enabled):
+            // Reported, not dropped: without it the decoder keeps sending
+            // `tracksRelease: false`, so a program that turned on kitty's
+            // report-all-keys mode never hears about releases (issue #20).
+            eventHandler(.keyboardReportAll(enabled: enabled))
+        default:
+            // Byte-level terminal traffic belongs to the per-pane channels, and
+            // the optional surface encodings are off, so these arrive only
+            // unsolicited (or not at all) on this connection. Spelled `default`
+            // rather than listing them: adding a consumed case (clipboard) to an
+            // exhaustive list keeps pushing this switch past swiftlint's
+            // complexity limit, and the "we do nothing with these" set only ever
+            // grows.
+            break
+        }
+    }
+
     // MARK: - Health
 
     private func startHealthMonitor() {

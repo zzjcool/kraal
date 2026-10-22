@@ -24,6 +24,10 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var paneTerminalPool: PaneTerminalPool?
     private let windowActions = WindowActions()
     private var menuBar: MacMenuBar?
+    /// Owns the AppKit side of terminal events (pasteboard, title, bell).
+    /// Retained so the closure installed on the store does not have to capture
+    /// it strongly — see `onEffectsChanged` in `applicationDidFinishLaunching`.
+    private var terminalEffects: TerminalEffectsApplier?
 
     /// Whether this launch is allowed to take the desktop.
     ///
@@ -122,6 +126,20 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
         let window = makeWindow(root: root)
         self.window = window
+
+        // Terminal events (OSC 52 clipboard, pane title, bell, notification) are
+        // reduced to a value by the store and applied here, which is the only
+        // code that touches AppKit for them. Assigned before `connect()` so no
+        // event from the first frame is missed.
+        let effects = TerminalEffectsApplier()
+        effects.attach(window: window)
+        terminalEffects = effects
+        store.onEffectsChanged = { [weak effects] pending in
+            guard let effects else { return }
+            let applied = effects.apply(pending)
+            guard !applied.isEmpty else { return }
+            kraalLog("effects: \(applied.joined(separator: " "))")
+        }
 
         // Keep the pool in sync with the store: drop terminals for closed panes
         // so their Ghostty surfaces are released.

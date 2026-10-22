@@ -913,3 +913,35 @@ sidebar。注入必须改在被断言的量上，否则“验证过了”是一�
 把 **guest** 路径交给了宿主 shell 的重定向（`>>"$dir/app.out"`），于是每次失败
 都多打印一行 `app.out: No such file or directory`，截图本身的报错反而丢了。
 现在重定向到 `$host_dir/failure-shot.log`。
+
+### 8.11 OSC 52 剪贴板：payload 是 base64（2026-10-22 实测）
+
+`ServerMessage::Clipboard` 的 `data` 字段是 **base64**，不是原始文本
+（上游 `wire.rs:1421-1424` 写明 "Base64-encoded clipboard data"，客户端
+`client/clipboard_forwarding.rs:9-15` 先解码再写剪贴板）。
+
+第一次实现直接把字符串写进 `NSPasteboard`：类型检查通过、单元测试全绿，
+但剪贴板里躺的是 `S1JBQUxfT1NDNTJfT0s=`——粘贴能成功，内容是垃圾。
+**单元测试没有抓到，因为它断言的是我自己构造的值，而不是 daemon 的编码。**
+这正是 `AGENTS.md` §0.2 那类缺陷。抓到这个 bug 的是 `Scripts/osc52-probe.sh`。
+
+#### 端到端探针的三个坑（都会伪装成「产品没修好」）
+
+| 坑 | 表现 | 原因 |
+| --- | --- | --- |
+| VM 里的 `Kraal.app` 是旧的 | 剪贴板收到 base64 原文 | 探针没有部署，测的是 14:15 的旧二进制。`gui.sh` 每次 run 都部署，探针也必须 |
+| `herdr pane run --pane <id> <cmd>` | 命令根本没执行，剪贴板不变 | pane id 是**位置参数**：`pane run <PANE_ID> <CMD>`。写成 `--pane` 会被当成命令，返回 `pane_not_found: pane --pane not found`，又被 `2>/dev/null` 吞掉 |
+| `herdr server … &` 后 `tart exec` 挂死 | 探针 10 分钟无输出 | 后台进程仍持有 pipe。`gui.sh` 在同一个 `bash -lc` 末尾加了 `sleep 2`，这就是它能返回的原因 |
+
+guest 里没有 `timeout`（§4.6），所以探针里的每个 guest 调用都用宿主侧
+watchdog 包住，否则裸 `recv` 会永久挂起。
+
+#### 注入验证
+
+| 改动 | 结果 |
+| --- | --- |
+| 去掉 base64 解码（`next.clipboard = data`） | `FAIL: ... (S1JBQUxfT1NDNTJfT0s=)`，6 passed / 1 failed |
+| 恢复解码 | `7 passed, 0 failed`，剪贴板内容 `KRAAL_OSC52_OK` |
+
+探针断言的是 **daemon 之外的真实剪贴板**（`osascript -e "the clipboard as text"`），
+并且先把剪贴板设成哨兵值 `NOT_THE_PANE_VALUE`，所以「本来就是那个值」不可能误判为通过。

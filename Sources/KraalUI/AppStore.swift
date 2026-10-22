@@ -50,6 +50,39 @@ public final class AppStore {
     public internal(set) var pendingGroupClose: PendingGroupClose?
     public private(set) var reconnectedAt: Date?
 
+    /// Effects from the pane that the desktop still has to act on.
+    ///
+    /// Set by the event reduction (pure, testable) and consumed by the AppKit
+    /// side, which owns `NSPasteboard` / `NSWindow` / `NSSound`. Keeping the two
+    /// apart is what lets `swift test` assert that a clipboard event produces a
+    /// clipboard write without a running app or a real pasteboard.
+    public internal(set) var pendingEffects = TerminalEffects.none
+    /// Called after `pendingEffects` changes, so the desktop side can drain it.
+    ///
+    /// The callback returns nothing and the store clears `pendingEffects` itself
+    /// once it has been handed over. That keeps the mutable state owned by the
+    /// store: `KraalMac` consumes effects, it does not write them back.
+    @ObservationIgnored
+    public var onEffectsChanged: ((TerminalEffects) -> Void)?
+    /// True while `onEffectsChanged` is running, so a re-entrant event cannot
+    /// overwrite the batch being handed over.
+    @ObservationIgnored private var isDrainingEffects = false
+
+    /// Hands the pending effects to the desktop and clears them.
+    ///
+    /// Clearing after the callback (rather than leaving it to the caller) makes
+    /// the contract one-way, and a batch that is applied twice — which would put
+    /// the same text on the pasteboard twice — impossible by construction.
+    public func drainEffects() {
+        guard !isDrainingEffects else { return }
+        let pending = pendingEffects
+        guard !pending.isEmpty else { return }
+        isDrainingEffects = true
+        pendingEffects = .none
+        onEffectsChanged?(pending)
+        isDrainingEffects = false
+    }
+
     /// Applied to every sidebar render; replaced when a config is imported.
     public var sidebarLayout = SidebarLayout()
     public var sidebarConfigSource: String?

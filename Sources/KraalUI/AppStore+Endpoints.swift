@@ -414,6 +414,23 @@ public extension AppStore {
             endpoint.connectionTask = nil
             scheduleEndpointRetry(endpoint, report: isActive)
         default:
+            handleEffectEvent(event, isActive: isActive)
+        }
+    }
+
+    /// Routes the events that only describe what the pane wants the desktop to
+    /// do, ignoring them for a machine that is not on screen.
+    ///
+    /// Split out of `applyEndpointEvent` because four more branches pushed that
+    /// switch past swiftlint's complexity limit. Keeping it separate also puts
+    /// the "background machines are silent" rule in one readable place instead
+    /// of in four `guard isActive else { return }` lines.
+    private func handleEffectEvent(_ event: ConnectionEvent, isActive: Bool) {
+        guard isActive else { return }
+        switch event {
+        case .clipboard, .windowTitle, .bell, .notification:
+            applyEffects(event)
+        default:
             break
         }
     }
@@ -436,6 +453,23 @@ public extension AppStore {
         endpoint.keyboardReportAll = enabled
         kraalLog("endpoint \(endpoint.label): keyboard report-all \(enabled)")
         if isActive { keyboardReportAll = enabled }
+    }
+
+    /// Folds one effect-carrying event into `pendingEffects` and lets the
+    /// desktop act on the result.
+    ///
+    /// Only the foreground machine's events reach here. A background machine
+    /// keeps its snapshot and status up to date, but its bells must not ring in
+    /// this window and its clipboard must not overwrite yours: selection is what
+    /// decides whose terminal you are looking at.
+    private func applyEffects(_ event: ConnectionEvent) {
+        pendingEffects = TerminalEffectsReducer.reduce(
+            pendingEffects,
+            event: event,
+            fallbackTitle: activeEndpoint?.label ?? "Kraal",
+            sessionSuffix: DevSession.windowTitleSuffix(name: DevSession.name)
+        )
+        drainEffects()
     }
 
     /// Retries one machine's connection, with the same backoff the store used for
