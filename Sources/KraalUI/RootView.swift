@@ -21,6 +21,8 @@ public struct RootView: View {
     @State private var showDebugInfo = false
     @State private var sidebarVisible = true
     @State private var statusBarVisible = true
+    /// Mirror of `store.pendingGroupClose` that the alert is presented from.
+    @State private var pendingGroupPrompt: AppStore.PendingGroupClose?
 
     /// Window-level intents raised by the AppKit menu bar. Optional so previews
     /// and tests can build the view without an AppKit host.
@@ -154,5 +156,59 @@ public struct RootView: View {
         .onChange(of: windowActions.shortcutsCount) { showShortcuts = true }
         .onChange(of: windowActions.settingsCount) { showSettings = true }
         .onChange(of: windowActions.debugInfoCount) { showDebugInfo = true }
+        // Confirmations the daemon asked for. Mounted here, at the root, because
+        // the two ways to trigger a close live in different UI layers: the
+        // sidebar's context menu is SwiftUI, the File menu is AppKit. A dialog
+        // owned by either one would be invisible to the other.
+        //
+        // The prompt is mirrored into local `@State` rather than driven straight
+        // off `store.pendingGroupClose`. A `.alert(isPresented: Binding { store.x
+        // != nil })` never appeared here even though the store was set in the same
+        // millisecond as the refusal (the log line "close: refusing to close
+        // alone, asking" proves the value was assigned): SwiftUI keeps its own
+        // presentation state, and a binding whose `get` reads an observable
+        // property outside a view body does not reliably invalidate. `onChange` on
+        // the observable does, so the alert is owned by view state and the store
+        // stays the source of the request.
+        .onChange(of: store.pendingGroupClose) { _, pending in
+            pendingGroupPrompt = pending
+        }
+        .alert(
+            pendingGroupPrompt?.method == "workspace.close"
+                ? "Close the whole worktree group?"
+                : "Close this too?",
+            isPresented: Binding(
+                get: { pendingGroupPrompt != nil },
+                set: { if !$0 { pendingGroupPrompt = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { store.cancelPendingGroupClose() }
+            Button("Close", role: .destructive) { store.confirmPendingGroupClose() }
+        } message: {
+            Text(Self.groupCloseMessage(for: pendingGroupPrompt))
+        }
+    }
+
+    /// What the daemon's refusal means, in the user's terms.
+    ///
+    /// The daemon refuses rather than warning because closing one workspace of a
+    /// worktree group — or the last pane of a workspace that shares a group —
+    /// takes the whole group down. Saying so is the entire point of the prompt.
+    static func groupCloseMessage(for pending: AppStore.PendingGroupClose?) -> String {
+        guard let pending else { return "" }
+        switch pending.method {
+        case "workspace.close":
+            return "This workspace is part of a worktree group. Closing it also "
+                + "closes the other workspaces in the group.\n\n"
+                + "Herdr refused to close it alone, so nothing has been closed yet."
+        case "pane.close":
+            return "This is the last pane of its workspace, and that workspace is "
+                + "part of a worktree group. Closing it closes the group.\n\n"
+                + "Nothing has been closed yet."
+        default:
+            return "This is the last tab of its workspace, and that workspace is "
+                + "part of a worktree group. Closing it closes the group.\n\n"
+                + "Nothing has been closed yet."
+        }
     }
 }

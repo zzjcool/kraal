@@ -35,6 +35,14 @@ public final class AppStore {
     /// True while the frame on screen belongs to a connection that has dropped.
     public internal(set) var surfaceIsStale = false
     public internal(set) var lastError: String?
+    /// A close the daemon refused because it would take a worktree group with it,
+    /// waiting for the user to say yes.
+    ///
+    /// Lives on the store rather than in a view because both close entry points
+    /// are outside SwiftUI's view tree: the sidebar's context menu is SwiftUI but
+    /// the File menu is AppKit (`MacMenuBar`), and a confirmation owned by one of
+    /// them would be invisible to the other.
+    public internal(set) var pendingGroupClose: PendingGroupClose?
     public private(set) var reconnectedAt: Date?
 
     /// Applied to every sidebar render; replaced when a config is imported.
@@ -338,15 +346,144 @@ public final class AppStore {
     }
 
     public func close(tabId: String) {
-        Task { await call("tab.close", ["tab_id": tabId]) }
+        closeAfterChecking(tabId: tabId)
     }
 
     public func close(workspaceId: String) {
-        Task { await call("workspace.close", ["workspace_id": workspaceId]) }
+        closeAfterChecking(workspaceId: workspaceId)
     }
 
     public func close(paneId: String) {
-        Task { await call("pane.close", ["pane_id": paneId]) }
+        closeAfterChecking(paneId: paneId)
+    }
+
+    // MARK: - Closing, with the worktree-group confirmation the daemon asks for
+
+    /// `workspace.close` params.
+    ///
+    /// `close_group` is not optional in practice: the daemon refuses to close a
+    /// member of a multi-workspace worktree group unless the caller says whether
+    /// it means the whole group. Leaving it out is what made the menu item look
+    /// like a no-op — the refusal arrived in band and only reached a status-bar
+    /// tooltip.
+    nonisolated static func closeWorkspaceParams(
+        workspaceId: String,
+        closeGroup: Bool
+    ) -> [String: Any] {
+        ["workspace_id": workspaceId, "close_group": closeGroup]
+    }
+
+    /// `pane.close` params. No group flag: the daemon signals a group-level
+    /// consequence with `confirmation_required` instead of taking a parameter.
+    nonisolated static func closePaneParams(paneId: String) -> [String: Any] {
+        ["pane_id": paneId]
+    }
+
+    nonisolated static func closeTabParams(tabId: String) -> [String: Any] {
+        ["tab_id": tabId]
+    }
+
+    /// The error code the daemon uses when closing a workspace would take a whole
+    /// worktree group with it (`src/app/api/workspaces.rs:328-336`).
+    nonisolated static let groupCloseRequired = "workspace_group_close_required"
+
+    /// The error code `pane.close` / `tab.close` use for the same consequence
+    /// (`src/app/api/panes.rs:1976-1987`, `tabs.rs:242-247`).
+    nonisolated static let confirmationRequired = "confirmation_required"
+
+    /// Whether a refusal is the daemon asking "do you really mean the whole
+    /// group?" rather than a failure. Both codes mean the same thing to the user
+    /// — confirm once and send it again — so they share a branch.
+    nonisolated static func isGroupCloseRefusal(_ code: String) -> Bool {
+        code == groupCloseRequired || code == confirmationRequired
+    }
+
+    /// Closes something, retrying with the group flag when the daemon says the
+    /// target is part of a worktree group.
+    ///
+    /// The retry is *after* an explicit refusal rather than predicted from the
+    /// snapshot: the daemon is the authority on what a group is, and its rule
+    /// (parent + at least one linked child, `sidebar.rs:573-601`) differs from the
+    /// sidebar's display grouping. Asking beats guessing — and the second request
+    /// is only sent once the user has confirmed.
+    private func closeAfterChecking(
+        workspaceId: String? = nil,
+        paneId: String? = nil,
+        tabId: String? = nil
+    ) {
+        let method: String
+        let params: [String: Any]
+        if let workspaceId {
+            method = "workspace.close"
+            // First attempt never claims the group: the user clicked one row.
+            params = Self.closeWorkspaceParams(workspaceId: workspaceId, closeGroup: false)
+        } else if let paneId {
+            method = "pane.close"
+            params = Self.closePaneParams(paneId: paneId)
+        } else if let tabId {
+            method = "tab.close"
+            params = Self.closeTabParams(tabId: tabId)
+        } else {
+            return
+        }
+
+        Task {
+            let refusal = await callReturningErrorCode(method, params)
+            guard let refusal else { return }
+            guard Self.isGroupCloseRefusal(refusal) else {
+                // Not something the user can act on by confirming again, or they
+                // already did and the daemon refused anyway.
+                lastError = "\(method): \(refusal)"
+                return
+            }
+            // Ask before taking other workspaces down with it. Logged because a
+            // refusal that only reaches a tooltip is how #21 stayed hidden: this
+            // line is the difference between "the menu did nothing" and "the app
+            // is waiting for the user".
+            kraalLog("close: daemon refused \(method) alone (\(refusal)), asking")
+            pendingGroupClose = PendingGroupClose(
+                method: method,
+                workspaceId: workspaceId,
+                paneId: paneId,
+                tabId: tabId
+            )
+        }
+    }
+
+    /// What the user is being asked to confirm.
+    public struct PendingGroupClose: Equatable, Sendable {
+        public var method: String
+        public var workspaceId: String?
+        public var paneId: String?
+        public var tabId: String?
+    }
+
+    /// Confirms the pending group close.
+    ///
+    /// `workspace.close` takes `close_group: true`; `pane.close` / `tab.close`
+    /// take no such parameter — the second request is identical, and the daemon
+    /// accepts it once the client has shown the confirmation it asked for.
+    public func confirmPendingGroupClose() {
+        guard let pending = pendingGroupClose else { return }
+        pendingGroupClose = nil
+        if let workspaceId = pending.workspaceId {
+            let params = Self.closeWorkspaceParams(workspaceId: workspaceId, closeGroup: true)
+            Task { await call("workspace.close", params) }
+            return
+        }
+        if let paneId = pending.paneId {
+            let params = Self.closePaneParams(paneId: paneId)
+            Task { await call("pane.close", params) }
+            return
+        }
+        if let tabId = pending.tabId {
+            let params = Self.closeTabParams(tabId: tabId)
+            Task { await call("tab.close", params) }
+        }
+    }
+
+    public func cancelPendingGroupClose() {
+        pendingGroupClose = nil
     }
 
     public func createTab(label: String? = nil) {

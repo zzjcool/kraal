@@ -262,6 +262,73 @@ pane_count() {
         | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["panes"]))' 2>/dev/null
 }
 
+workspace_count() {
+    herdr workspace list 2>/dev/null \
+        | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["workspaces"]))' 2>/dev/null
+}
+
+# Whether the daemon currently holds a worktree group, and how much of one.
+#
+# `grouped` — at least one repo key is shared by a main checkout and a linked
+#   worktree. That pair is the daemon's own rule for a group
+#   (`sidebar.rs:573-601`), and it is what makes `workspace.close` refuse without
+#   `close_group`. Two unrelated workspaces are not a group.
+# `partial` — only one side of a pair survived, which is the half-closed state a
+#   botched close leaves behind.
+# `alone`  — one workspace, no group; nothing left to close.
+# `empty`  — no workspaces at all.
+# The workspace id of the group's main checkout, which is the only member the
+# daemon refuses to close alone (`actions.rs:899-917`).
+main_checkout_workspace_id() {
+    herdr workspace list 2>/dev/null | python3 -c '
+import json, sys
+by_key = {}
+for workspace in json.load(sys.stdin)["result"]["workspaces"]:
+    worktree = workspace.get("worktree")
+    if not worktree:
+        continue
+    by_key.setdefault(worktree["repo_key"], []).append(
+        (workspace["workspace_id"], worktree["is_linked_worktree"])
+    )
+for members in by_key.values():
+    if any(linked for _, linked in members) and any(not linked for _, linked in members):
+        for workspace_id, linked in members:
+            if not linked:
+                print(workspace_id); sys.exit(0)
+' 2>/dev/null
+}
+
+workspace_group_state() {
+    herdr workspace list 2>/dev/null | python3 -c '
+import json, sys
+workspaces = json.load(sys.stdin)["result"]["workspaces"]
+if not workspaces:
+    print("empty"); sys.exit(0)
+by_key = {}
+for workspace in workspaces:
+    worktree = workspace.get("worktree")
+    if not worktree:
+        continue
+    by_key.setdefault(worktree["repo_key"], []).append(worktree["is_linked_worktree"])
+for key, linked_flags in by_key.items():
+    has_linked = any(linked_flags)
+    has_parent = not all(linked_flags)
+    if has_linked and has_parent:
+        print("grouped"); sys.exit(0)
+    if has_linked or has_parent:
+        # More than one workspace on a key with only one side present is the
+        # inconsistent state worth flagging; a single workspace is just alone.
+        if len(linked_flags) > 1:
+            print("partial"); sys.exit(0)
+if len(workspaces) == 1:
+    print("alone")
+else:
+    # Several workspaces, none of them grouped: closing one must not touch the
+    # others, so this is not the half-closed state either.
+    print("ungrouped")
+' 2>/dev/null
+}
+
 # Prints the app's most recent `layout: container=WxH` measurement as "W H".
 #
 # The drag coordinate needs the width of the terminal container, which is the
@@ -853,6 +920,109 @@ print(f'ratio {before:.3f} -> {after:.3f} (expected ~{expected:.3f}, error {afte
     }
 }
 
+# Close a real worktree group through the File menu.
+#
+# Issue #21: `workspace.close` was sent without `close_group`, so the daemon
+# refused every close of a grouped workspace with `workspace_group_close_required`
+# — in band, as a decodable body — and the menu item looked like a no-op. Unit
+# tests could not see it because they asserted on the request body this client
+# sent, not on whether the daemon accepted it (AGENTS.md §0.2).
+#
+# Two facts from the daemon decide what this case has to do (measured, 0.9.5):
+#
+#   * Only a *main checkout* (`is_linked_worktree == false`) is refused. Closing a
+#     linked worktree on its own is allowed, because that does not take the group
+#     with it. `actions.rs:899-917` filters to `!space.is_linked_worktree`.
+#   * A workspace made by `workspace create --cwd` has no worktree metadata until
+#     `worktree create` runs; only then does the daemon compute `repo_key` for
+#     both sides. So the fixture must create the worktree *before* it can see a
+#     group, and must close the main checkout, not the linked one.
+#
+# What was measured with the daemon as the judge:
+#   A. close_group=false on the main checkout -> `workspace_group_close_required`,
+#      and workspace list still showed w1 + w5.
+#   B. close_group=true  -> {"type":"ok"}, and list dropped to the unrelated
+#      workspace alone.
+case_close_workspace_group() {
+    requires() { echo ax; }
+    fixture() {
+        # A scratch repo to branch from. The daemon's own worktree root keeps the
+        # checkout inside its HERDR_HOME, so nothing leaks into the host's tree.
+        local repo="$HERDR_HOME/close-group-fixture"
+        tart exec "$VM" /bin/bash -lc "
+            rm -rf $repo
+            mkdir -p $repo && cd $repo || exit 1
+            git init -q || exit 1
+            git -c user.email=a@b -c user.name=a commit -q --allow-empty -m init || exit 1
+        " >/dev/null 2>&1 || { echo "cannot create the fixture repo at $repo"; return 1; }
+        # worktree create acts on the *focused* workspace and refuses with
+        # `not_git_worktree` when that one is not inside a checkout — the exact
+        # error seen when the previous case's pane still held focus. So create the
+        # workspace, then focus it before asking for a worktree.
+        local created workspace_id
+        created=$(herdr workspace create --cwd "$repo" 2>&1) \
+            || { echo "workspace create failed: $(printf '%s' "$created" | head -c 300)"; return 1; }
+        workspace_id=$(printf '%s' "$created" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["result"]["workspace"]["workspace_id"])
+' 2>/dev/null)
+        [ -n "$workspace_id" ] || { echo "cannot read the new workspace id"; return 1; }
+        herdr workspace focus "$workspace_id" >/dev/null 2>&1 \
+            || { echo "cannot focus $workspace_id"; return 1; }
+        # This also backfills the main checkout's worktree metadata, which is what
+        # makes the daemon see a group at all. A unique branch per run: the scratch
+        # HERDR_HOME survives between cases (only session.json is cleared), so a
+        # fixed name collides on the second run and `worktree create` fails.
+        created=$(herdr worktree create --branch "close-group-$$" 2>&1) \
+            || { echo "worktree create failed: $(printf '%s' "$created" | head -c 300)"; return 1; }
+        local groups
+        groups=$(workspace_group_state)
+        [ "$groups" = "grouped" ] || { echo "not grouped: $groups"; return 1; }
+        # Focus the main checkout: the File menu closes the focused workspace, and
+        # only a main checkout is refused when `close_group` is false
+        # (`actions.rs:899-917`).
+        local main_id
+        main_id=$(main_checkout_workspace_id)
+        [ -n "$main_id" ] || { echo "no main checkout in the group"; return 1; }
+        herdr workspace focus "$main_id" >/dev/null 2>&1 \
+            || { echo "cannot focus $main_id"; return 1; }
+    }
+    action() {
+        # File > Close Workspace is the AppKit path — the one that had no
+        # confirmation dialog available to it.
+        driver menu --menu File --item "Close Workspace"
+        # The app answers the refusal with a confirmation. This case deliberately
+        # stops at the dialog: what it asserts is that the *request* carried the
+        # group flag, that the daemon refused it, and that the refusal closed
+        # nothing. Clicking through the dialog here would fold the confirmation
+        # path into the same test and hide a regression in either half; the
+        # retry-with-true path is covered by the daemon-level A/B recorded in the
+        # PR (`close_group=true` closed the group, `false` was refused).
+        sleep 2
+    }
+    assert() {
+        local before="$1" after log
+        log="$host_dir/kraal.log"
+        # 1. The request that went out carried the flag. Without it the daemon
+        #    cannot tell "this workspace" from "the group", which is issue #21.
+        if check "workspace.close was sent with close_group" \
+            "$(grep -q 'workspace.close .*close_group=false' "$log" 2>/dev/null && echo 0 || echo 1)" \
+            "$(grep -o 'workspace.close [^:]*' "$log" 2>/dev/null | tail -1)"; then :; else return 1; fi
+        # 2. The daemon refused it, and the app knew why. `call: REFUSED` is
+        #    printed from the in-band error branch; the second line is the app
+        #    deciding to ask the user instead of showing a bare error.
+        if check "the refusal was recognised as a group close" \
+            "$(grep -q 'refused workspace.close alone (workspace_group_close_required), asking' "$log" 2>/dev/null && echo 0 || echo 1)" \
+            "$(grep -o 'refused workspace.close alone ([a-z_]*), asking' "$log" 2>/dev/null | tail -1)"; then : else return 1; fi
+        # 3. Nothing was closed. This is the half that would go unnoticed: a client
+        #    that dropped the flag but still closed would pass check 1 on a stale
+        #    log and quietly destroy a group the user only asked to close once.
+        after=$(workspace_count)
+        check "the refused close closed nothing" \
+            "$([ "$after" = "$before" ] && echo 0 || echo 1)" "$before -> $after workspaces"
+    }
+}
+
 # ---------------------------------------------------------------- runner
 
 # Reads a case's declared requirement without executing the case.
@@ -874,6 +1044,23 @@ case_needs() {
     *"echo focus"*) echo focus ;;
     *) echo ax ;;
     esac
+}
+
+# Kraal writes to ~/Library/Logs/Kraal-<session>.log, not to stderr, and the
+# session name is derived from KRAAL_DEV_SESSION. Without this copy the log never
+# reached the artifacts, even though docs/AUTOMATION.md promised it.
+#
+# Callable mid-case: assertions that reason about what the app decided (did it
+# send the group flag? did it ask for confirmation?) need the log while they run,
+# not only in the artefact directory afterwards.
+collect_app_log() {
+    local host_dir="$1"
+    if [ "$BACKEND" = "vm" ]; then
+        tart exec -i "$VM" /bin/bash -lc \
+            "cat ~/Library/Logs/Kraal-$SESSION.log 2>/dev/null" > "$host_dir/kraal.log" 2>/dev/null
+    else
+        cp "$HOME/Library/Logs/Kraal-$SESSION.log" "$host_dir/kraal.log" 2>/dev/null
+    fi
 }
 
 run_case() {
@@ -958,6 +1145,11 @@ run_case() {
             # that dies with the subshell, so summary.json recorded "passed" with
             # an empty assertion list — a gate that cannot say what it checked.
             # The log is captured with a redirect instead.
+            # Pull the app log *before* the assertions run: some cases assert on
+            # what the app logged (a refusal it had to handle, a command it decided
+            # not to send), and the collection at the end of the case happens after
+            # `assert` has already run.
+            collect_app_log "$host_dir"
             local assert_log="$host_dir/assert.log"
             if ! assert "$before" >"$assert_log" 2>&1; then
                 failure="assert"
@@ -979,15 +1171,7 @@ run_case() {
         cp "$SCRATCH/app.out" "$host_dir/app.out" 2>/dev/null
         cp "$SCRATCH/herdr-server.log" "$host_dir/herdr-server.log" 2>/dev/null
     fi
-    # Kraal writes to ~/Library/Logs/Kraal-<session>.log, not to stderr, and the
-    # session name is derived from KRAAL_DEV_SESSION. Without this copy the log
-    # never reached the artifacts, even though docs/AUTOMATION.md promised it.
-    if [ "$BACKEND" = "vm" ]; then
-        tart exec -i "$VM" /bin/bash -lc \
-            "cat ~/Library/Logs/Kraal-$SESSION.log 2>/dev/null" > "$host_dir/kraal.log" 2>/dev/null
-    else
-        cp "$HOME/Library/Logs/Kraal-$SESSION.log" "$host_dir/kraal.log" 2>/dev/null
-    fi
+    collect_app_log "$host_dir"
 
     local after
     after=$(pane_count)
@@ -1047,7 +1231,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane drag-divider"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group drag-divider"; }
 
 # ---------------------------------------------------------------- entrypoint
 
