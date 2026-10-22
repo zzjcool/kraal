@@ -59,6 +59,10 @@ surface 逐行一致 36/36」，所以渲染结果与桌面端一致。
 | 分屏拖拽 | ⏳ | 拖动条已实现并调用 `layout.set_split_ratio`，需要在真实分屏上验证 |
 | iOS 版本 | ⏳ | 协议层与侧边栏引擎已复用就绪，见 ROADMAP |
 
+**和官方 herdr 的差距**（copy mode、滚动条、popup 浮层、通知、OSC 8 链接等）逐条列在
+[docs/GAP-VS-HERDR.md](docs/GAP-VS-HERDR.md)，每条都带上游与我方的代码位置；
+同一份文档的 §7 还记了 9 个已定位的错误，其中 4 个已修，各条目的状态一目了然。
+
 ---
 
 ## 快速开始
