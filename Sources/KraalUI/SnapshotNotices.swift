@@ -113,7 +113,11 @@ public enum SnapshotNotices {
             found.append(SnapshotNotice(
                 kind: .announcement,
                 id: "announcement-\(announcement.id)",
-                summary: trimmed(announcement.title) ?? "announcement",
+                // Same 60-character discipline as the config summary: an
+                // announcement title has no length contract from the daemon, and
+                // `.lineLimit(1)` only stops it *overflowing* — a long title still
+                // squeezes `Spacer()` and the tab-bar segments to their minimum.
+                summary: firstLine(trimmed(announcement.title) ?? "announcement"),
                 detail: body
             ))
         }
@@ -204,10 +208,16 @@ public enum SnapshotNotices {
     }
 
     private static func firstLine(_ text: String) -> String {
-        let line = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true)
+        // `split(whereSeparator: \.isNewline)` and not `split(separator: "\n")`:
+        // in Swift `"\r\n"` is a **single** Character, so splitting on the literal
+        // `"\n"` never matches a CRLF file — the whole diagnostic came through as
+        // one "line" with embedded newlines, and `.lineLimit(1)` only hid it.
+        // The daemon's diagnostics can come from a config file written anywhere,
+        // so CRLF is not a hypothetical.
+        let line = text.split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: \.isNewline)
             .first
             .map(String.init) ?? text
-        let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+        let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
         // A single pathological line would push everything else out of the status
         // bar; the detail view carries the full text.
         return trimmedLine.count > 60 ? String(trimmedLine.prefix(60)) + "…" : trimmedLine

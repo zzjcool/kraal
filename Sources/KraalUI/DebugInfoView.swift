@@ -120,9 +120,16 @@ struct DebugInfoView: View {
             ("Config diagnostic", nonEmpty(snapshot?.configDiagnostic) ?? "(none)"),
             ("Update available", nonEmpty(snapshot?.updateAvailable) ?? "(none)"),
             ("Install command", nonEmpty(snapshot?.updateInstallCommand) ?? "(none)"),
-            ("Release notes", snapshot?.releaseNotes.map { "\($0.version) (\($0.body.count) chars)" }
-                ?? "(none)"),
-            ("Announcement", snapshot?.productAnnouncement?.title ?? "(none)"),
+            // First line, not just a character count: the point of surfacing
+            // these is that the user can read what changed. The full body lives
+            // in `SnapshotNotice.detail` (shown by the status-bar tooltip), and
+            // this sheet is a table — not the place for a markdown document.
+            ("Release notes", snapshot?.releaseNotes.map {
+                "\($0.version): \(firstLine($0.body))"
+            } ?? "(none)"),
+            ("Announcement", snapshot?.productAnnouncement.map {
+                "\($0.title): \(firstLine($0.body))"
+            } ?? "(none)"),
             ("Integration updates", (snapshot?.integrationUpdatesAvailable ?? false) ? "available" : "none"),
             ("Worktree directory", SnapshotNotices.worktreeDirectory(in: snapshot) ?? "(not configured)"),
             ("Server keybindings", keybindings.map { "\($0.count) chars" } ?? "(none)"),
@@ -137,6 +144,20 @@ struct DebugInfoView: View {
             .joined(separator: ", ")
         rows.append(("Agent rows", agentRows.isEmpty ? "(none)" : agentRows))
         return rows
+    }
+
+    /// One readable line from a possibly-multi-line document.
+    ///
+    /// Same newline handling as `SnapshotNotices.firstLine` (`\r\n` is one
+    /// Character in Swift), kept local because this sheet must not depend on a
+    /// view-model helper's truncation length.
+    private func firstLine(_ text: String) -> String {
+        let line = text
+            .split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: \.isNewline)
+            .first
+            .map(String.init) ?? text
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "(empty)" : (trimmed.count > 80 ? String(trimmed.prefix(80)) + "…" : trimmed)
     }
 
     private func orderedAgents(_ snapshot: ClientShellSnapshot?) -> String {

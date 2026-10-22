@@ -88,6 +88,31 @@ struct SnapshotNoticesTests {
         #expect(notice.detail?.contains("line three") == true)
     }
 
+    /// CRLF, not just LF.
+    ///
+    /// In Swift `"\r\n"` is a *single* Character, so `split(separator: "\n")` never
+    /// matches it and a Windows-written config's diagnostic stayed on one
+    /// "line" with embedded newlines. `.lineLimit(1)` hides that visually, which
+    /// is exactly why this needs an assertion rather than a screenshot.
+    @Test("a CRLF diagnostic still summarises to one line")
+    func crlfDiagnosticIsOneLine() throws {
+        let snapshot = try snapshot(
+            #"{"config_diagnostic": "line one\r\nline two\r\nline three"}"#
+        )
+        let notice = try #require(SnapshotNotices.statusBarNotice(in: snapshot))
+        // The buggy version returned `"line one\r\nline two\r\nline three"` — a
+        // single Swift Character per line break means neither `contains("\n")`
+        // nor `contains("\r")` is true for it, so those two assertions passed
+        // *while the summary still contained line breaks*. Asserting on
+        // `isNewline` covers CR, LF and CRLF uniformly, which is the property
+        // that actually matters.
+        let hasLineBreak = notice.summary.contains { $0.isNewline }
+        #expect(!hasLineBreak)
+        #expect(notice.summary.contains("line one"))
+        #expect(!notice.summary.contains("line two"))
+        #expect(notice.detail?.contains("line three") == true)
+    }
+
     /// A pathological single line would push everything else out of the bar.
     @Test("a long diagnostic line is truncated in the summary, kept in the detail")
     func longLineTruncated() throws {
@@ -176,9 +201,42 @@ struct SnapshotNoticesTests {
           }
         }
         """)
+        // Order is the contract, not membership: with `contains` alone, swapping
+        // the announcement and release-note blocks left every test green, so the
+        // status bar could silently start showing the less urgent one.
         let kinds = SnapshotNotices.notices(in: snapshot).map(\.kind)
-        #expect(kinds.contains(.releaseNotes))
-        #expect(kinds.contains(.announcement))
+        #expect(kinds == [.releaseNotes, .announcement])
+    }
+
+    /// The tail of the priority list, pinned as a whole.
+    @Test("notes outrank announcements, which outrank integrations")
+    func tailOrderIsPinned() throws {
+        let snapshot = try snapshot("""
+        {
+          "release_notes": {"version": "0.9.6", "body": "notes", "preview": false},
+          "product_announcement": {
+            "version": "0.9.6", "id": "a1", "title": "Hello",
+            "body": "Announcement body", "preview": false
+          },
+          "integration_updates_available": true
+        }
+        """)
+        #expect(SnapshotNotices.notices(in: snapshot).map(\.kind)
+            == [.releaseNotes, .announcement, .integrations])
+        #expect(SnapshotNotices.statusBarNotice(in: snapshot)?.kind == .releaseNotes)
+    }
+
+    /// An announcement title is truncated like every other summary.
+    @Test("a long announcement title does not own the status bar")
+    func longAnnouncementTitleTruncated() throws {
+        let long = String(repeating: "y", count: 200)
+        let snapshot = try snapshot("""
+        {"product_announcement": {
+          "version": "1", "id": "x", "title": "\(long)", "body": "b", "preview": false
+        }}
+        """)
+        let notice = try #require(SnapshotNotices.statusBarNotice(in: snapshot))
+        #expect(notice.summary.count < 100)
     }
 
     @Test("integration updates and empty bodies are handled")
