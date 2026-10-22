@@ -88,7 +88,7 @@ swift build --product kraal
 开发和自测**必须**在一次性环境里做，不要连任何正在使用的 daemon。GUI 调试会
 分屏、打字、关 pane、改布局，这些落在真实会话里就是破坏。
 
-**macOS 上首选 Tart 虚拟机**（本机现有 `kraal-agent`，脚本已封装）：
+**macOS 上首选 Tart 虚拟机**（脚本已封装）：
 
 ```bash
 ./Scripts/agent-vm.sh start    # 起 VM + 拉起 herdr daemon（~27 s）

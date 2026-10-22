@@ -158,12 +158,19 @@ GUI 型自动化，**不影响 `swift build` / `xcodebuild` 命令行**。可忽
 | 视觉验证 | `screencapture -l <windowNumber>` | ✅ 2360×1520（非全屏 3456×2234），窗口被压下面也能截 |
 
 **没有采用的做法**：`open -g` 单独用无效，因为 app 自己会 `activate`；
-`pkill -f KraalMac` 会误杀用户实例；Accessibility 驱动不可行——pane 内容是
-Ghostty Metal 画的，AX 树几乎为空。
+`pkill -f KraalMac` 会误杀用户实例。
 
 **macOS VM 方案的已知局限**：Tart / VirtualBuddy / UTM 都能给 agent 一个完全
 独立的桌面，但虚拟 GPU 下 `NSVisualEffectView` 的 `.behindWindow` 材质与真机
 不一致。功能回归可以在 VM 里跑，**透明/模糊的视觉定稿必须在真机上做**。
+
+> **更正（2026-10-22，同日复测）**：本节原先写「Accessibility 驱动不可行——
+> pane 内容是 Ghostty Metal 画的，AX 树几乎为空」。这句以偏概全了。
+> 终端 pane **内部**确实是 AX 盲区（Metal 自绘，无元素），但 Chrome 与菜单
+> **不是**：Kraal 在 Tart VM 里实测有 **193 个 AX 节点、105 个带 identifier、
+> 163 个可 `AXPress`**，`AXPress` 驱动菜单项 `Split Right` 能让 daemon 侧
+> pane 数从 1 变 2。AX 路线对"界面骨架"可用，只有"终端内容断言"不可用。
+> 详见 `docs/AUTOMATION.md` §1–2。
 
 ### 4.4 多机行为要在双 daemon 上验
 
@@ -316,18 +323,19 @@ tart run --no-graphics kraal-agent
 | Swift | 有。`/usr/bin/swift`，Swift 6.4，target `arm64-apple-macosx26.0` | 纯 SwiftPM 验证可行 |
 | 共享目录 | **没有**。`/Volumes` 只有 `Macintosh HD`，无 VirtioFS | 宿主机↔guest 传文件只能靠 `tart exec` 的 stdio 管道或走网络 |
 | Automation Mode | **关着**。有 `TCC.db`，`AXIsProcessTrusted` 返回 true（`sshd-keygen-wrapper` 有授权条目） | 见下方「why synthetic input fails」——不是权限问题 |
-| 合成鼠标/键盘事件 | **不可用（经 SSH）**。`CGEvent.post` 能移动光标，但点击不会进入任何 app | 点按类验证做不了，用进程内探针代替（见下） |
+| 合成鼠标/键盘事件 | **经 SSH 不可用**（Background 会话）。**经 `tart exec` 可用**——见下方更正 | SSH 里用进程内探针；VM 里用 `tart exec` + AX/CGEvent |
 | 常用命令 | 缺 `mount`、部分 `system_profiler`、`timeout` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf`；等超时自己写循环 |
 | 网络 | 出网正常但慢；拉 OCI 镜像直连 GHCR 只有 ~116 KB/s | 拉镜像走 `ghcr.nju.edu.cn` 镜像源（实测 ~19 MB/s） |
 
 **不要拉 `macos-tahoe-xcode` 大镜像**，除非明确需要 Xcode 且用户同意——它几十 GB，
 而这里的绝大多数验证（SwiftPM 构建、纯逻辑、协议）用不上 Xcode。
 
-因此分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
+因此分工是：**逻辑与测试放 VM**，**app 打包留在宿主机**（VM 无 Xcode、无外网），
+**GUI 验证也放 VM**（`tart exec` 落在 Aqua 会话，见下）。
 
-#### 为什么经 SSH 的合成鼠标一定失败（且不是权限问题）
+#### 会话类型：SSH 是 Background，`tart exec` 是 Aqua
 
-实测记录：2026-10-22
+实测记录：2026-10-22（两次，第二次推翻了第一次的结论）
 
 踩过的坑：一开始判断成「Accessibility 没授权，事件被丢弃」。**错了两处**：
 
@@ -361,17 +369,56 @@ Aqua 会话的 audit session。
 > window server. … There is no workaround: CGEvent posting is fundamentally a
 > GUI-session operation.
 
-**结论**：要在 VM 里验「点一下/拖一下」，就得有一个真的 Aqua 会话里的人（VNC、
-Tart 窗口），或者改用进程内探针。本项目用的是后者：
+**结论（经 SSH）**：SSH 这条通道在 VM 里验不了「点一下/拖一下」——
+它落在 Background 会话，缺的是 WindowServer 的路由通道，与 Accessibility 权限无关。
 
-```bash
-# 走与鼠标完全相同的 dispatch 路径，只跳过鼠标本身
-KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=w1:p1 …
-KRAAL_PROBE_DIVIDER_DRAG=-111 …
-```
+---
 
-这不是退让：探针验的是「命令会不会被正确发出、参数对不对、daemon 状态变了没」，
-而鼠标注入只能额外证明「事件有没有送达」——后者属于 AppKit，不属于本项目。
+**更正：同一台 VM，`tart exec` 的行为完全不同。**
+
+| 通道 | `launchctl managername` | 能否注入鼠标/键盘 |
+|---|---|---|
+| `ssh admin@<vm-ip>` | `Background` | ❌ 光标会动，点击不进 app |
+| `tart exec <vm> …` | **`Aqua`** | ✅ 实测可用 |
+
+> ⚠️ 上文「要在 VM 里验点按，就得有一个真的 Aqua 会话里的人（VNC、Tart 窗口）」
+> 这句只说对了一半。`tart exec` 走的 guest agent 就落在 Aqua 会话里——
+> base 镜像配了自动登录（`autoLoginUser = admin`），WindowServer 与
+> loginwindow 都在跑，不需要 VNC 也不需要图形窗口（`--no-graphics` 即可）。
+
+2026-10-22 用 A/B 实测（完整日志 `/tmp/kraal-vm-probe5.log` E25/E26、
+`/tmp/kraal-vm-probe6.log` E27）：
+
+| 项 | 结果 |
+|---|---|
+| `launchctl managername`（cwd = tart exec） | `Aqua` |
+| 靶 app 的 `mouseDown` 回调 | ✅ 收到 `mouseDown at (200.0, 166.0) hits=1` |
+| **对照组**：点在同一 app 窗口之外 | ✅ `hits=0`（证明不是"无条件记一次"） |
+| `NSTextField` 收键盘 | ✅ `KB_RESULT value=abcd` |
+| `screencapture -x -o -l <windowNumber>` | ✅ 1180×760 PNG |
+| **端到端**：`AXPress` 菜单 `Split Right` → daemon | ✅ `herdr pane list` **1→2**，再按 → **2→3**，`Split Down` → **3→4** |
+
+**之前为什么判错（两次）**：
+
+1. 测的是 **SSH**，但结论被推广成了整个 VM。
+2. 首次 `tart exec` 注入失败时，真实原因有两个，都不是 Aqua：
+   - 前台有个 TCC 授权弹窗 `universalAccessAuthWarn` 抢焦点（截图里可见）；
+   - 目标窗口**没激活**，且点击坐标是硬编码的，落在别的窗口上。
+   修法：先 `activate()` → 用 AX 读 `kAXPosition`/`kAXSize` 现算坐标 → 再 post。
+
+这是 `docs/DEBUGGING.md` 第 1 条（样本要能区分对错）和第 3 条（探针要测对对象）
+的又一个实例：**没有对照组时，"没生效"无法区分是事件没送达还是没点中**。
+
+#### 进程内探针还要不要
+
+可以退役，但不是现在就删。探针（`KRAAL_PROBE_*`）验的是
+「命令会不会被正确发出、参数对不对、daemon 状态变了没」；
+它绕过了真实 AppKit 事件分发，而历史 bug（`fa3496e`/`e82c104`/`2156703`）
+恰恰都出在分发/时序/坐标上。
+
+VM 里的 AX/CGEvent 驱动覆盖的是探针的**超集**，所以计划是
+「先并行跑 → 确认无回归 → 再删探针」，而不是一次性拔掉。
+重构方案见 `docs/AUTOMATION.md`。
 
 传文件用 `tart exec -i` 的 stdio 管道，比 scp 稳妥（guest 的 sshd 要单独开，
 而 guest agent 一直可用）：

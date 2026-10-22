@@ -149,10 +149,16 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// `KRAAL_PROBE_DIVIDER_DRAG=111` moves the root divider up by 111 points
     /// through the same `dragSplitRatio` the gesture calls. The mouse is the only
-    /// thing skipped — which is exactly the part that cannot be scripted reliably:
-    /// synthesised `CGEvent` drags need Accessibility permission, and a VM without
-    /// it silently drops them (the drag ends at the same ratio it started, and the
-    /// log shows no request at all).
+    /// thing skipped — which was historically the part that could not be scripted
+    /// from a VM over SSH.
+    ///
+    /// That limitation is narrower than it looks (`docs/ENVIRONMENT.md`
+    /// 「会话类型」一节): an SSH session lands in the Background domain and can
+    /// indeed not deliver clicks, but `tart exec` lands in the Aqua session and
+    /// *can* — a VM-side A/B on 2026-10-22 delivered a real `mouseDown` and drove
+    /// `Split Right` from 1 to 2 panes. This probe still earns its keep because it
+    /// skips AppKit event dispatch, and the point-to-cell conversion below is the
+    /// kind of bug that only shows up in the numbers.
     ///
     /// Points, not cells: the point-to-cell conversion is the bug this exists to
     /// keep visible, so the probe must feed it points the way a mouse would.
