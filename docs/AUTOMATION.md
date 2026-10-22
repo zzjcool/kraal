@@ -219,28 +219,37 @@ AppKit 自动合成的 selector 名，**不唯一**：
 
 ### 4.2 命令
 
-```bash
-kraal-gui launch [--app PATH] [--env K=V]... [--wait-window TITLE] [--timeout S]
-kraal-gui ax [--json] [--max-depth N]          # AX 快照，落盘供 agent 读
-kraal-gui press  <selector>                    # AXPress
-kraal-gui menu   <title>                       # 菜单项 AXPress（含展开父菜单）
-kraal-gui click  --window-relative X,Y          # CGEvent 点击（坐标路径）
-kraal-gui drag   --from X,Y --to X,Y [--steps N]
-kraal-gui type   <text>
-kraal-gui key    --mod cmd [--mod shift] --char t
-kraal-gui wait   <selector> --timeout S        # 轮询直到出现/可 press
-kraal-gui shot   [--window|--full] -o PATH
-kraal-gui quit
-```
+实际签名见 §7.1（这节早先写的是设计草稿，与实现有出入，已按实现改写）。
+这里是策略层摘要：
 
-### 4.3 实现坑（已踩）
+| 想做 | 用 | 是否需要前台 |
+|---|---|---|
+| 按菜单项/按钮 | `press --title` / `--desc` | **不需要**（AXPress 不抢焦点） |
+| 按菜单里没展开过的项 | `menu --menu View --item "Split Right"` | 不需要 |
+| 点某个坐标 | `click --at X,Y`（窗口相对） | 需要，会自动 activate 并确认 |
+| 拖分隔条 | `drag --from --to` | 需要 |
+| 键盘快捷键 | `key --char w --mod cmd` | 需要 |
 
-- **`CGWindowListCreateImage` 在 macOS 15 已废弃**，编译报错。改用
-  `screencapture -x -o -l <windowNumber>`（已验证），窗口编号用
-  `CGWindowListCopyWindowInfo`（未废弃）查。
-- **点之前必须 `activate()` 并 `usleep`**。不激活时点击会落到别的窗口（E15 的教训）。
-- **坐标要用 AX 的 `kAXPositionAttribute` + `kAXSizeAttribute` 现算**，
-  不要硬编码。E25 正是靠这个修好的。
+### 4.3 实现坑（P0/P1 实测，2026-10-22）
+
+- **`AXWindows` 在 macOS 27 上不可用**。它返回的元素 `AXRole` 是
+  `AXApplication`（app 自身，自引用），`AXPosition`/`AXSize` 一律
+  AXError -25205（`.illegalArgument`）。与策略（`.regular`/`.accessory`）、
+  重启、干净进程都无关；Finder 从同一属性返回 `AXScrollArea`，所以是系统
+  级问题。窗口几何改从 `CGWindowListCopyWindowInfo` 取。
+- **`screencapture -l <windowid>` 在本机对每个 app 都失败**
+  （`could not create image from window`）——Herdr 也一样，不是 Kraal 的问题。
+  降级路径是截全屏再 `sips` 裁剪。
+- **没有屏幕录制权限时 `screencapture` exit 0 却产出全黑 PNG**。
+  所以驱动会检测均匀像素并 `exit 2` 如实报告，而不是写一张黑图当证据。
+- **`activate()` 返回值是 void，而且经常静默失败**。必须轮询
+  `NSWorkspace.frontmostApplication` 确认真的到了前台，再发合成事件；
+  否则点击会落到当前真正前台的 app 上（实测落到 Herdr，于是"点击成功"但
+  app 没反应）。三种失败原因要分开报：锁屏（`loginwindow` 占前台）/
+  `.accessory` 策略无法请求前台 / 别的 app 占着焦点。
+- **锁屏下 AXPress 照常工作，合成事件完全不可用**。`IOConsoleLocked=true` 时
+  前台是 `loginwindow`，任何 app 都无法成为 frontmost。这决定了用例要按
+  「AX 可跑 / 需要解锁」分组（`requires() { echo focus; }`）。
 - **`AXPress` 的返回码 0 不代表逻辑成功**，只代表动作已投递；必须配合状态断言。
 
 ### 4.4 退出码契约（区分"产品 bug"和"环境 bug"）
@@ -316,19 +325,52 @@ VM 里只做"有没有明显错位/遮挡"这一档。
 
 ## 7. 脚本接口（agent 唯一入口）
 
+**实测可用的接口**（P0/P1 已实现，`local` 后端验证通过）：
+
 ```
-Scripts/gui.sh bootstrap             # 一次性建 VM
-Scripts/gui.sh start|stop|status     # VM 生命周期
-Scripts/gui.sh reset                 # 每次运行前的廉价重置
-Scripts/gui.sh build                 # 宿主 swift build + build-app.sh
-Scripts/gui.sh deploy                # 推 Kraal.app + kraal-gui 进 VM
-Scripts/gui.sh run <case>...         # 跑用例，写 artifacts/
-Scripts/gui.sh verify                # build → deploy → run all → 汇总（merge gate）
-Scripts/gui.sh shot <case>           # 单张截图
-Scripts/gui.sh ax <case>             # AX 快照
-Scripts/gui.sh logs [--tail N]       # Kraal 日志
-Scripts/gui.sh collect <run-id>      # 把 VM 里的产物拉回宿主
+Scripts/gui.sh probe                 # 宿主机能不能驱动 GUI（AX 授权、窗口、截图）
+Scripts/gui.sh list                  # 列出用例
+Scripts/gui.sh run [case...]         # 不传用例名则跑全部，写 artifacts/
+Scripts/gui.sh verify [case...]      # build-app.sh → 跑用例（merge gate）
 ```
+
+`vm` 后端尚未实现，接口预留为 `KRAAL_GUI_BACKEND=vm`。
+
+**规划中、尚不存在**（P2/P3）：`start|stop|status|reset|build|deploy|collect`、
+`shot`、`ax`、`logs`。文档早先写了这些名字，但代码里从来没有——写在这里是为了
+不再有人照着跑。
+
+## 7.1 `kraal-gui` 驱动命令
+
+```
+kraal-gui probe                              # AX 授权、目标 app 是否在跑
+kraal-gui ax [--out FILE]                    # 打印/保存 AX 树
+kraal-gui window [--timeout 10] [--title T]  # 窗口 frame + windowNumber
+kraal-gui press --title T | --desc D | --id I [--index N] [--within-title M]
+kraal-gui menu --menu View --item "Split Right"
+kraal-gui click --at X,Y [--right] [--no-activate]    # 窗口相对坐标
+kraal-gui drag --from X,Y --to X,Y [--steps N]
+kraal-gui key --char w [--mod cmd,shift]
+kraal-gui wait --title T [--timeout 10]
+kraal-gui shot --out FILE
+kraal-gui type --text S
+kraal-gui launch --path build/Kraal.app
+kraal-gui quit
+```
+
+退出码：`0` 通过 / `1` 断言失败（产品问题）/ `2` 驱动或环境问题（不改业务代码）/
+`3` 被测 app 崩溃。
+
+三条实现事实值得记住：
+
+- **`press` 在匹配到多个元素时拒绝执行**。`Split Right` 在 View 菜单和右键菜单
+  各有一个，`Copy` 在 Edit 菜单和右键菜单各有一个。
+- **AX 图不是树**。`AXMenuBar` 可从 `AXApplication` 和 app 的 children 两条路径
+  到达，菜单子树在自身之下重复出现。DFS 必须带 visited 集合，否则
+  `Split Right` 会匹配到 13 个元素。
+- **窗口几何来自 `CGWindowListCopyWindowInfo`，不是 `AXWindows`**。macOS 27 上
+  `AXWindows` 返回的元素 `AXRole` 是 `AXApplication`（app 自身），
+  `AXPosition`/`AXSize` 均 AXError -25205；Finder 也一样。
 
 产物布局：
 

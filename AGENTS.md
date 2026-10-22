@@ -86,8 +86,8 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 /usr/bin/swift test
 ```
 
-`Scripts/verify.sh` 直接调 `swift`，在本机默认工具链下会因为上面的原因失败。
-要么先 `export DEVELOPER_DIR`，要么逐条手动跑。
+`Scripts/verify.sh` 现在会自己导出 `DEVELOPER_DIR` 并显式用 `/usr/bin/swift`，
+所以直接跑也行（2026-10-22 起）。手动逐条跑仍需要自己 export。
 
 ### 命令清单
 
@@ -95,11 +95,43 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 /usr/bin/swift build                     # 全部 target
-/usr/bin/swift test                      # 173 个测试，28 个套件
+/usr/bin/swift test                      # 228 个 @Test + 26 个 XCTest，38 个套件
 export PATH="$HOME/.pi-lens/bin:$PATH"   # swiftlint 不在默认 PATH
 swiftlint --quiet Sources Tests          # 必须零违规
 ./Scripts/build-app.sh                   # 打包 build/Kraal.app（ad-hoc 签名）
+
+./Scripts/verify.sh                      # 上面全部 + GUI 门禁（推荐）
+./Scripts/gui.sh run split-right         # 单个 UI 用例（需已 build-app.sh）
+./Scripts/gui.sh list                    # 现有用例
 ```
+
+### GUI 门禁：`gui.sh` 能证明界面动作真的改了 daemon
+
+`swift test` 覆盖不到「点了有没有反应」——§0.2 那三个 bug 全部通过了单元测试。
+补这一层的是 `Scripts/gui.sh`：起一个**隔离的 scratch daemon**，用
+`kraal-gui` 通过 Accessibility 驱动真实窗口，然后断言 **daemon 状态**。
+
+```bash
+./Scripts/gui.sh run split-right
+#   ✓ pane count grows by one (1 -> 2)
+#   ✓ split geometry is two equal halves (ratio=0.5 widths=[56, 56] focused=w1:p2)
+#   ✓ split stays inside one tab, ids distinct (tabs=1 panes=[['w1:p1', 'w1:p2']])
+```
+
+三条纪律：
+
+1. **几何断言必须用 `herdr pane layout`，不能用 `pane list`**。后者没有尺寸
+   字段，只能数数量——「split 了但比例是 0.85」这种 bug 数数量是抓不到的
+   （实测：注入 ratio=0.85，数量断言 ✓、几何断言 ✗）。
+2. **`AXPress` 不需要前台，合成事件需要**。锁屏时（`IOConsoleLocked`）前台是
+   `loginwindow`，任何 app 都无法成为 frontmost，CGEvent 会落到不存在的窗口。
+   这类用例声明 `requires() { echo focus; }`，`gui.sh` 会跳过并 exit 2（环境
+   问题），不当成产品失败。
+3. **断言要打印出来**。`summary.json` 带 `assertions[]`，一次通过的运行也应该
+   能回答"到底验证了什么"。
+
+改 `gui.sh` 或驱动后，**用注入验证它还抓得住**（§0.3）：故意改坏一个被断言的
+行为，确认对应断言变红且退出码是 1。
 
 ### `scripts/build-app.sh` 的 `nested herdr is disabled` 是噪音
 

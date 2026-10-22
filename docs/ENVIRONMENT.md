@@ -531,3 +531,103 @@ tar -czf - ~/.pi/agent/skills | tart exec -i kraal-agent /bin/bash -c 'mkdir -p 
 
 所以分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
 
+
+---
+
+## 8. 宿主 GUI 自动化能力实测（2026-10-22）
+
+用 `Sources/KraalGUIDriver` 在 M4 Pro / macOS 27.0 上直接测出来的事实。
+这些不是推断，每一条都有可复现的命令。
+
+### 8.1 `AXPress` 不需要焦点
+
+目标 app 用 `orderBack` 送到所有窗口后面、前台是 Brave Browser 时，
+`AXPress` 仍然投递成功（靶 app 收到 press），**前台全程没有变化**。
+
+这是 `local` 后端能在用户正常使用电脑时跑的前提。
+
+### 8.2 `AXWindows` 在 macOS 27 上不可用
+
+树本身是好的（Kraal 的 AX 树 1362 个可寻址元素，菜单项齐全），
+但 `kAXWindowsAttribute` 返回的元素：
+
+| 查询 | 结果 |
+| --- | --- |
+| `AXRole` | `AXApplication`（app 自身，自引用） |
+| `AXPosition` / `AXSize` | AXError **-25205**（`.illegalArgument`） |
+| `AXMainWindow` / `AXFocusedWindow` | 同样返回 app 自身 |
+
+与激活策略无关（`.regular` 与 `.accessory` 都一样），与是否重启无关。
+**Finder 从同一属性返回 `AXScrollArea`**，所以这是系统级问题，不是 Kraal 的。
+
+结论：窗口几何一律走 `CGWindowListCopyWindowInfo`（那里 `kCGWindowBounds`
+和 `kCGWindowNumber` 都是准的）。`screencapture -l` 本来也需要
+`kCGWindowNumber`，所以这不是额外成本。
+
+### 8.3 AX 图不是树，DFS 必须带 visited
+
+`AXMenuBar` 同时可以从 `AXApplication` 和 app 的 children 两条路径到达，
+菜单子树还会在自身之下重复出现。没有 visited 集合时：
+
+```bash
+$ kraal-gui press --title "Split Right"
+kraal-gui: title=Split Right matches 13 elements
+```
+
+**13 个**，而实际上只有一个。这让「这个 title 是否唯一确定一个元素」这个
+driver 赖以拒绝歧义按压的判据失效。加 `Set<CFHashCode>` 后恢复为 1。
+
+### 8.4 截图权限：exit 0 + 全黑
+
+没有「屏幕录制」授权时，`screencapture` **返回 0 并写出一个合法的、
+全黑的 PNG**。把它当成功会让截图断言永远通过而什么都没证明。
+
+实测还有一条更窄的坑：`screencapture -l <windowid>` 在本机对**每个** app 都
+失败（`could not create image from window`），Herdr 的窗口同样失败，
+而全屏 `screencapture -x` 成功。所以驱动先试 `-l`，失败则截全屏 + `sips` 裁剪，
+并且无论如何都检测结果是否均匀纯色，是则 `exit 2` 并说明缺哪个权限。
+
+### 8.5 锁屏会禁用合成事件，但不禁用 AXPress
+
+```bash
+$ ioreg -n Root -d1 | grep -A1 IOConsoleLocked
+  <key>IOConsoleLocked</key>
+  <true/>
+```
+
+锁屏时前台是 `loginwindow`（pid 610），`NSWorkspace.frontmostApplication`
+就是它。此时：
+
+| 手段 | 锁屏下 | 说明 |
+| --- | --- | --- |
+| `AXPress` | ✅ 正常 | 实测 split 1→2 成功 |
+| `CGEvent` 点击/拖拽/键盘 | ❌ 全部无效 | 事件投给 loginwindow |
+
+`activate()` 是 void 且经常静默失败，必须轮询确认真的到了前台再发事件。
+否则点击会落到当前真正前台的 app 上——实测落到 Herdr，表现为「点击成功、
+app 毫无反应」，很容易误判成产品 bug。
+
+### 8.6 `herdr pane list` 没有几何，`pane layout` 才有
+
+| 命令 | 有 | 没有 |
+| --- | --- | --- |
+| `herdr pane list` | `pane_id` / `tab_id` / `focused` / `terminal_title` / `cwd` / `revision` | **尺寸、宽高、rect** |
+| `herdr pane layout` | `panes[].rect{x,y,width,height}` / `splits[].ratio` / `splits[].direction` / `focused_pane_id` / `zoomed` / `area` | — |
+
+单位是终端 **cell**，不是点。split 后 `ratio` 默认 0.5。
+
+所以「split 了但比例错了」这类 bug 只能用 `pane layout` 断言。实测注入
+`ratio: 0.85`：pane 数量断言 ✓（1→2），几何断言 ✗（`widths=[17, 95]`）。
+
+**`pane list` 的顺序不稳定**，既不是字典序也不是创建序（实测
+`w1:p5` 排在 `w1:p2` 之前），看起来是内部 map 顺序。断言必须按 `pane_id`
+建集合比较，不能用下标。
+
+### 8.7 未验证
+
+- `NSMenu.popUpContextMenu` 阻塞期间，**外部进程**的 `AXPress` 是否会投递到
+  正在 tracking 的菜单项。
+- 右键菜单弹出后，其 `AXMenuItem` 挂在 `AXApplication` 子树还是独立 `AXMenu` 下。
+- `KRAAL_DEV_BACKGROUND=1`（窗口 `orderBack`）下 CGEvent 右键的投递行为。
+- `pane list` 顺序是否跨 daemon 重启也稳定（只采样了 3 次，未跨重启）。
+- VM 内 `screencapture -l` 是否也失败（宿主失败，VM 早期实验里曾成功过）。
