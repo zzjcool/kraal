@@ -26,3 +26,6 @@ research/*.local.ansi
 # 调研用子代理会话记录
 .pi-subagents/
 .ruff_cache/
+
+# GUI 验证产物（每次运行都重新生成，不入库）
+artifacts/

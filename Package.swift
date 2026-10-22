@@ -68,6 +68,16 @@ let package = Package(
             path: "Sources/KraalCLI",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // Deliberately depends on nothing in this repo. It drives a running app
+        // from the outside through AppKit + the Accessibility API, so it can be
+        // built on any machine and pushed into a VM as a single binary. Sharing
+        // code with the app would let the driver "pass" by agreeing with the
+        // app's own bugs — see docs/AUTOMATION.md §4.
+        .executableTarget(
+            name: "KraalGUIDriver",
+            path: "Sources/KraalGUIDriver",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "KraalMac",
             dependencies: ["KraalClient", "KraalSidebar", "KraalUI", "KraalTerminalView"],
