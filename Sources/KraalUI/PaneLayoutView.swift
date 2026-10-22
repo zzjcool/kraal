@@ -29,6 +29,31 @@ struct PaneLayoutView: View {
     /// view, unlike `NSScreen.main`, which follows the menu bar.
     @Environment(\.displayScale) private var displayScale
 
+    /// Where the divider sat when the current drag began.
+    ///
+    /// Held here, not derived per event, because `split.position` comes back from the
+    /// daemon already moved by the translation that was last sent. Adding the
+    /// gesture's cumulative translation to that moving value applies the motion
+    /// twice — measured at 2.12x on a real drag. Anchoring on the pre-drag position
+    /// makes the calculation idempotent: delivering the same translation twice
+    /// yields the same ratio.
+    @State private var dragAnchor: (path: [Bool], position: UInt16)?
+
+    /// The anchor for this split, capturing it on first use within a gesture.
+    ///
+    /// Returns the pre-drag position and stores it for the rest of the gesture.
+    /// A plain `@State` write inside a gesture handler is applied before the next
+    /// event, so `onEnded` sees the same anchor `onChanged` established.
+    private func splitDragAnchor(for split: PaneSurfaceSplit) -> UInt16 {
+        if let dragAnchor, dragAnchor.path == split.path { return dragAnchor.position }
+        dragAnchor = (path: split.path, position: split.position)
+        return split.position
+    }
+
+    private func clearSplitDragAnchor() {
+        dragAnchor = nil
+    }
+
     /// Builds each pane's terminal view; injected so this file stays free of the
     /// Ghostty dependency and can be previewed with a stub.
     let paneContent: (String, PaneSurfacePane) -> AnyView
@@ -196,25 +221,32 @@ struct PaneLayoutView: View {
             .offset(x: hit.minX, y: hit.minY)
             .gesture(
                 DragGesture()
-                    // Live during the drag, not only at the end. The mouse is the
-                    // thing the user is watching; leaving the divider still until
-                    // mouse-up made a correct ratio change look like no change,
-                    // and made it impossible to aim.
                     .onChanged { value in
+                        // The anchor is captured once, on the first change of this
+                        // gesture, and cleared on release. Every later value is
+                        // measured from it, so repeated delivery of the same
+                        // cumulative translation produces the same ratio instead of
+                        // compounding (see the note on `ratio(for:drag:anchoringAt:)`).
+                        let position = splitDragAnchor(for: split)
                         store.dragSplitRatio(
                             path: split.path,
-                            ratio: ratio(for: split, drag: value, cellSize: cellSize)
+                            ratio: ratio(for: split, drag: value, cellSize: cellSize,
+                                         anchoringAt: position)
                         )
                     }
                     .onEnded { value in
                         // The final position is authoritative and must not be
                         // dropped: the last `onChanged` may have been coalesced
                         // away, and the daemon has no idea where the pointer
-                        // stopped. Same coalescing path, newest value wins.
+                        // stopped. It is the *same* anchor, so this cannot move the
+                        // divider further than the pointer did.
+                        let position = splitDragAnchor(for: split)
                         store.dragSplitRatio(
                             path: split.path,
-                            ratio: ratio(for: split, drag: value, cellSize: cellSize)
+                            ratio: ratio(for: split, drag: value, cellSize: cellSize,
+                                         anchoringAt: position)
                         )
+                        clearSplitDragAnchor()
                     }
             )
             .onHover { hovering in
@@ -248,14 +280,27 @@ struct PaneLayoutView: View {
     /// and a 40-point drag counted as 40 *rows*. In a 45-row surface one small tug
     /// produced a ratio change of 0.89, hit the clamp, and pinned the divider to an
     /// edge — which reads as "the divider does not follow the mouse".
+    /// Ratio to send for the current drag position.
+    ///
+    /// Anchored on the divider's position **as it was when the gesture began**, plus
+    /// the gesture's cumulative translation. The naive version — current
+    /// `split.position` plus the same translation — is not idempotent: the position
+    /// that comes back from the daemon already contains the translation that was sent
+    /// last time, so sending the same cumulative translation twice applies the motion
+    /// twice. Measured in a VM against a 959pt container: one 40pt drag moved the
+    /// divider 80pt (2.12x) whenever `onChanged` and `onEnded` were more than 100ms
+    /// apart, which is every real drag. With `onChanged` and `onEnded` in the same
+    /// tick the two calls coalesce into one request and the result was correct
+    /// (1.11x) — which is why unit tests on the arithmetic never saw this.
     private func ratio(
         for split: PaneSurfaceSplit,
         drag: DragGesture.Value,
-        cellSize: CGSize
+        cellSize: CGSize,
+        anchoringAt position: UInt16
     ) -> Double {
         Self.splitRatioForDrag(
             direction: split.direction,
-            position: split.position,
+            position: position,
             area: split.area,
             dragPoints: drag.translation,
             cellSize: cellSize
@@ -266,7 +311,7 @@ struct PaneLayoutView: View {
     ///
     /// Delegates to ``PaneSplitAxis/ratio(position:area:dragPoints:cellSize:)``,
     /// which is the public home of this arithmetic. Kept as a named entry point
-    /// because the tests and the probe read better calling it this way.
+    /// because the tests read better calling it this way.
     static func splitRatioForDrag(
         direction: PaneSurfaceSplitDirection,
         position: UInt16,

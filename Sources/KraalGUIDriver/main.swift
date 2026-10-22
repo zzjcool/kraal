@@ -142,37 +142,119 @@ func commandProbe(_ args: Arguments) -> Never {
     exit(Exit.success.rawValue)
 }
 
+/// Emits the accessibility tree, as text or as JSON.
+///
+/// JSON is what an agent reads: `--json` gives every element a stable `path`
+/// (role/subrole-free child indices from the app root) plus `pressable`, so a
+/// caller can decide what to press without parsing indented text. Text stays the
+/// default because it is what a human skims in a terminal.
+///
+/// Both forms come from the **same** traversal with a visited set. The AX graph
+/// is not a tree — `AXMenuBar` is reachable from `AXApplication` and from the
+/// app's children, and menu subtrees reappear below themselves — so a naive walk
+/// lists each menu item many times (measured: `Split Right` 13 times). Reporting
+/// those duplicates as separate elements is what made "is this title unique?"
+/// answer wrong.
 func commandAX(_ args: Arguments) -> Never {
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
         fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
     }
     let maxDepth = args.int("depth") ?? 16
-    var lines: [String] = []
+    var nodes: [AXNode] = []
+    var visited = Set<CFHashCode>()
 
-    func describe(_ element: AXUIElement, _ depth: Int) {
+    func walk(_ element: AXUIElement, _ depth: Int, _ path: String) {
         guard depth <= maxDepth else { return }
-        let role = element.string(kAXRoleAttribute) ?? "?"
-        let title = element.string(kAXTitleAttribute) ?? ""
-        let desc = element.string(kAXDescriptionAttribute) ?? ""
-        let id = element.string("AXIdentifier") ?? ""
+        guard visited.insert(CFHash(element)).inserted else { return }
         let actions = element.actionNames
-        lines.append(
-            "\(String(repeating: "  ", count: depth))\(role) title=\(title) "
-                + "desc=\(desc) id=\(id) actions=\(actions)"
+        nodes.append(
+            AXNode(
+                path: path,
+                depth: depth,
+                role: element.string(kAXRoleAttribute) ?? "?",
+                title: element.string(kAXTitleAttribute) ?? "",
+                desc: element.string(kAXDescriptionAttribute) ?? "",
+                identifier: element.string("AXIdentifier") ?? "",
+                enabled: element.copy(kAXEnabledAttribute) as? Bool,
+                actions: actions,
+                frame: element.frame.map {
+                    ["x": Int($0.origin.x), "y": Int($0.origin.y),
+                     "w": Int($0.size.width), "h": Int($0.size.height)]
+                }
+            )
         )
-        for child in element.children {
-            describe(child, depth + 1)
+        for (index, child) in element.children.enumerated() {
+            walk(child, depth + 1, path + "/" + String(index))
         }
     }
-    describe(app.element, 0)
+    walk(app.element, 0, "")
 
+    let payload = AXTree(pid: app.pid, app: app.name, count: nodes.count, nodes: nodes)
+    let text = args.has("json") ? (jsonText(payload) ?? "{}") : textTree(nodes)
     if let out = args.string("out") {
-        try? lines.joined(separator: "\n").write(
-            toFile: out, atomically: true, encoding: .utf8
-        )
+        try? text.write(toFile: out, atomically: true, encoding: .utf8)
     }
-    print(lines.joined(separator: "\n"))
+    print(text)
     exit(Exit.success.rawValue)
+}
+
+/// One element in the flattened tree.
+struct AXNode: Encodable {
+    let path: String
+    let depth: Int
+    let role: String
+    let title: String
+    let desc: String
+    let identifier: String
+    let enabled: Bool?
+    let actions: [String]
+    let frame: [String: Int]?
+
+    /// Whether `press` can act on it. An agent's first question about any element.
+    var pressable: Bool { actions.contains(kAXPressAction) }
+
+    enum CodingKeys: String, CodingKey {
+        case path, depth, role, title, desc, identifier, enabled, actions, frame, pressable
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(path, forKey: .path)
+        try container.encode(depth, forKey: .depth)
+        try container.encode(role, forKey: .role)
+        try container.encode(title, forKey: .title)
+        try container.encode(desc, forKey: .desc)
+        try container.encode(identifier, forKey: .identifier)
+        try container.encodeIfPresent(enabled, forKey: .enabled)
+        try container.encode(actions, forKey: .actions)
+        try container.encodeIfPresent(frame, forKey: .frame)
+        try container.encode(pressable, forKey: .pressable)
+    }
+}
+
+struct AXTree: Encodable {
+    let pid: pid_t
+    let app: String
+    let count: Int
+    let nodes: [AXNode]
+}
+
+private func jsonText<T: Encodable>(_ value: T) -> String? {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(value) else { return nil }
+    return String(data: data, encoding: .utf8)
+}
+
+private func textTree(_ nodes: [AXNode]) -> String {
+    nodes.map { node in
+        let indent = String(repeating: "  ", count: node.depth)
+        var line = "\(indent)\(node.role) title=\(node.title) desc=\(node.desc) "
+            + "id=\(node.identifier)"
+        if node.enabled == false { line += " [disabled]" }
+        line += " actions=\(node.actions)"
+        return line
+    }.joined(separator: "\n")
 }
 
 /// Presses one element. **Does not activate the app.**
@@ -715,7 +797,7 @@ func commandDrag(_ args: Arguments) -> Never {
     guard activateAndConfirm(app) else {
         fail(.harness, "could not bring '\(app.name)' to the front for a drag")
     }
-    SyntheticInput.drag(from: start, to: end, steps: args.int("steps") ?? 12)
+    SyntheticInput.drag(from: start, to: end, steps: args.int("steps") ?? 1)
     print("dragged window+(\(Int(fromX)),\(Int(fromY))) -> (\(Int(toX)),\(Int(toY)))")
     requireAlive(app, context: "drag")
     exit(Exit.success.rawValue)

@@ -183,19 +183,33 @@ struct TargetApp {
     var pid: pid_t { application.processIdentifier }
     var name: String { application.localizedName ?? "?" }
 
+    /// Finds the *live* app under test, preferring one that actually has a window.
+    ///
+    /// Two filters, both learned from real failures:
+    ///
+    /// - `.accessory` is allowed: `KRAAL_DEV_BACKGROUND=1` sets exactly that policy
+    ///   so the app stays out of the Dock. Filtering on `.regular` alone made the
+    ///   driver report "no running app" for an app that was running fine.
+    /// - terminated entries are rejected. `NSWorkspace.runningApplications`
+    ///   sometimes still lists processes that have exited (`activationPolicy`
+    ///   comes back as `.prohibited`), and picking one of those produced
+    ///   "could not bring Kraal to the front" while the real instance was sitting
+    ///   right there. Ranking by "has a window" makes an ambiguous host — three
+    ///   Kraal processes during a debugging session — resolve to the right one.
     static func find(name: String) -> TargetApp? {
-        // `.accessory` matters: KRAAL_DEV_BACKGROUND=1 sets exactly that policy so
-        // the app stays out of the Dock, and filtering on `.regular` alone made
-        // the driver report "no running app" for an app that was running fine.
-        // Accessibility reaches both policies equally.
         let candidates = NSWorkspace.shared.runningApplications.filter {
-            ($0.activationPolicy == .regular || $0.activationPolicy == .accessory)
+            !$0.isTerminated
+                && ($0.activationPolicy == .regular || $0.activationPolicy == .accessory)
                 && ($0.localizedName ?? "").localizedCaseInsensitiveContains(name)
         }
-        guard let app = candidates.first else { return nil }
+        guard !candidates.isEmpty else { return nil }
+        let ranked = candidates
+            .map { (app: $0, windows: KraalGUIDriver.windows(of: $0.processIdentifier).count) }
+            .sorted { $0.windows > $1.windows }
+        guard let best = ranked.first else { return nil }
         return TargetApp(
-            application: app,
-            element: AXUIElementCreateApplication(app.processIdentifier)
+            application: best.app,
+            element: AXUIElementCreateApplication(best.app.processIdentifier)
         )
     }
 

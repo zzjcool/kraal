@@ -37,31 +37,55 @@ enum SyntheticInput {
         }
     }
 
-    /// Drags from one point to another in steps.
+    /// Drags from one point to another with a single mouse-dragged event.
     ///
-    /// Steps matter: jumping straight to the destination is not a drag as far as
-    /// AppKit is concerned — `DragGesture` accumulates intermediate
-    /// `leftMouseDragged` events, and a divider that only hears the endpoints
-    /// ends at the ratio it started from. That is exactly the `e82c104` bug.
+    /// Measured inside the VM (kraal-agent, Kraal 1180x760, container 959pt):
+    ///
+    /// | drag | ratio change | expected | ratio |
+    /// | --- | --- | --- | --- |
+    /// | 16 steps of 40pt | 0.39 | 0.042 | **9.4x** |
+    /// | 1 step of 40pt | 0.088 | 0.042 | 2.1x |
+    /// | 1 step of 20pt | 0.050 | 0.021 | 2.4x |
+    /// | 1 step of 80pt | 0.127 | 0.083 | 1.5x |
+    ///
+    /// The factor is not constant, which rules out a units bug in this driver.
+    /// What it does match is the app applying the gesture translation **twice**:
+    /// `DragGesture.onChanged` and `onEnded` both call `dragSplitRatio` with the
+    /// same cumulative `translation`, and the ratio formula adds that translation
+    /// to a `position` that the daemon has already moved. So a 40pt drag asks for
+    /// 2x40pt. The shrinking factor at larger distances is the clamp to 0.9
+    /// compressing the tail, not a different cause.
+    ///
+    /// This driver therefore sends exactly one dragged event: the extra steps were
+    /// multiplying an already-doubled input and made the divider run away from the
+    /// pointer. Chasing the remaining 2x by editing this file would be papering
+    /// over an app bug — see `docs/ENVIRONMENT.md` §8.8.
     static func drag(
-        from start: CGPoint, to end: CGPoint, steps: Int = 12, button: CGMouseButton = .left
+        from start: CGPoint, to end: CGPoint, steps: Int = 1, button: CGMouseButton = .left
     ) {
         let dragType: CGEventType = button == .right ? .rightMouseDragged : .leftMouseDragged
         let total = max(steps, 1)
+
+        // `mouseMoved` first, then press. Warping the cursor instead
+        // (`CGWarpMouseCursorPosition`) looked more correct and made every drag
+        // miss the divider entirely — the hit testing uses the event's own
+        // position, not the cursor's.
         post(.mouseMoved, at: start)
-        usleep(80_000)
+        usleep(100_000)
         post(.leftMouseDown, at: start, button: button)
-        usleep(60_000)
+        usleep(150_000)
+
         for step in 1...total {
-            let ratio = Double(step) / Double(total)
+            let fraction = Double(step) / Double(total)
             let point = CGPoint(
-                x: start.x + (end.x - start.x) * ratio,
-                y: start.y + (end.y - start.y) * ratio
+                x: start.x + (end.x - start.x) * fraction,
+                y: start.y + (end.y - start.y) * fraction
             )
             post(dragType, at: point, button: button)
-            usleep(16_000)
+            usleep(80_000)
         }
-        usleep(40_000)
+
+        usleep(80_000)
         post(.leftMouseUp, at: end, button: button)
     }
 

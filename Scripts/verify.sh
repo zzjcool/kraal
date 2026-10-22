@@ -94,10 +94,16 @@ if [ "${1:-}" != "--fast" ]; then
 fi
 
 if [ "${1:-}" != "--fast" ] && [ "${KRAAL_SKIP_GUI:-0}" != "1" ]; then
-    section "gui (real window, scratch daemon)"
+    section "gui (real window, scratch daemon, vm backend)"
+    # The GUI gate drives a real window, so it runs in the VM by default: a local
+    # run takes the pointer and keyboard away from whoever is using the machine.
+    # Set KRAAL_GUI_BACKEND=local to run it here (interactive use only).
     ./Scripts/gui.sh run > "$SCRATCH/gui.log" 2>&1
     TAIL=$?
-    grep -E '^(  ✓|  ✗|ok:|FAILED)' "$SCRATCH/gui.log" | tail -12
+    # Strip ANSI first: the ✓/✗ lines start with a colour escape, so anchoring the
+    # pattern at ^ matched nothing and the gate printed a green line with no
+    # evidence of what it actually checked.
+    sed 's/\[[0-9;]*m//g' "$SCRATCH/gui.log" | grep -E '^(  ✓|  ✗|ok:|FAILED)' | tail -14
     check "$TAIL" "gui.sh run"
     if [ "$TAIL" -ne 0 ]; then
         printf '    full log: %s\n' "$SCRATCH/gui.log"
