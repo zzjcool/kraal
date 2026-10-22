@@ -167,11 +167,38 @@ if mode == "all" || mode == "render" {
     }
     // A frame that genuinely repeats (a polling snapshot): the renderer sees the
     // same content twice, which the daemon does send, so this case is real.
+    //
+    // Two *separately decoded* frames, not the same value twice. A decoded frame
+    // always gets fresh storage, and `Array` comparison short-circuits when two
+    // values share a buffer -- passing one value as both arguments measured
+    // 0.15 us instead of 60 us, a 400x understatement. See docs/PERFORMANCE.md.
     print("-- identical frame repeated (redundant snapshot) --")
     for (label, width, height) in sizes {
-        let frame = decodedFrame(width, height)
-        measureRendering("\(label) no-op diff", iterations: 3000,
-                         first: frame, second: frame)
+        let first = decodedFrame(width, height)
+        let second = decodedFrame(width, height)
+        measureRendering("\(label) no-op diff", iterations: 800,
+                         first: first, second: second)
+    }
+}
+
+// `Array` comparison short-circuits when two values share a storage buffer, so
+// passing one frame as both arguments to measureRendering makes a full row scan
+// look 400x cheaper than it is. Check storage identity directly -- a ratio check
+// on timings measures the probe, not the hazard.
+if mode == "all" || mode == "render" {
+    print("")
+    print("=== self-check: no-op frames must not share storage ===")
+    for (label, width, height) in sizes {
+        let first = decodedFrame(width, height)
+        let second = decodedFrame(width, height)
+        let sameBuffer = first.cells.withUnsafeBufferPointer { a in
+            second.cells.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
+        }
+        print("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
+        if sameBuffer {
+            FileHandle.standardError.write(Data("bench self-check failed for \(label)\n".utf8))
+            exit(1)
+        }
     }
 }
 

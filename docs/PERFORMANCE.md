@@ -58,6 +58,45 @@ for i in 0 ..< n { renderer.render(i % 2 == 0 ? second : first) }
 
 > 数字比预期小一个数量级时，先怀疑它没在跑，而不是先庆祝。
 
+## 1b. 两份数据不能共享存储
+
+比「结果没被消费」更隐蔽的一类：**两次输入是同一个值**。
+
+`Array`（以及其中元素的）比较在两侧**共享同一块 buffer** 时会直接短路返回
+`true`。于是「内容完全相同的两帧」如果传的是同一个 `FrameData`，逐格比较一遍
+都不用做。
+
+实测同一份 200×50 内容：
+
+| 写法 | `changedRows` 成本 |
+|---|---|
+| 相同内容，**共享存储**（`first: frame, second: frame`） | **0.15 us** |
+| 相同内容，**独立存储**（两次 `decodedFrame`） | **60.1 us** |
+
+差 400 倍。而且它骗过了本仓库的基准：
+
+```
+no-op diff      0.33 us（错，共享存储）   →   86.9 us（对，真实解码帧）
+```
+
+> 这条比 §1 更该警惕：§1 的错误会让数字**整体偏小**，容易被「这也太快了」察觉；
+> 这条只会让**某一个用例**偏小，其余数据全部正常，看上去像「no-op 确实很便宜」。
+
+**判据**：任何「内容相同、应该走同一路径」的对照用例，都必须**各自构造一遍**。
+在本仓库里就是两次 `decodedFrame(width, height)`，绝不复用同一个值。
+
+`Scripts/bench.sh` 现在有一道自检，直接验存储地址而不是比时间（比时间是在测
+探针，不是在测风险）：
+
+```swift
+let sameBuffer = first.cells.withUnsafeBufferPointer { a in
+    second.cells.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
+}
+```
+
+注入 `first: frame, second: frame` 会让它打印 `YES -> BROKEN` 并以退出码 1 结束
+（已 A/B 验证）。
+
 ## 2. 合成数据要和真实数据同形
 
 **事故**：用 `[CellData](repeating: blank, count: 10000)` 造帧，测出深拷贝
@@ -114,12 +153,16 @@ func decodedFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -> FrameD
 | 场景 | 80×24 | 200×50 | 300×80 |
 |---|---|---|---|
 | 首帧（pane 出现） | 305 us | 1506 us | 3589 us |
-| 冗余快照（内容不变） | 0.29 us | 0.33 us | 0.38 us |
+| 冗余快照（内容不变） | 17.2 us | 86.9 us | 209 us |
 | 打字（1 格变化） | 29.7 us | 118 us | 257 us |
 | **整屏滚动（每行都变）** | **297 us** | **1546 us** | **3603 us** |
 
 只报「平均」会把这些全糊掉。提性能问题时**必须写清是哪一档**，并说明它在真实
 使用中对应什么操作（`tail -f`、`htop`、全屏滚动 → 落到最贵那一行）。
+
+注意「冗余快照」这一档**不是免费的**：内容完全不变时仍要全量扫行做比较，
+200×50 要 86.9 us、300×80 要 209 us —— 和「1 格变化」几乎同价。这条曾经被记成
+0.29 us（共享存储导致的假象，见 §1b），据此得出的「no-op 可以忽略」是错的。
 
 ## 5. 折算成帧预算
 
@@ -223,6 +266,19 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 |---|---|---|---|
 | `StyleCode.encode` 每格建 `[String]` + `joined` | `SurfaceANSIRenderer.swift:222` | ~1230 us/帧（整屏变化时） | #49 |
 | patch 应用时整屏 CoW 深拷贝 | `AppStore+Events.swift:146` | 37.4 us/patch（4 pane = 54% 预算） | #50 |
+| 每键多发一条 `pane.focus` | `KraalMacMain.swift:97` | 每键 0.036 → 0.248 ms（7×） | #55 |
+| 日志格式化在 enabled 检查前求值 | `KraalLog.swift:108` | 每键 0.96 us（关闭时照付） | #56 |
+| `DateFormatter` 每条日志新建 | `KraalLog.swift:102` | 32.3 us（共享版 0.67 us） | #56 |
+| no-op diff 用例共享存储 | `Scripts/bench.sh`（已修） | 曾报 0.29 us，真值 86.9 us | #54 |
+
+已定位但**尚未提 issue**（成本已知，影响面待评估）：
+
+| 观察 | 位置 | 实测成本 |
+|---|---|---|
+| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:100` | 19.3 us（半宽）/ 30.8 us（全宽），200×50 |
+| `render` 每帧新建 `Data()` 无 `reserveCapacity` | `SurfaceANSIRenderer.swift:57-58` | 未单独测（整屏 300×80 输出约 90 KB，会有多次扩容） |
+| `linkURI` 每个 cell 都调用，带链接时每次重新 sanitize 整个 URI | `SurfaceANSIRenderer.swift:217,261-263` | 未单独测（同一行同一 URI 出现 N 次就 sanitize N 次） |
+| `changedRows` 无单元格级 diff，一行变一格整行重写 | `SurfaceANSIRenderer.swift:164-178` | 已含在「1 格变化」29.7-257 us 里 |
 
 健康、不需要动的部分（同样实测）：
 
@@ -231,7 +287,7 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 | 构造一个 200×50 解码帧 | 57 us |
 | `FrameData.validate()` | 3.1 us |
 | retain 一个帧（CoW 共享） | 0.01 us |
-| 行级 diff 检测（10000 格） | 104 us |
+| 行级 diff 检测（10000 格） | 61 us |
 | 解码一个按键（`TerminalInputDecoder`） | 0.115 us |
 | `inputDecoders` 字典取存一个 decoder | 0.038 us |
 | `Task { }` 创建 + hop | 5.8 us |
