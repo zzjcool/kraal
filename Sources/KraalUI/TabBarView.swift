@@ -113,6 +113,28 @@ struct StatusBarView: View {
                     .help(error)
             }
 
+            // The daemon's own diagnostics (config problem, available update,
+            // release notes). Previously decoded and dropped, so a broken config
+            // file failed silently — the pane looked fine while every rule in it
+            // was ignored. One notice only: a status bar is not a queue.
+            if let notice = SnapshotNotices.statusBarNotice(in: store.snapshot) {
+                Label {
+                    Text(notice.summary)
+                        .lineLimit(1)
+                } icon: {
+                    Image(systemName: notice.kind.isIssue
+                        ? "exclamationmark.triangle.fill"
+                        : "info.circle.fill")
+                        .font(.system(size: 9))
+                }
+                .font(.system(size: 10))
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(notice.kind.isIssue
+                    ? sidebarColor("yellow")
+                    : Color.secondary)
+                .help(notice.detail ?? notice.summary)
+            }
+
             Spacer()
 
             if let snapshot = store.snapshot, !snapshot.tabBarRight.isEmpty {
