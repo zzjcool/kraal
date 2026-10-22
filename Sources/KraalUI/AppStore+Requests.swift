@@ -145,6 +145,53 @@ extension AppStore {
         return nil
     }
 
+    /// Issues a request and returns the reply's `result` object.
+    ///
+    /// Three callers so far need the answer rather than just "it did not throw":
+    /// the copy-mode motions (`pane.copy_motion` answers with the new cursor), the
+    /// selection read (`pane.selection.read` answers with the text) and the
+    /// confirmation flows. Returning the parsed body keeps that decision — and the
+    /// retry-on-busy rule — in one place instead of in each caller.
+    ///
+    /// Returns `nil` when the call could not be made or the daemon refused; the
+    /// reason is logged, which is the only thing a user can act on for a copy
+    /// motion that silently did not move.
+    func callReturningResult(
+        _ method: String,
+        _ params: [String: Any]
+    ) async -> [String: Any]? {
+        guard let connection, await connection.currentBootId != nil else {
+            kraalLog("call: skipped \(method) (no boot id yet)")
+            return nil
+        }
+        for attempt in 0..<Self.busyRetryLimit {
+            do {
+                let data = try await connection.request(method, params: params)
+                kraalLog("call: ok \(method) \(Self.describe(params))"
+                    + (attempt > 0 ? " (retry \(attempt))" : ""))
+                guard !data.isEmpty,
+                      let object = try? JSONSerialization.jsonObject(with: data),
+                      let envelope = object as? [String: Any] else { return nil }
+                // The envelope is `{"id":…,"result":{…}}`; a refusal would already
+                // have been thrown by `request`, so anything else here is a shape
+                // this caller does not understand rather than a failure.
+                return envelope["result"] as? [String: Any]
+            } catch where EndpointConnection.isBusyRefusal(error) {
+                if attempt == Self.busyRetryLimit - 1 {
+                    lastError = "\(method): the daemon stayed busy"
+                    kraalLog("call: BUSY \(method) \(Self.describe(params)) — gave up")
+                    return nil
+                }
+                try? await Task.sleep(for: .milliseconds(20 * (attempt + 1)))
+            } catch {
+                lastError = "\(method): \(error)"
+                kraalLog("call: FAILED \(method) \(Self.describe(params)): \(error)")
+                return nil
+            }
+        }
+        return nil
+    }
+
     /// Renders request params for the log without dumping every value: pane and
     /// tab ids are what matter when a command lands somewhere unexpected.
     nonisolated static func describe(_ params: [String: Any]) -> String {

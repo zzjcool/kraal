@@ -35,6 +35,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         var showShortcuts: () -> Void = {}
         var showSettings: () -> Void = {}
         var showDebugInfo: () -> Void = {}
+        var enterCopyMode: (String) -> Void = { _ in }
     }
 
     init(store: AppStore, actions: MenuActions) {
@@ -138,6 +139,12 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
             action: #selector(NSText.selectAll(_:)),
             keyEquivalent: "a"
         )
+        menu.addItem(.separator())
+        // Copy mode is not `⌘C`: that copies the local surface's mouse selection, one
+        // screenful. This reaches the pane's history, which only the daemon has. `⌘F`
+        // because that is what "find/select in the terminal" already means to macOS
+        // users, and this mode is where the search keys live.
+        menu.addItem(command: .copyMode, target: self)
         menu.addItem(.separator())
         menu.addItem(command: .clearPane, target: self)
     }
@@ -296,7 +303,8 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
             showCommands: actions.showCommands,
             showShortcuts: actions.showShortcuts,
             showSettings: actions.showSettings,
-            targetPaneId: targetPaneId
+            targetPaneId: targetPaneId,
+            enterCopyMode: { [weak self] paneId in self?.actions.enterCopyMode(paneId) }
         )
     }
 

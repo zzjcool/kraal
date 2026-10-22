@@ -76,6 +76,7 @@ struct ShortcutsView: View {
             Section(title: "Terminal", rows: [
                 ("Paste into terminal", "⌘V"),
                 ("Copy selection", "⌘C"),
+                ("Copy mode (reach history)", "⌘F"),
                 ("Select All", "⌘A"),
             ]),
         ]

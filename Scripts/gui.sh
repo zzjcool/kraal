@@ -784,6 +784,112 @@ print("1 pane, 0 splits")
 }
 
 
+# Assert copy mode reaches the daemon's history, not just the local screen.
+#
+# Why this cannot be a unit test: the state machine is tested exhaustively in
+# `CopyModeTests`, but that proves nothing about the *link* — whether ⌘F actually
+# enters, whether a key reaches the monitor rather than Ghostty, and whether the
+# text that lands on the clipboard came from the daemon's scrollback. All three
+# are wiring, and all three can be broken while every unit test passes.
+#
+# The decisive assertion is the clipboard's content: the pane is filled with
+# numbered lines, the mode is scrolled into history, one line is selected with
+# `V`, copied with `y`, and the clipboard must contain that exact number.
+case_copy_mode() {
+    # Synthetic keys need a frontmost app, so this is a focus-requiring case.
+    requires() { echo focus; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ] || return 1
+        # Numbered output gives every line a unique, greppable identity. `seq` is
+        # used rather than a format string so the line text is a plain integer.
+        #
+        # Filled in a loop and verified against the daemon, because `pane run`
+        # occasionally lands before the shell is ready: without this the case
+        # failed intermittently with `viewport=0...38` and an empty selection,
+        # which looked exactly like a copy-mode bug.
+        for _ in 1 2 3 4 5; do
+            herdr pane run "$(first_pane_id)" "seq -f 'line%g' 1 200" >/dev/null 2>&1 || true
+            sleep 1
+            # Scrollback exists once the pane has more text than one screen; the
+            # daemon reports it as a non-zero scroll max.
+            if pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+ok = any(p.get("scroll") and p["scroll"]["max_offset_from_bottom"] > 0
+         for p in layout["panes"])
+sys.exit(0 if ok else 1)
+'; then
+                break
+            fi
+        done
+        # Scroll back so the viewport sits in history — copy mode's whole reason for
+        # existing. Without this the selection would be from the visible screen,
+        # which the mouse could already reach.
+        herdr pane scroll --up 60 "$(first_pane_id)" >/dev/null 2>&1 || true
+        sleep 1
+        return 0
+    }
+    action() {
+        # Clear the clipboard first. Without this the assertion below could pass on
+        # whatever a previous case left behind — the guest had `echo AAA` on it, and
+        # the first run of this case "failed" only because the expected text was
+        # missing, not because the old value matched.
+        tart exec "$VM" /bin/bash -lc "printf '' | pbcopy" >/dev/null 2>&1 || true
+
+        # Enter through the menu, which is also the documented path (⌘F resolves
+        # through the same command). A failure here means the wiring, not the keys.
+        #
+        # `menu` needs both the bar item and the item inside it — passing only a
+        # title silently did nothing, and the case failed at `action` with no log
+        # line to explain why.
+        driver menu --menu Edit --item "Copy Mode…" >/dev/null 2>&1 || return 1
+        sleep 1
+        # `g` moves to the top of the viewport first: the entry cursor is the
+        # terminal's own, which sits at the bottom row — and the bottom row of a
+        # viewport scrolled into history is often past the end of the text, which
+        # the daemon refuses with `selection_unavailable`.
+        driver key --char g >/dev/null 2>&1 || return 1
+        sleep 1
+        # `V` selects the whole line, `y` copies and leaves.
+        driver key --char V --mod shift >/dev/null 2>&1 || return 1
+        sleep 1
+        driver key --char y >/dev/null 2>&1 || return 1
+        sleep 2
+        return 0
+    }
+    assert() {
+        local log
+        collect_app_log "$host_dir"
+
+        local entered
+        entered=$(grep -c 'copymode: entered' "$host_dir/kraal.log" 2>/dev/null || echo 0)
+        check "copy mode was entered" \
+            "$([ "$entered" -gt 0 ] && echo 0 || echo 1)" "$entered log lines"
+
+        # The copy line records how much text arrived from the daemon. It is the
+        # only evidence that the round trip finished before the clipboard is read.
+        local copied_line
+        copied_line=$(grep 'copymode: copied' "$host_dir/kraal.log" 2>/dev/null | tail -1)
+        check "the selection was read from the daemon" \
+            "$([ -n "$copied_line" ] && echo 0 || echo 1)" "${copied_line:-no copy recorded}"
+
+        # The clipboard must hold one of the numbered history lines. Reading it in
+        # the guest is deliberate: that is where the app put it.
+        local clip
+        clip=$(tart exec "$VM" /bin/bash -lc "pbpaste 2>/dev/null" 2>/dev/null | tr -d '\r')
+        local matched=1
+        case "$clip" in
+        *line[0-9]*) matched=0 ;;
+        esac
+        check "the clipboard holds a line from the pane's history" "$matched" \
+            "clipboard: $(printf '%s' "$clip" | head -c 80)"
+    }
+}
+
+
 # Assert the pane scrollbar is drawn inside its own pane.
 #
 # Why this needs a GUI case at all: the lane's position is `rect(for:)` (container
@@ -1391,7 +1497,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode"; }
 
 # ---------------------------------------------------------------- entrypoint
 

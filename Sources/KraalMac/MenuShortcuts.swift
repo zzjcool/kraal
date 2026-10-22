@@ -31,6 +31,10 @@ enum MenuShortcuts {
             .closeTab: Shortcut(key: "w", modifiers: .command),
             .renameTab: Shortcut(key: "r", modifiers: [.command, .shift]),
 
+            // ⌘F, not ⌘C: ⌘C is the terminal's own copy (one screenful, mouse
+            // selection). This opens the mode that can reach the pane's history.
+            .copyMode: Shortcut(key: "f", modifiers: .command),
+
             .splitRight: Shortcut(key: "d", modifiers: .command),
             .splitDown: Shortcut(key: "d", modifiers: [.command, .shift]),
             .toggleZoom: Shortcut(key: "return", modifiers: [.command, .shift]),
