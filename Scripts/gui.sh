@@ -805,8 +805,31 @@ case_copy_mode() {
         [ "$(pane_count)" = "1" ] || return 1
         # Numbered output gives every line a unique, greppable identity. `seq` is
         # used rather than a format string so the line text is a plain integer.
-        herdr pane run "$(first_pane_id)" "seq -f 'line%g' 1 200" >/dev/null 2>&1 || true
-        sleep 2
+        #
+        # Filled in a loop and verified against the daemon, because `pane run`
+        # occasionally lands before the shell is ready: without this the case
+        # failed intermittently with `viewport=0...38` and an empty selection,
+        # which looked exactly like a copy-mode bug.
+        for _ in 1 2 3 4 5; do
+            herdr pane run "$(first_pane_id)" "seq -f 'line%g' 1 200" >/dev/null 2>&1 || true
+            sleep 1
+            # Scrollback exists once the pane has more text than one screen; the
+            # daemon reports it as a non-zero scroll max.
+            if pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+ok = any(p.get("scroll") and p["scroll"]["max_offset_from_bottom"] > 0
+         for p in layout["panes"])
+sys.exit(0 if ok else 1)
+'; then
+                break
+            fi
+        done
+        # Scroll back so the viewport sits in history — copy mode's whole reason for
+        # existing. Without this the selection would be from the visible screen,
+        # which the mouse could already reach.
+        herdr pane scroll --up 60 "$(first_pane_id)" >/dev/null 2>&1 || true
+        sleep 1
         return 0
     }
     action() {
@@ -815,12 +838,6 @@ case_copy_mode() {
         # the first run of this case "failed" only because the expected text was
         # missing, not because the old value matched.
         tart exec "$VM" /bin/bash -lc "printf '' | pbcopy" >/dev/null 2>&1 || true
-
-        # Scroll back so the viewport is in history — copy mode's whole reason for
-        # existing. Without this the selection would be from the visible screen,
-        # which the mouse could already reach.
-        herdr pane scroll --up 60 "$(first_pane_id)" >/dev/null 2>&1 || true
-        sleep 1
 
         # Enter through the menu, which is also the documented path (⌘F resolves
         # through the same command). A failure here means the wiring, not the keys.
