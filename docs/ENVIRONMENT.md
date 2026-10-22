@@ -315,15 +315,63 @@ tart run --no-graphics kraal-agent
 | Xcode | **没有**。`xcode-select -p` = `/Library/Developer/CommandLineTools`，`xcodebuild` 报 “requires Xcode” | 能跑 `swift build` / `swift test`，**不能** `xcodebuild`、不能出 `.app` 包 |
 | Swift | 有。`/usr/bin/swift`，Swift 6.4，target `arm64-apple-macosx26.0` | 纯 SwiftPM 验证可行 |
 | 共享目录 | **没有**。`/Volumes` 只有 `Macintosh HD`，无 VirtioFS | 宿主机↔guest 传文件只能靠 `tart exec` 的 stdio 管道或走网络 |
-| Automation Mode | **关着**。有 `TCC.db` 但没有自动化/辅助功能授权 | 需要 UI 自动化的验证（点按、截图驱动）在 guest 里做不了 |
+| Automation Mode | **关着**。有 `TCC.db`，`AXIsProcessTrusted` 返回 true（`sshd-keygen-wrapper` 有授权条目） | 见下方「why synthetic input fails」——不是权限问题 |
+| 合成鼠标/键盘事件 | **不可用（经 SSH）**。`CGEvent.post` 能移动光标，但点击不会进入任何 app | 点按类验证做不了，用进程内探针代替（见下） |
 | 常用命令 | 缺 `mount`、部分 `system_profiler`、`timeout` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf`；等超时自己写循环 |
 | 网络 | 出网正常但慢；拉 OCI 镜像直连 GHCR 只有 ~116 KB/s | 拉镜像走 `ghcr.nju.edu.cn` 镜像源（实测 ~19 MB/s） |
 
 **不要拉 `macos-tahoe-xcode` 大镜像**，除非明确需要 Xcode 且用户同意——它几十 GB，
 而这里的绝大多数验证（SwiftPM 构建、纯逻辑、协议）用不上 Xcode。
 
-因此分工是：**逻辑与测试放 VM**（`swift test` 全绿），**app 打包与 GUI/点击类验证
-仍留在宿主机**（要 `xcodebuild` 和 Automation Mode）。
+因此分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
+
+#### 为什么经 SSH 的合成鼠标一定失败（且不是权限问题）
+
+实测记录：2026-10-22
+
+踩过的坑：一开始判断成「Accessibility 没授权，事件被丢弃」。**错了两处**：
+
+1. `AXIsProcessTrusted` 在这个 VM 里返回 **true**（`TCC.db` 里有
+   `sshd-keygen-wrapper|2`）。权限是有的。
+2. 光标**确实会动**（`CGEvent.post` 把指针从 (600,364) 挪到 (400,400)）。
+   事件没被丢弃，只是没进 GUI app。
+
+真正的原因在会话类型：
+
+```bash
+launchctl managername        # → Background，不是 Aqua
+```
+
+SSH 进来的进程在 **Background domain**，与窗口服务器（WindowServer）不在一
+个会话里。CGEvent 的生命周期全在 Aqua 会话内部：`CGEvent.post` 把事件交给
+WindowServer，由它路由给前台 app。Background 会话没有这条路由通道，所以：
+
+- 光标位置能设（那是 WindowServer 的直接属性）
+- 但「投递给前台 app 的鼠标事件」不成立——连 Dock 图标都点不动
+- 自己 post 的事件在自己的 `CGEventTap` 里也看不到，因为 tap 的注册本身
+  就需要窗口服务器连接
+
+`sudo launchctl asuser <uid>` 也绕不过去（实测返回
+`Could not switch to audit session: Operation not permitted`），因为拿不到
+Aqua 会话的 audit session。
+
+上游说法一致（[mac-type-string](https://github.com/bgolinvaux/mac-type-string)）：
+
+> SSH sessions: Even if you SSH into a Mac, the shell has no connection to the
+> window server. … There is no workaround: CGEvent posting is fundamentally a
+> GUI-session operation.
+
+**结论**：要在 VM 里验「点一下/拖一下」，就得有一个真的 Aqua 会话里的人（VNC、
+Tart 窗口），或者改用进程内探针。本项目用的是后者：
+
+```bash
+# 走与鼠标完全相同的 dispatch 路径，只跳过鼠标本身
+KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=w1:p1 …
+KRAAL_PROBE_DIVIDER_DRAG=-111 …
+```
+
+这不是退让：探针验的是「命令会不会被正确发出、参数对不对、daemon 状态变了没」，
+而鼠标注入只能额外证明「事件有没有送达」——后者属于 AppKit，不属于本项目。
 
 传文件用 `tart exec -i` 的 stdio 管道，比 scp 稳妥（guest 的 sshd 要单独开，
 而 guest agent 一直可用）：
@@ -431,7 +479,7 @@ tar -czf - ~/.pi/agent/skills | tart exec -i kraal-agent /bin/bash -c 'mkdir -p 
 | 能 | 不能 |
 | --- | --- |
 | `swift build` / `swift test`（Swift 6.4 自带） | `xcodebuild`、出 `.app` 包（没有 Xcode） |
-| 跑 herdr daemon 并作为多机验证的一端 | UI 自动化：Automation Mode 关着，无辅助功能授权 |
+| 跑 herdr daemon 并作为多机验证的一端 | UI 自动化：经 SSH 无 Aqua 会话，合成事件进不了 app（见 §4.6） |
 | 改坏后 `destroy` 重来 | 透明/模糊材质的视觉定稿（虚拟 GPU 与真机不一致，见 §4.3） |
 
 所以分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
