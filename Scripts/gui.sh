@@ -262,6 +262,26 @@ pane_count() {
         | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["panes"]))' 2>/dev/null
 }
 
+# Prints the app's most recent `layout: container=WxH` measurement as "W H".
+#
+# The drag coordinate needs the width of the terminal container, which is the
+# window minus the sidebar. That number was previously written down as 959 — it
+# was correct for a 1180pt window and wrong for every other size, and a narrow
+# window (VM screen 1024x768) pushed the computed divider position into the right
+# hand pane. The drag then landed on a terminal instead of the divider and the
+# case reported "stuck: the drag never reached the daemon", which reads like a
+# product bug. Ask the app instead of remembering.
+container_size() {
+    local log="Kraal-$SESSION.log" line
+    case "$BACKEND" in
+    local) line=$(tail -200 "$HOME/Library/Logs/$log" 2>/dev/null | grep 'layout: container=' | tail -1) ;;
+    vm) line=$(tart exec "$VM" /bin/bash -lc "tail -200 ~/Library/Logs/$log 2>/dev/null" 2>/dev/null \
+            | grep 'layout: container=' | tail -1) ;;
+    esac
+    [ -n "$line" ] || return 1
+    printf '%s' "$line" | sed -n 's/.*container=\([0-9]*\)x\([0-9]*\).*/\1 \2/p'
+}
+
 # ---------------------------------------------------------------- lifecycle
 
 cmd_probe() {
@@ -750,25 +770,41 @@ if not splits:
 print(splits[0]["ratio"])
 ')
         [ -z "$coords" ] && { echo "cannot read the split ratio"; return 1; }
-        # Window origin from the driver; sidebar and container width from the
-        # app's own `layout:` log line (container=959x664 for a 1180pt window, so
-        # the sidebar is 221pt). Derived, not guessed.
+        # Window origin from the driver; the container's size from the app's own
+        # `layout:` log line. Both are measurements, so the case works at any
+        # window size instead of only at the 1180pt default it was tuned against.
         local origin_x origin_y
         origin_x=$(printf '%s' "$window_info" | sed -n 's/.* x=\(-\{0,1\}[0-9]*\) .*/\1/p')
         origin_y=$(printf '%s' "$window_info" | sed -n 's/.* y=\(-\{0,1\}[0-9]*\) .*/\1/p')
-        local divider_x
-        divider_x=$(python3 -c "print(int('$origin_x') + 221 + int(float('$coords') * 959))")
-        local divider_y=$((origin_y + 260))
+        local container_w container_h
+        read -r container_w container_h <<EOF
+$(container_size)
+EOF
+        if [ -z "${container_w:-}" ] || [ -z "${container_h:-}" ]; then
+            echo "cannot read the container size from the app's layout log"
+            return 1
+        fi
+        # The sidebar is whatever the window has left over: the container starts
+        # where the sidebar ends, so the divider's window-relative x is
+        # (window width - container width) + ratio * container width.
+        local window_w
+        window_w=$(printf '%s' "$window_info" | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+        local sidebar_w=$((window_w - container_w))
+        local divider_x divider_y
+        divider_x=$(python3 -c "print(int($origin_x + $sidebar_w + float('$coords') * $container_w))")
+        divider_y=$((origin_y + container_h / 2))
         # One mouse-dragged event, 80pt right. No stream of steps: measured in the
         # VM, 16 steps of 40pt moved the ratio by 0.39 (a 9.4x overshoot) because
         # `DragGesture.translation` is cumulative from the press point, so each
         # extra event adds another delta. One step lands within 0.042 (~40pt).
         driver drag --from "$divider_x,$divider_y" \
             --to "$((divider_x + 80)),$divider_y"
-        # Hand the starting ratio to the assertion: it must check the magnitude,
-        # not merely that something moved. A divider that jumps to 0.9 on an 80pt
+        # Hand both the starting ratio and the container width to the assertion:
+        # it has to check the magnitude, and the expected magnitude depends on how
+        # wide the container actually is. A divider that jumps to 0.9 on an 80pt
         # nudge is broken in the same way a stuck one is.
         printf '%s' "$coords" > "$host_dir/ratio-before.txt"
+        printf '%s' "$container_w" > "$host_dir/container-width.txt"
     }
     assert() {
         local before after
@@ -778,6 +814,8 @@ print(splits[0]["ratio"])
         check "dragging leaves the pane count alone" \
             "$([ "$(pane_count)" = "$1" ] && echo 0 || echo 1)" "$1 -> $(pane_count)" || return 1
         before=$(cat "$host_dir/ratio-before.txt" 2>/dev/null)
+        local container_w
+        container_w=$(cat "$host_dir/container-width.txt" 2>/dev/null)
         after=$(pane_layout | layout_check '
 import json, sys
 layout = json.load(sys.stdin)["result"]["layout"]
@@ -786,21 +824,22 @@ if len(splits) != 1:
     sys.exit(1)
 print(splits[0]["ratio"])
 ')
-        if [ -z "$before" ] || [ -z "$after" ]; then
+        if [ -z "$before" ] || [ -z "$after" ] || [ -z "$container_w" ]; then
             check "dragging the divider moves the split ratio" 1 "could not read a ratio"
             return 1
         fi
-        # 80pt out of a 959pt container is 0.083 of the ratio. The tolerance is
-        # ±0.02, which is deliberately tight: measured against the fixed app, a
-        # drag lands within ~0.005 of the expected value at every distance from
-        # 20pt to 160pt (the residual is a constant ~5pt from the gesture's
-        # start threshold, not a multiplier). A tolerance wide enough to absorb
-        # the 2x duplicate-send bug would have hidden it — that bug showed +0.046
-        # at 40pt, a factor of nine above the residual.
+        # 80pt out of the container is 80/container_w of the ratio, so the expected
+        # value follows the actual container width instead of assuming 959pt. The
+        # tolerance is ±0.02, which is deliberately tight: measured against the
+        # fixed app, a drag lands within ~0.005 of the expected value at every
+        # distance from 20pt to 160pt (the residual is a constant ~5pt from the
+        # gesture's start threshold, not a multiplier). A tolerance wide enough to
+        # absorb the 2x duplicate-send bug would have hidden it — that bug showed
+        # +0.046 at 40pt, a factor of nine above the residual.
         local verdict
         verdict=$(python3 -c "
 before, after = float('$before'), float('$after')
-expected = before + 80.0 / 959.0
+expected = before + 80.0 / float('$container_w')
 delta = after - before
 if abs(delta) < 0.02:
     print(f'stuck: ratio {before:.3f} -> {after:.3f}, the drag never reached the daemon')
@@ -957,7 +996,12 @@ run_case() {
     if [ -n "$failure" ]; then
         status="failed"; code=1
         # Only on failure: a screenshot costs a second and proves least.
-        driver shot -o "$dir/shot-failure.png" >>"$dir/app.out" 2>&1
+        #
+        # The output path went to `$dir` (a *guest* path under the vm backend) while
+        # the redirect around it is host-side, so the failure path printed
+        # "app.out: No such file or directory" and the shot's own complaints were
+        # lost. The shot belongs in the guest; the log of it belongs on the host.
+        driver shot -o "$dir/shot-failure.png" >>"$host_dir/failure-shot.log" 2>&1
     fi
 
     local assertions_json="[]"
