@@ -337,6 +337,27 @@ swift test             # 全绿
 swiftlint --quiet Sources Tests
 ```
 
+### 交付流程：一律走 PR，不直接推 main
+
+**改动落在 feature 分支，用 `gh pr create` 开 PR，由 PR 合进 main。**
+不要 `git push origin main`，即使改动只有一行、即使刚刚验证全绿。
+
+```bash
+git checkout main && git pull --ff-only origin main
+git checkout -b fix/<scope>
+# …改动、验证…
+git commit -m "…"
+git push -u origin fix/<scope>
+gh pr create --base main --fill       # 或用 --title/--body 写证据
+```
+
+PR 正文和提交信息同样要求**证据**：不只是「修好了」，而是失败现象 + 根因 +
+实测数字 + 验证方式（参见 §0.3）。
+
+**推之前必须先 `git fetch`。** 曾经直接 `git push`，结果远端 main 已经多出
+27 个提交（REDS 名单都清空了），本地 `origin/main` 引用是陈旧的。
+合并远端后要在**合并后的树上**重跑门禁，不能拿旧绿当新绿。
+
 ---
 
 ## 5. 文档分工
