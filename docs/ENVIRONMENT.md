@@ -315,8 +315,8 @@ tart run --no-graphics kraal-agent
 | Xcode | **没有**。`xcode-select -p` = `/Library/Developer/CommandLineTools`，`xcodebuild` 报 “requires Xcode” | 能跑 `swift build` / `swift test`，**不能** `xcodebuild`、不能出 `.app` 包 |
 | Swift | 有。`/usr/bin/swift`，Swift 6.4，target `arm64-apple-macosx26.0` | 纯 SwiftPM 验证可行 |
 | 共享目录 | **没有**。`/Volumes` 只有 `Macintosh HD`，无 VirtioFS | 宿主机↔guest 传文件只能靠 `tart exec` 的 stdio 管道或走网络 |
-| Automation Mode | **关着**。有 `TCC.db`，`AXIsProcessTrusted` 返回 true（`sshd-keygen-wrapper` 有授权条目） | 见下方「why synthetic input fails」——不是权限问题 |
-| 合成鼠标/键盘事件 | **不可用（经 SSH）**。`CGEvent.post` 能移动光标，但点击不会进入任何 app | 点按类验证做不了，用进程内探针代替（见下） |
+| Automation Mode | **关着**。有 `TCC.db`，`AXIsProcessTrusted` 返回 true（`sshd-keygen-wrapper` 有授权条目） | 不是权限问题，见下方 |
+| 合成鼠标/键盘事件 | **从 SSH 不可用**。`CGEvent.post` 能移动光标，但点击进不了 app | 点按类验证用进程内探针；要真操作就用 `KRAAL_AGENT_VM_GRAPHICS=vnc`（见下） |
 | 常用命令 | 缺 `mount`、部分 `system_profiler`、`timeout` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf`；等超时自己写循环 |
 | 网络 | 出网正常但慢；拉 OCI 镜像直连 GHCR 只有 ~116 KB/s | 拉镜像走 `ghcr.nju.edu.cn` 镜像源（实测 ~19 MB/s） |
 
@@ -325,44 +325,77 @@ tart run --no-graphics kraal-agent
 
 因此分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
 
-#### 为什么经 SSH 的合成鼠标一定失败（且不是权限问题）
+#### 合成鼠标：VM 里有 Aqua 会话，但 SSH 进不去（tart 侧实测）
 
 实测记录：2026-10-22
 
-踩过的坑：一开始判断成「Accessibility 没授权，事件被丢弃」。**错了两处**：
+踩过的坑，按顺序：
 
-1. `AXIsProcessTrusted` 在这个 VM 里返回 **true**（`TCC.db` 里有
-   `sshd-keygen-wrapper|2`）。权限是有的。
-2. 光标**确实会动**（`CGEvent.post` 把指针从 (600,364) 挪到 (400,400)）。
-   事件没被丢弃，只是没进 GUI app。
+1. 先判断成「Accessibility 没授权，事件被丢弃」。**错**：
+   `AXIsProcessTrusted` 返回 **true**（`TCC.db` 有 `sshd-keygen-wrapper|2`）。
+2. 再判断成「VM 里没有 Aqua 会话」。**也错**：
 
-真正的原因在会话类型：
+   ```bash
+   launchctl print user/501    # subdomains = { gui/501 }
+   launchctl print gui/501     # session = Aqua
+   ```
+
+   VM 登录后一直有一个 Aqua 会话，与 `tart run --no-graphics` 无关——那个
+   开关只影响宿主机要不要建窗口，不影响 guest 内部的 loginwindow。
+3. 真正的问题：**从 SSH 启动的进程不在那个会话里**。
+
+   ```bash
+   launchctl managername        # → Background
+   ```
+
+`CGEvent` 只在 Aqua 会话内被 WindowServer 路由给前台 app。Background 会话
+里，光标位置能设（那是 WindowServer 的直接属性，实测指针确实从 (600,364)
+挪到了 (400,400)），但「投递给 app 的鼠标事件」不成立——连 Dock 图标都点
+不动，自己 post 的事件在自己的 `CGEventTap` 里也看不到。
+
+**为什么绕不过去**：`sudo` 只改 UID/GID，不跨 Mach bootstrap namespace
+（[aahlenst: Accessing the macOS GUI](https://aahlenst.dev/blog/accessing-the-macos-gui-in-automation-contexts/)
+说得很直接：「You cannot switch to a different namespace using `sudo` because
+`sudo` is operating on UID/GID and not on the Mach layer」）。
+
+**试过、都失败的四种方式**（同一天实测，探针自己报 `SessionGetInfo` 的
+`sessionHasGraphicAccess`）：
+
+| 方式 | `sessionHasGraphicAccess` | `AXIsProcessTrusted` |
+| --- | --- | --- |
+| SSH 直接运行 | false | true（sshd 的授权） |
+| 打成 `.app` 后 `open` | false | false |
+| `launchctl bootstrap gui/501` + `LimitLoadToSessionType=Aqua` | false | false |
+| `sudo launchctl asuser <uid>` | 直接报 `Could not switch to audit session` | — |
+
+作为对照，`open ~/Kraal.app` 启动的 app **确实在** Apple 的 GUI 域里：
 
 ```bash
-launchctl managername        # → Background，不是 Aqua
+sudo launchctl procinfo <kraal pid>
+#   domain = gui/501 [100003]
+#   spawn type = app (1)
 ```
 
-SSH 进来的进程在 **Background domain**，与窗口服务器（WindowServer）不在一
-个会话里。CGEvent 的生命周期全在 Aqua 会话内部：`CGEvent.post` 把事件交给
-WindowServer，由它路由给前台 app。Background 会话没有这条路由通道，所以：
+所以「能启动一个 GUI app」与「能从脚本注入输入」是两件事。后者需要一个已经在
+Aqua 会话里的进程去发事件，而这个进程从 SSH 创建不出来。
 
-- 光标位置能设（那是 WindowServer 的直接属性）
-- 但「投递给前台 app 的鼠标事件」不成立——连 Dock 图标都点不动
-- 自己 post 的事件在自己的 `CGEventTap` 里也看不到，因为 tap 的注册本身
-  就需要窗口服务器连接
+**tart 侧还有什么可试**（未验证完，写下来避免重复踩）：
 
-`sudo launchctl asuser <uid>` 也绕不过去（实测返回
-`Could not switch to audit session: Operation not permitted`），因为拿不到
-Aqua 会话的 audit session。
+- `tart run --vnc-experimental <vm>`：实测**能起**，在
+  `127.0.0.1:<随机端口>` 开 VNC，并自动 `open vnc://…`。宿主机上 Screen Sharing
+  进程确实出现了（`CGWindowListCopyWindowInfo` 能看到），但本次连接只停在一个
+  43×56 的工具栏小窗，没展开成 VM 画面——未确认是等待时间不够还是连接失败。
+  **这条路最有希望**：VNC 客户端在宿主机是普通 Aqua app，往它发输入等于往
+  guest 发真 HID 事件，完全绕开 namespace 问题。
+- `tart run <vm>`（带窗口）从 SSH shell 启动**不加窗口**：`tart` 进程在
+  `Background` domain，创建不了窗口。`open -a tart --args run …` 也不行，
+  因为 `/Applications/tart.app` 的 `CFBundleExecutable` 就是 CLI 本体，不是
+  GUI 前端。要在宿主机开窗，得从一个已经在前台的终端里跑。
+- `open` 打 `.app` 时若报 `-10825`，是 `kLSIncompatibleSystemVersionErr`：
+  编译没指定 deployment target，继承了宿主 SDK（实测 `minos` 比 guest 新）。
+  加 `-target arm64-apple-macosx14.0` 重编即可。
 
-上游说法一致（[mac-type-string](https://github.com/bgolinvaux/mac-type-string)）：
-
-> SSH sessions: Even if you SSH into a Mac, the shell has no connection to the
-> window server. … There is no workaround: CGEvent posting is fundamentally a
-> GUI-session operation.
-
-**结论**：要在 VM 里验「点一下/拖一下」，就得有一个真的 Aqua 会话里的人（VNC、
-Tart 窗口），或者改用进程内探针。本项目用的是后者：
+**因此本项目的默认做法**：进程内探针。
 
 ```bash
 # 走与鼠标完全相同的 dispatch 路径，只跳过鼠标本身
@@ -372,6 +405,8 @@ KRAAL_PROBE_DIVIDER_DRAG=-111 …
 
 这不是退让：探针验的是「命令会不会被正确发出、参数对不对、daemon 状态变了没」，
 而鼠标注入只能额外证明「事件有没有送达」——后者属于 AppKit，不属于本项目。
+需要真的拖一下时，用 `KRAAL_AGENT_VM_GRAPHICS=vnc ./Scripts/agent-vm.sh start`
+把画面拉到宿主机上，由人来操作。
 
 传文件用 `tart exec -i` 的 stdio 管道，比 scp 稳妥（guest 的 sshd 要单独开，
 而 guest agent 一直可用）：
