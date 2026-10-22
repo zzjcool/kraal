@@ -359,6 +359,135 @@ struct SurfaceANSIRendererTests {
         }
     }
 
+    // MARK: - IME anchor (#40)
+    //
+    // The IME candidate window is placed by the platform at the host terminal's
+    // cursor cell (`firstRect(forCharacterRange:)` → `ghostty_surface_ime_point`,
+    // which reads `cursor.x/y` and never looks at `cursor.visible`). So the host
+    // cursor's *position* and its *visibility* are two independent things, and a
+    // renderer that conflates them puts the candidate window wherever the cursor
+    // happened to be left — the top-left corner of the pane, or the position of
+    // whatever last drew — which is what "候选框位置不对" looks like.
+    //
+    // These cases were implemented in `e7f6983`. There *was* one test for the
+    // parking behaviour (`ANSIConformanceTests.hiddenCursorParked`, ported from
+    // `render_ansi.rs:2218`), but it only asserted that the output contains a
+    // bare `"H"` — any CUP satisfies that, so it could not tell the right
+    // coordinate from a wrong one, and it said nothing about a *hidden* cursor
+    // being positioned at all. These assert the coordinate.
+
+    /// A pane that hid its cursor (`?25l`, what vim's normal mode and every TUI
+    /// drawing its own cursor does) must still have the host cursor *moved* to
+    /// that cell: the candidate window follows the position, not the visibility.
+    @Test("a hidden cursor is still positioned, so the IME anchor follows it")
+    func hiddenCursorIsStillPositioned() {
+        let frame = FrameData(
+            cells: Array(repeating: CellData.blank, count: 24),
+            width: 8,
+            height: 3,
+            cursor: CursorState(column: 5, row: 2, visible: false, shape: 0),
+            hyperlinks: [],
+            graphics: Data()
+        )
+        var renderer = SurfaceANSIRenderer()
+        let text = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
+
+        // Row 2, column 5 → CUP `3;6` (1-based).
+        #expect(text.contains("\u{1B}[3;6H"), "the hidden cursor was not positioned: \(text)")
+        // ...and it is still hidden, because the program asked for that.
+        #expect(text.contains("\u{1B}[?25l"))
+        #expect(!text.contains("\u{1B}[?25h"), "a hidden cursor must not be revealed")
+    }
+
+    /// A frame carrying no cursor at all — the daemon's way of saying "the
+    /// program painted its own cursor and there is nothing to track" — parks at
+    /// the last place the cursor was *visible*, not at the corner.
+    ///
+    /// The corner case only applies to a renderer that has never seen a visible
+    /// cursor. Parking at (0,0) on every cursorless frame is the bug this guards:
+    /// it makes the candidate window jump to the top-left on the first keystroke.
+    @Test("a cursorless frame parks where the cursor was last visible")
+    func cursorlessFrameParksAtLastVisiblePosition() {
+        var renderer = SurfaceANSIRenderer()
+        // First frame: a visible cursor at row 1, column 4 → CUP `2;5`.
+        let withCursor = FrameData(
+            cells: Array(repeating: CellData.blank, count: 24),
+            width: 8,
+            height: 3,
+            cursor: CursorState(column: 4, row: 1, visible: true, shape: 0),
+            hyperlinks: [],
+            graphics: Data()
+        )
+        let first = String(bytes: renderer.render(withCursor), encoding: .utf8) ?? ""
+        #expect(first.contains("\u{1B}[2;5H"))
+
+        // Second frame: no cursor. The anchor must stay at 2;5, not move to the
+        // bottom-right (3;8) or the top-left (1;1).
+        var cursorless = withCursor
+        cursorless.cursor = nil
+        let second = String(bytes: renderer.render(cursorless), encoding: .utf8) ?? ""
+        #expect(second.contains("\u{1B}[2;5H"),
+                "the anchor left its last visible position: \(second)")
+        #expect(second.contains("\u{1B}[?25l"),
+                "a cursorless frame must leave the host cursor hidden")
+    }
+
+    /// A *hidden* cursor does not update the parking spot, so a later cursorless
+    /// frame jumps back to where the cursor was last **visible**.
+    ///
+    /// This is deliberate, not an oversight: `lastVisibleCursor` records where a
+    /// real cursor was drawn, and a cursorless frame means "the program painted
+    /// its own cursor, there is nothing to track" — the best available anchor is
+    /// the last place a tracked cursor existed. Asserting it makes the choice
+    /// explicit; if it ever needs to become "last position of any cursor", this
+    /// test is what has to change.
+    @Test("a hidden cursor does not move the parking spot")
+    func hiddenCursorDoesNotMoveParkingSpot() {
+        var renderer = SurfaceANSIRenderer()
+        let visible = FrameData(
+            cells: Array(repeating: CellData.blank, count: 24),
+            width: 8,
+            height: 3,
+            cursor: CursorState(column: 4, row: 1, visible: true, shape: 0),
+            hyperlinks: [],
+            graphics: Data()
+        )
+        _ = renderer.render(visible)
+
+        // Hidden, and moved: the CUP must follow the hidden position...
+        var hidden = visible
+        hidden.cursor = CursorState(column: 6, row: 2, visible: false, shape: 0)
+        let hiddenText = String(bytes: renderer.render(hidden), encoding: .utf8) ?? ""
+        #expect(hiddenText.contains("\u{1B}[3;7H"), "hidden position not used: \(hiddenText)")
+
+        // ...but the parking spot stays at the last *visible* one.
+        var cursorless = visible
+        cursorless.cursor = nil
+        let parkedText = String(bytes: renderer.render(cursorless), encoding: .utf8) ?? ""
+        #expect(parkedText.contains("\u{1B}[2;5H"),
+                "expected the last visible position, not the hidden one: \(parkedText)")
+    }
+
+    /// A renderer that has never seen a visible cursor has nothing to park on, so
+    /// it uses the bottom-right cell. That is a deliberate choice (upstream's
+    /// `resolve_host_cursor_state` does the same): the corner is out of the way,
+    /// and it is a *stable* position rather than an undefined one.
+    @Test("without any visible cursor the anchor falls back to the last cell")
+    func cursorlessFirstFrameUsesLastCell() {
+        let frame = FrameData(
+            cells: Array(repeating: CellData.blank, count: 24),
+            width: 8,
+            height: 3,
+            cursor: nil,
+            hyperlinks: [],
+            graphics: Data()
+        )
+        var renderer = SurfaceANSIRenderer()
+        let text = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
+        // Row 2, column 7 (0-based) → CUP `3;8`.
+        #expect(text.contains("\u{1B}[3;8H"), "expected the bottom-right fallback: \(text)")
+    }
+
     @Test("colors use the non-ARGB encoding in SGR output")
     func colorEncoding() {
         let trueColor = CellData(
