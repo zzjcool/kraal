@@ -18,73 +18,96 @@
 //
 // `SurfaceANSIRenderer` emits a full frame on first use and then only the rows
 // and cells that changed, which keeps the steady-state cost near the patch size
-// (66 B measured) rather than a full repaint.
+// (66 B measured) rather than a full repaint. Every frame — diff or not — is
+// wrapped in synchronized output so nothing is ever visible half-painted.
 
 import Foundation
 
 public struct SurfaceANSIRenderer {
     /// Cells from the previous frame, for diffing. Empty until the first render.
     private var previous: FrameData?
-    private var previousCursorVisible = false
 
     public init() {}
 
-    /// Resets so the next `render` emits a full frame.
+    /// Resets so the next `render` emits a full repaint **and clears the screen**.
+    ///
+    /// Both are right after a dropped or rejected frame: the terminal may be
+    /// holding rows at the old width, and repainting over them without clearing
+    /// leaves the tail of each row behind.
     public mutating func reset() {
         previous = nil
-        previousCursorVisible = false
     }
 
     /// Returns the ANSI bytes that bring a terminal from the previous frame to
     /// `frame`, or a full repaint when there is no previous frame.
     public mutating func render(_ frame: FrameData) -> Data {
         var output = Data()
-        let full = previous == nil
+        // Three separate questions, deliberately kept separate. Collapsing them
+        // into one flag is what made a resize clear the scrollback.
+        //
+        //   repaintAll — is the diff trustworthy? A different grid size means no
+        //                cell's coordinates match what is on screen, so every row
+        //                has to be written again.
+        //   clear      — may we destroy scrollback? Only when there is nothing
+        //                worth keeping: a pane's first frame, or after `reset()`
+        //                threw away a frame that left bad rows behind.
+        //   sync       — never a question. Every frame is wrapped.
+        let firstFrame = previous == nil
+        let repaintAll = firstFrame
             || previous?.width != frame.width
             || previous?.height != frame.height
+        let clear = firstFrame
 
-        if full {
-            // Synchronized output keeps the terminal from painting a half-built
-            // screen; the daemon emits the same pair (2026h / 2026l).
-            output.appendUTF8("\u{1B}[?2026h")
+        // Synchronized output keeps the terminal from painting a half-built
+        // screen. Every frame gets it, not just full ones: a diff writes several
+        // rows in sequence and is just as visible mid-write. The daemon wraps
+        // every frame too (render_ansi.rs:1284), and 16 bytes against a 66-byte
+        // patch is not what made this worth skipping.
+        output.appendUTF8("\u{1B}[?2026h")
+        // Hide the cursor before any cell writes. The cursor is positioned with
+        // CUP while painting, so a terminal that draws the hardware cursor at
+        // that intermediate position shows it flicking across the pane. Upstream
+        // writes this unconditionally for the same reason (render_ansi.rs:690),
+        // and a diff that touches three rows has the same three intermediate
+        // positions a full repaint does.
+        output.appendUTF8("\u{1B}[?25l")
+        if clear {
             output.appendUTF8("\u{1B}[2J")
         }
 
         var lastStyle: String?
-        let rows = full ? Array(0 ..< Int(frame.height)) : changedRows(frame)
+        let rows = repaintAll ? Array(0 ..< Int(frame.height)) : changedRows(frame)
         for row in rows {
             appendRow(
                 row,
                 frame: frame,
-                full: full,
+                full: repaintAll,
                 output: &output,
                 lastStyle: &lastStyle
             )
         }
 
         // Cursor: only when it moved or its visibility flipped, and never while
-        // a patch leaves it hidden.
+        // a patch leaves it hidden. The `?25l` above is unconditional, so
+        // re-showing is what has to be conditional — otherwise every frame would
+        // emit a redundant `?25h`.
         if let cursor = frame.cursor, cursor.visible {
             let moved = previous?.cursor.map {
                 $0.column != cursor.column || $0.row != cursor.row
             } ?? true
-            if moved || !previousCursorVisible {
+            if moved {
                 output.appendUTF8("\u{1B}[\(Int(cursor.row) + 1);\(Int(cursor.column) + 1)H")
             }
-            if !previousCursorVisible {
-                output.appendUTF8("\u{1B}[?25h")
-            }
-        } else if previousCursorVisible {
-            output.appendUTF8("\u{1B}[?25l")
+            output.appendUTF8("\u{1B}[?25h")
         }
 
-        if full {
-            output.appendUTF8("\u{1B}[?2026l")
-        }
+        // Close the synchronized-output pair opened above. Unconditional, to
+        // match the unconditional open — a diff frame that opened `?2026h` and
+        // never closed it would freeze the terminal's rendering.
+        output.appendUTF8("\u{1B}[?2026l")
         output.appendUTF8("\u{1B}[0m")
 
         previous = frame
-        previousCursorVisible = frame.cursor?.visible ?? false
         return output
     }
 
