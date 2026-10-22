@@ -55,11 +55,8 @@ struct UpstreamFixtureTests {
     /// forward compatibility — a fixture written by another client must not be
     /// rejected just for leaving defaults out.
     ///
-    /// RED AS PORTED: `EndpointClientHello` has no custom `init(from:)`, so every
-    /// field is required. Kraal only ever *sends* a hello today, so nothing in the
-    /// app breaks — but the type does not describe the wire contract it claims to
-    /// (upstream's serde defaults are part of that contract), and a future reader
-    /// of a hello, or a test double, would fail on a perfectly valid payload.
+    /// issue #10: `EndpointClientHello` now has a custom `init(from:)` carrying
+    /// those defaults, so the type describes the contract it claims to.
     @Test("the frozen hello keeps every negotiated field")
     func helloDecodes() throws {
         let hello = try JSONDecoder().decode(
@@ -75,6 +72,35 @@ struct UpstreamFixtureTests {
         #expect(hello.surfaceCodecs == [EndpointProtocol.surfaceCodecV1])
         #expect(hello.inputCodecs == [EndpointProtocol.inputCodecV1])
         #expect(hello.blobCodecs == [EndpointProtocol.blobCodecV1])
+    }
+
+    /// An absent `surface_active` means **active**, not inactive: upstream's
+    /// `serde(default = "default_true")` (`endpoint.rs:28`). Reading that default
+    /// backwards would silently suppress the surface stream, and every other
+    /// omitted field falls back to `false` / `[]`.
+    @Test("omitted hello fields take the upstream serde defaults")
+    func helloDefaults() throws {
+        let minimal = Data("""
+        {
+          "generation": 1,
+          "cell_width_px": 8,
+          "cell_height_px": 16,
+          "surface_size": { "cols": 80, "rows": 24 },
+          "pixel_mouse": false,
+          "direct_graphics": false,
+          "endpoint_keybindings": false,
+          "mouse_capture": false
+        }
+        """.utf8)
+        let hello = try JSONDecoder().decode(EndpointClientHello.self, from: minimal)
+        #expect(hello.surfaceActive, "an omitted surface_active must default to true")
+        #expect(!hello.surfaceReuse)
+        #expect(!hello.surfaceDelta)
+        #expect(!hello.surfaceScroll)
+        #expect(hello.snapshotCodecs.isEmpty)
+        #expect(hello.surfaceCodecs.isEmpty)
+        #expect(hello.inputCodecs.isEmpty)
+        #expect(hello.blobCodecs.isEmpty)
     }
 
     /// A snapshot from another client, including `agent_status` values no version
