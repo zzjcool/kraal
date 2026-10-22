@@ -18,16 +18,16 @@ SPDX-FileCopyrightText: 2026 zzjcool
 协议层和渲染层已经对得上，**差的几乎全是"客户端自己该实现的东西"**：
 copy mode、滚动条、popup 浮层、通知/声音、OSC 8 链接、光标形状、鼠标增强手势。
 
-§7 列了 9 个当时定位到的错误。**其中 4 个已修**（下表），其余仍在。复核时间
-2026-10-22，对照 `origin/main`。
+§7 列了 9 个当时定位到的错误。**其中 7 个已修**（下表），剩下的 7-5/7-6/7-7
+属于输入语义，见 issue #20。复核时间 2026-10-22，对照 `origin/main`。
 
 ### §7 现状
 
 | # | 问题 | 状态 |
 | --- | --- | --- |
-| 7-1 | `CellModifier` 位定义与 ratatui 0.30 不一致 | ❗ 仍在（`Wire.swift:189-191`，并入 #3 一起修） |
+| 7-1 | `CellModifier` 位定义与 ratatui 0.30 不一致 | ✅ 已修（并入 #3 的 PR #32） |
 | 7-2 | `pane.split` 传 `pane_id` | ✅ 已修（`AppStore.swift:368-396` 改用 `target_pane_id`） |
-| 7-3 | `workspace.close` 漏 `close_group` | ❗ 仍在（`AppStore.swift` 只发 `workspace_id`） |
+| 7-3 | `workspace.close` 漏 `close_group` | ✅ 已修 |
 | 7-4 | 端点请求不解析 `ErrorBody` | ✅ 已修（`EndpointConnection.throwIfErrorEnvelope`） |
 | 7-5 | SS3 修饰符写死 0 | ❗ 仍在（`TerminalInputDecoder.swift:177`） |
 | 7-6 | 粘贴没走 `paste` 语义 | ❗ 仍在（`MacMenuBar.swift:459-463`） |
@@ -198,10 +198,26 @@ bit4=SLOW_BLINK、**bit5=RAPID_BLINK**、**bit6=REVERSED**。
 **已修**：`AppStore.swift:396` 发 `target_pane_id`，并带注释记下这次的取证
 （`target_pane_id: wS:p1` 才会在 `wS:t1` 里建 pane）。
 
-### 💥 7-3 `workspace.close` 漏发 `close_group`，worktree 组关不掉
-`AppStore.swift:345` 只发 `workspace_id`。上游在组内 ≥2 个 workspace 且
-`close_group=false` 时直接返回 `workspace_group_close_required`
-（`app/api/workspaces.rs:330-336`），错误又被 §7-4 吞成一行字符串。
+### ✅ 7-3（已修）`workspace.close` 漏发 `close_group`，worktree 组关不掉
+曾经只发 `workspace_id`。上游在组内 ≥2 个 workspace 且 `close_group=false` 时
+直接返回 `workspace_group_close_required`（`app/api/workspaces.rs:330-336`）。
+
+修法与**实测的 daemon 行为**（0.9.5，2026-10-22）：
+
+- 请求永远带 `close_group`（首次 `false`，用户确认后 `true`）；
+- 拒绝走 `AppStore.callReturningErrorCode` 把 code 交回调用方，而不是折成一行
+  字符串；`workspace_group_close_required` / `confirmation_required` 都触发
+  **确认对话框**，其余仍按错误上报；
+- 只有 **main checkout**（`is_linked_worktree == false`）会被拒绝，关 linked
+  worktree 本来就不受此限（`app/actions.rs:899-917`）。所以判断「是否成组」
+  必须问 daemon，不能靠侧边栏的分组显示；
+- 对话框挂在 `RootView` 根部：侧边栏右键菜单是 SwiftUI、File 菜单是 AppKit，
+  挂在任一侧都会对另一侧不可见。
+
+实测 A/B（daemon 为准）：`close_group=false` → `workspace_group_close_required`
+且 `workspace list` 仍是 `['w1','w3','w5']`；`close_group=true` → `{"type":"ok"}`
+且只剩 `['w3']`。`gui.sh close-workspace-group` 钉住了前半段（请求带 flag、
+拒绝被识别、没有误关）。
 
 ### ✅ 7-4（已修）端点请求不解析 `ErrorBody` / `ResponseResult`
 `AppStore+Requests.swift:67-74` 把响应 body 当透明数据丢掉，所有失败都变成
@@ -309,7 +325,7 @@ self.store.focus(paneId: paneId)     // → pane.focus 端点请求
 2. §7-4 加一层 `ErrorBody`/`ResponseResult` 解码，把 `code` 暴露给 UI
    （修了它，`endpoint_busy` 这类问题才能看见）
 3. §7-2 `pane.split` → `target_pane_id`
-4. §7-3 `workspace.close` 带 `close_group`（先读 snapshot 判断是否组）
+4. ~~§7-3 `workspace.close` 带 `close_group`~~ ✅ 已修
 5. §7-1 modifier 位对齐 + `rapid_blink` 发 `6`
 6. §7-8 侧边栏 rules 改成官方内联键（同时修 `DESIGN.md:611`）
 

@@ -104,6 +104,47 @@ extension AppStore {
     /// How many times a refused-for-busy command is resent.
     private static let busyRetryLimit = 4
 
+    /// Issues a request and hands back the daemon's error code, if it refused.
+    ///
+    /// `call` collapses every failure into `lastError` (a String), which is enough
+    /// for a banner but not for a caller that has to *act* on a specific code.
+    /// Closing is the first such caller: `workspace_group_close_required` means
+    /// "ask the user whether the whole group should go", not "something broke".
+    ///
+    /// Returns nil on success — including the case where the handshake has not
+    /// opened yet, which is not a failure the user can do anything about.
+    func callReturningErrorCode(
+        _ method: String,
+        _ params: [String: Any]
+    ) async -> String? {
+        guard let connection, await connection.currentBootId != nil else {
+            kraalLog("call: skipped \(method) (no boot id yet)")
+            return nil
+        }
+        for attempt in 0..<Self.busyRetryLimit {
+            do {
+                _ = try await connection.request(method, params: params)
+                kraalLog("call: ok \(method) \(Self.describe(params))"
+                    + (attempt > 0 ? " (retry \(attempt))" : ""))
+                return nil
+            } catch let BridgeError.daemon(_, code, _) where code == "endpoint_busy" {
+                if attempt == Self.busyRetryLimit - 1 {
+                    kraalLog("call: BUSY \(method) \(Self.describe(params)) — gave up")
+                    return "endpoint_busy"
+                }
+                try? await Task.sleep(for: .milliseconds(20 * (attempt + 1)))
+            } catch let BridgeError.daemon(_, code, _) {
+                kraalLog("call: REFUSED \(method) \(Self.describe(params)): \(code)")
+                return code
+            } catch {
+                lastError = "\(method): \(error)"
+                kraalLog("call: FAILED \(method) \(Self.describe(params)): \(error)")
+                return nil
+            }
+        }
+        return nil
+    }
+
     /// Renders request params for the log without dumping every value: pane and
     /// tab ids are what matter when a command lands somewhere unexpected.
     nonisolated static func describe(_ params: [String: Any]) -> String {
