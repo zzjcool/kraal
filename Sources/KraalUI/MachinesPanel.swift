@@ -188,7 +188,6 @@ public final class MachinesStore {
 public struct MachinesPanel: View {
     @State private var store: MachinesStore
     @State private var showingAdd = false
-    @State private var didRunDemo = false
     @State private var renaming: HerdrMachine?
     @State private var confirmingRemove: HerdrMachine?
     @State private var confirmingDisable: HerdrMachine?
@@ -241,7 +240,6 @@ public struct MachinesPanel: View {
         .modifier(PanelChrome(embedded: embedded))
         .onAppear {
             store.reload()
-            runDemoIfRequested()
         }
         .sheet(isPresented: $showingAdd) {
             AddMachineSheet(store: store) { showingAdd = false }
@@ -284,60 +282,6 @@ public struct MachinesPanel: View {
         } message: {
             Text("A disabled machine stays saved but is hidden from the sidebar and "
                 + "skipped when connecting.")
-        }
-    }
-
-    /// Drives the panel's own buttons from an env var, for scripted demos.
-    ///
-    /// It calls the same `MachinesStore` methods the buttons call, in the same
-    /// order, with the same labels — the only thing skipped is the mouse. Used to
-    /// produce the demo artifacts without a human clicking.
-    private func runDemoIfRequested() {
-        guard !didRunDemo,
-              ProcessInfo.processInfo.environment["KRAAL_MACHINES_DEMO"] == "1" else { return }
-        didRunDemo = true
-        kraalLog("machines-demo: start")
-        Task {
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            await MainActor.run {
-                let label = store.machines.first?.displayLabel ?? "(none)"
-                kraalLog("machines-demo: visible=\(store.machines.count) first=\(label)")
-            }
-            // The demo drives the write controls, which this Mac does not have, so
-            // it targets the first saved profile rather than the first roster row.
-            guard let machine = await MainActor.run(body: { store.machines.compactMap(\.machine).first })
-            else {
-                await MainActor.run { kraalLog("machines-demo: nothing to operate on") }
-                return
-            }
-            await MainActor.run {
-                kraalLog("machines-demo: rename \(machine.label) -> \(machine.label)-renamed")
-                store.rename(machine, to: machine.label + "-renamed")
-            }
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            await MainActor.run {
-                let now = store.machines.compactMap(\.machine).first?.label ?? "(none)"
-                kraalLog("machines-demo: after rename first=\(now)")
-                if let current = store.machines.compactMap(\.machine).first {
-                    kraalLog("machines-demo: disable \(current.label)")
-                    store.setEnabled(current, enabled: false)
-                }
-            }
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            await MainActor.run {
-                let enabled = store.machines.compactMap(\.machine).first?.enabled ?? false
-                kraalLog("machines-demo: after disable enabled=\(enabled)")
-                if let current = store.machines.compactMap(\.machine).first {
-                    kraalLog("machines-demo: enable \(current.label)")
-                    store.setEnabled(current, enabled: true)
-                }
-            }
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            await MainActor.run {
-                let enabled = store.machines.compactMap(\.machine).first?.enabled ?? false
-                kraalLog("machines-demo: after enable enabled=\(enabled) — leaving profile in place")
-                kraalLog("machines-demo: done")
-            }
         }
     }
 

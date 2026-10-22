@@ -64,13 +64,44 @@ surface 逐行一致 36/36」，所以渲染结果与桌面端一致。
 ## 快速开始
 
 ```bash
-# 构建、测试、lint 一次跑完
+# 构建、测试、lint、GUI 门禁一次跑完
 ./Scripts/verify.sh
 
 # 打包成真正的 .app（ad-hoc 签名）并启动
 ./Scripts/build-app.sh
 open build/Kraal.app
 ```
+
+### 换一台机器 / 新 clone 之后（agent 和人都看这里）
+
+两条命令起步，其余自动：
+
+```bash
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer   # CLT 缺 XCTest
+./Scripts/build-app.sh            # 打包（VM 里没有 Xcode，必须在宿主做）
+./Scripts/gui.sh probe            # 起 VM → 部署 → 自检
+```
+
+`gui.sh` 默认后端是 **`vm`**，它跑在一个叫 `kraal-agent` 的 Tart 虚拟机上。第一次
+在新机器上跑，先执行一次（幂等，已有就只做检查）：
+
+```bash
+./Scripts/vm-bootstrap.sh
+```
+
+它会：检查 `tart` → 没有就 clone（走国内镜像源）→ headless 启动 → **确认
+`launchctl managername` 是 `Aqua`** → 检查三条约 TCC 授权。
+
+如果是全新机器，有两件事 `bootstrap` 只能报告、不能替你决定：
+
+| 缺什么 | 症状 | 怎么补 |
+| --- | --- | --- |
+| guest 内 SIP 未关 | 写不了 `TCC.db`，三条约授权缺失 | 关 SIP（`docs/ENVIRONMENT.md` §4.6） |
+| tart-guest-agent 未被授权 | `AXPress` 能用但点击/拖拽/截图全部失效，看起来像产品 bug | `./Scripts/vm-bootstrap.sh --fix-tcc` |
+
+**为什么不能用 `local` 后端：** 它会驱动你正在用的那张桌面，夺走指针和键盘。
+`local` 只用于需要真 GPU 的视觉判断，且会拒绝任何要前台的用例，除非显式
+`KRAAL_GUI_ALLOW_FOCUS=1`。
 
 Kraal 启动时会自动连本机。没连上（Herdr 没跑）会显示连接面板，
 也可以直接连远端：
@@ -88,7 +119,7 @@ swift build --product kraal
 开发和自测**必须**在一次性环境里做，不要连任何正在使用的 daemon。GUI 调试会
 分屏、打字、关 pane、改布局，这些落在真实会话里就是破坏。
 
-**macOS 上首选 Tart 虚拟机**（本机现有 `kraal-agent`，脚本已封装）：
+**macOS 上首选 Tart 虚拟机**（脚本已封装）：
 
 ```bash
 ./Scripts/agent-vm.sh start    # 起 VM + 拉起 herdr daemon（~27 s）
@@ -215,7 +246,7 @@ Fixtures 在 Tests/KraalProtocolTests/Fixtures/
 ## 验证
 
 ```bash
-swift test      # 275 条：250 绿 + 25 条移植过来故意红的
+swift test      # 283 条：261 绿 + 22 条移植过来故意红的
 ```
 
 真正重要的是这几条：
@@ -233,9 +264,9 @@ swift test      # 275 条：250 绿 + 25 条移植过来故意红的
 ### 已知红：从上游移植过来的差异
 
 参考的三个项目（herdr / herdr-gpui / rootshell）各自有一套成熟测试。适合我们的
-部分已移植，**当前有 25 条是红的**，每一条都指向一个具体差异（命名字色 SGR
-偏一档、resize 清 scrollback、半角假名声宽、OSC 8 缺失、`u8` 写成 varint、
-握手用 error 判新旧、快照 revision 回退、patch 行重叠、重连倒计时错位……）。
+部分已移植，**当前有 22 条是红的**，每一条都指向一个具体差异（命名字色 SGR
+偏一档、半角假名声宽、OSC 8 缺失、`u8` 写成 varint、握手用 error 判新旧、
+快照 revision 回退、patch 行重叠、重连倒计时错位……）。
 
 已按缺陷拆成 9 个 issue，跟踪见 [#11](https://github.com/zzjcool/kraal/issues/11)；
 逐条出处与差异见 **[docs/PORTED-TESTS.md](docs/PORTED-TESTS.md)**。
@@ -247,14 +278,14 @@ swift test      # 275 条：250 绿 + 25 条移植过来故意红的
 ```
 
 `swift test` 直接跑会红，那是故意的；`verify.sh` 已改用 `test-baseline.sh`
-跳过这 25 条，所以真回归仍然会被拦住。
+跳过这 22 条，所以真回归仍然会被拦住。
 
 ---
 
 ## 文档
 
 - **[实施路线](docs/ROADMAP.md)** —— 里程碑与工程约定（含已完成/待办对照）
-- **[移植的上游测试](docs/PORTED-TESTS.md)** —— 抄自哪里、为什么、哪 25 条现在红、对应哪个 issue
+- **[移植的上游测试](docs/PORTED-TESTS.md)** —— 抄自哪里、为什么、哪 22 条现在红、对应哪个 issue
 - **[开发环境](docs/ENVIRONMENT.md)** —— 本机基线、依赖版本、签名与已知坑
 - **[排查方法](docs/DEBUGGING.md)** —— 怎么验证一件事是真的：样本、A/B 回退、探针纪律
 - **[技术设计文档](docs/DESIGN.md)** —— 完整设计：连接层、协议类型、渲染、侧边栏引擎

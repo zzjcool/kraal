@@ -28,13 +28,20 @@
 #   ./Scripts/agent-vm.sh exec <cmd> # 在 VM 里跑一条命令
 #   ./Scripts/agent-vm.sh destroy    # 删掉 VM（不可恢复）
 #
+# 图形模式（只有需要真的动鼠标时才用）：
+#   KRAAL_AGENT_VM_GRAPHICS=vnc ./Scripts/agent-vm.sh start
+#     起 VM 并开 VNC，同时在宿主机拉起 Screen Sharing 客户端。
+#   KRAAL_AGENT_VM_GRAPHICS=window ./Scripts/agent-vm.sh start
+#     起 VM 并建窗口（需要调用者在 Aqua 会话里；SSH/后台会静默失败，见
+#     docs/ENVIRONMENT.md §4.6）。
+#
 # 前提：tart（brew install --cask zheng/local/tart），VM 已经 pull/clone 过。
 # 重建 VM 的完整步骤见 docs/ENVIRONMENT.md §7。
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 2
 
 VM="${KRAAL_AGENT_VM:-kraal-agent}"
 SSH_USER="${KRAAL_AGENT_VM_USER:-admin}"
@@ -125,8 +132,29 @@ start)
         "$0" status
         exit 0
     fi
-    info "starting $VM (no window)…"
-    nohup bash -c "tart run --no-graphics '$VM' > '$RUN_LOG' 2>&1" >/dev/null 2>&1 &
+    # Window mode matters only for one thing: getting synthetic mouse input into
+    # the guest. Everything else (build, test, daemon, probe) works headless.
+    #
+    # The headless default is deliberate — see docs/ENVIRONMENT.md §4.6 for the
+    # measured reason a window does *not* by itself make input possible.
+    case "${KRAAL_AGENT_VM_GRAPHICS:-none}" in
+        none)
+            info "starting $VM (no window)…"
+            nohup bash -c "tart run --no-graphics '$VM' > '$RUN_LOG' 2>&1" >/dev/null 2>&1 &
+            ;;
+        window)
+            info "starting $VM (window)…"
+            nohup bash -c "tart run '$VM' > '$RUN_LOG' 2>&1" >/dev/null 2>&1 &
+            ;;
+        vnc)
+            # Reachable even from a background session, and the VNC client is an
+            # ordinary Aqua app on the host — which is the only reason this mode
+            # is worth having at all.
+            info "starting $VM (VNC)…"
+            nohup bash -c "tart run --vnc-experimental '$VM' > '$RUN_LOG' 2>&1" >/dev/null 2>&1 &
+            ;;
+        *) die "KRAAL_AGENT_VM_GRAPHICS must be none, window or vnc" ;;
+    esac
     if ! wait_ready; then
         die "VM did not become ready in 180 s — see $RUN_LOG"
     fi

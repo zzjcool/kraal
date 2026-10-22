@@ -44,10 +44,27 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         let environment = ProcessInfo.processInfo.environment
         if let path = environment["KRAAL_HERDR_SOCKET"], !path.isEmpty {
             kraalLog("launch: overriding daemon socket -> \(path)")
-            return ConnectionSettings(name: "sandbox", transport: .local)
+            // The name is what the sidebar and the status bar show, so it has to
+            // describe the socket, not the fact that an override was used. Pointing
+            // the override at this Mac's own daemon is exactly how a developer asks
+            // for the real session; calling that "sandbox" made a live run look like
+            // fake data at a glance.
+            return ConnectionSettings(name: connectionName(forSocket: path), transport: .local)
         }
         kraalLog("launch: no socket override, using this Mac's herdr")
         return .local
+    }
+
+    /// "This Mac" when the path is this Mac's own daemon, "sandbox" otherwise.
+    ///
+    /// Compared by canonical path so a symlinked or `~`-relative spelling of the
+    /// real socket still counts as real.
+    private static func connectionName(forSocket path: String) -> String {
+        let candidate = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let real = "\(home)/.config/herdr/herdr-client.sock"
+        return candidate == real ? "This Mac" : "sandbox"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -141,38 +158,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
         store.loadDefaultSidebarConfig()
         store.connect()
-        runCommandProbeIfRequested()
-    }
-
-    /// Fires one context-menu command from an env var, for scripted checks.
-    ///
-    /// `KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=wS:p5` runs the exact
-    /// path a right-click takes: the same `MacMenuBar.runCommand`, the same
-    /// `CommandEnvironment`, the same `perform`. The only thing skipped is the
-    /// mouse. That matters because the bugs worth catching here live *between*
-    /// those pieces — a wrong wire field, an async focus race, a refusal that
-    /// arrives in band — and none of them are visible from a unit test that only
-    /// checks the request body.
-    ///
-    /// It waits for the first snapshot, since a command issued before the
-    /// handshake completes is skipped for having no boot id.
-    private func runCommandProbeIfRequested() {
-        let environment = ProcessInfo.processInfo.environment
-        guard let raw = environment["KRAAL_PROBE_COMMAND"],
-              let command = AppCommand(rawValue: raw),
-              let menuBar else { return }
-        let paneId = environment["KRAAL_PROBE_PANE"]
-        kraalLog("probe: will run \(raw) on \(paneId ?? "(focused)") once connected")
-        Task { @MainActor in
-            // The handshake is what supplies a boot id; until then the store
-            // drops requests instead of queueing them.
-            for _ in 0..<100 where self.store.snapshot == nil {
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-            try? await Task.sleep(for: .milliseconds(500))
-            kraalLog("probe: running \(raw) on \(paneId ?? "(focused)")")
-            menuBar.runProbe(command: command, paneId: paneId)
-        }
     }
 
     /// Builds and shows the main window.

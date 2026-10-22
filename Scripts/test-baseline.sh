@@ -6,7 +6,7 @@
 # that are *known* to disagree with this client today.
 #
 # Why this exists: `swift test` is deliberately red. `docs/PORTED-TESTS.md`
-# lists 21 tests that came from herdr / herdr-gpui / rootshell and encode
+# lists the tests that came from herdr / herdr-gpui / rootshell and encode
 # behaviour this client does not have yet (named-colour SGR, halfwidth kana
 # width, OSC 8, u8-as-varint in host themes, generation-vs-error in the
 # handshake, snapshot revision fences, …). Each one is a real difference worth
@@ -28,7 +28,17 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 2
+
+# Same toolchain handling as verify.sh: `swift test` needs XCTest.framework,
+# which only ships with Xcode. Run directly against the CLT toolchain and the
+# failure reads "unable to resolve module dependency: 'XCTest'" — a missing
+# toolchain that looks like a broken test.
+if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode.app/Contents/Developer ]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+SWIFT=/usr/bin/swift
+[ -x "$SWIFT" ] || SWIFT=swift
 
 REDS=(
     # ANSI re-encoding — herdr/src/protocol/render_ansi.rs
@@ -37,11 +47,12 @@ REDS=(
     "KraalProtocolTests.TerminalColorEncodingTests/curlyUnderline()"
     "KraalProtocolTests.WideGlyphTests/halfwidthVoicedKana()"
     "KraalProtocolTests.ANSICursorAndHyperlinkTests/osc8()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/missingCursorHides()"
     "KraalProtocolTests.ANSICursorAndHyperlinkTests/cursorShape()"
     "KraalProtocolTests.ANSICursorAndHyperlinkTests/hiddenCursorParked()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/synchronizedOutputOnDiffs()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/sizeChangeDoesNotClear()"
+    # missingCursorHides / synchronizedOutputOnDiffs / sizeChangeDoesNotClear were
+    # on this list until issue #2 landed on main (diff frames wrapped in
+    # synchronized output, resize no longer clears scrollback). `--compare` is
+    # what surfaced them; they now guard again instead of being skipped.
     # Wire shape — herdr-gpui herdr-protocol/tests/host_theme.rs
     "KraalProtocolTests.HostThemeEncodingTests/hostThemeLayout()"
     "KraalProtocolTests.HostThemeEncodingTests/wideColorBytes()"
@@ -73,13 +84,13 @@ if [ "${1:-}" = "--list" ]; then
 fi
 
 if [ "${1:-}" = "--compare" ]; then
-    available=$(swift test --list-tests 2>/dev/null || true)
+    available=$("$SWIFT" test --list-tests 2>/dev/null || true)
     for red in "${REDS[@]}"; do
         if ! printf '%s\n' "$available" | grep -qxF "$red"; then
             printf 'gone:       %s\n' "$red"
             continue
         fi
-        if swift test --filter "$red" 2>&1 | grep -q '✔ Test "'; then
+        if "$SWIFT" test --filter "$red" 2>&1 | grep -q '✔ Test "'; then
             printf 'now green:  %s\n' "$red"
         fi
     done
@@ -91,4 +102,4 @@ for red in "${REDS[@]}"; do
     SKIP_ARGS+=(--skip "${red%()}")
 done
 
-swift test "${SKIP_ARGS[@]}"
+"$SWIFT" test "${SKIP_ARGS[@]}"

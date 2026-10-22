@@ -14,11 +14,16 @@
 本轮**只移植测试**，不修实现。按约定，红是预期的：每条红的测试都指向一个
 具体的、可以用一句话说清的差异，修不修、什么时候修由后续决定。
 
+> **2026-10-22 起数字变了**：合并 main 时 issue #2 已经合入（diff 帧包同步
+> 输出、resize 不再清 scrollback），对应的 3 条转绿并从 skip 名单里删掉。
+> 现在是 **22 条红**；`--compare` 之后为空，说明名单不再陈。
+
 ---
 
 ## 一、新增文件
 
-原有 119 条测试全部保留且全绿；本轮新增 **54 条**，其中 **29 绿 / 25 红**。
+原有 119 条测试全部保留且全绿；本轮新增 **54 条**，移植当时是 **29 绿 / 25 红**，
+main 合入 issue #2 后是 **32 绿 / 22 红**。
 
 | 文件 | 新增 | 其中红 | 来源 |
 |---|---|---|---|
@@ -57,9 +62,13 @@
 
 ---
 
-## 三、当前是红的（25 条，每条一个具体差异，均已拆成 issue）
+## 三、当前是红的（22 条，每条一个具体差异，均已拆成 issue）
 
-### 3.1 渲染（9 条）
+### 3.1 渲染（6 条）
+
+> `every frame is wrapped in synchronized output`、`a size change repaints
+> without clearing the screen`、`a missing cursor hides the host cursor` 三条
+> 已随 issue #2 / #3 的合入转绿，不再列在这里。
 
 | 测试 | 上游出处 | 差异 | Issue |
 |---|---|---|---|
@@ -70,7 +79,6 @@
 | `a size change repaints without clearing the screen` | `render_ansi.rs:1772` | 尺寸变化走 `full` 并发 `2J`。daemon 只在 pane 的**第一帧**清屏；我们是每次窗口 resize 都清一次，把用户正在读的 scrollback 摸掉了。 | #2 |
 | `halfwidth katakana plus voiced mark is two columns` | `render_ansi.rs:2360` | 半角假名 + 浊点（`U+FF66…FF9D` + `U+FF9E/FF9F`）是一个字素占 **2 列**。`SurfaceText.isWide` 只看首个 scalar，这些码位不在任何区间里，于是整行左移一列。 | #3 |
 | `a linked cell emits OSC 8` | `render_ansi.rs:1618` | `hyperlinks` 已解码并一路透传到 `PaneTerminal`，渲染器从不发 OSC 8 —— 链接在 pane 里是纯文本。 | #3 |
-| `a missing cursor hides the host cursor` | `render_ansi.rs:2105` | 首帧 `cursor == nil` 时不发 `?25l`，宿主光标停在上一处。 | #3 |
 | `cursor shape is emitted with DECSCUSR` | `render_ansi.rs:1508` | `CursorState.shape` 解码了但渲染丢弃，从不发 `ESC[<n> q`；逻辑光标形状永远是默认方块。 | #3 |
 
 ### 3.2 线格式（3 条）
@@ -114,13 +122,14 @@
 ## 三·附、Issue 与分支对照
 
 25 条红按缺陷（而不是按测试文件）拆成了 9 个 issue，每个对应一个待修分支。
+下表「条数」是**移植时**的计数；issue #2 已合入并清空（#3 也因此少了 1 条）。
 tracking issue 是 #11。
 
 | Issue | 主题 | 建议分支 | 条数 |
 |---|---|---|---|
-| [#2](https://github.com/zzjcool/kraal/issues/2) | diff 帧没包同步输出 + resize 清 scrollback | `fix/render-sync-and-clear` | 2 |
+| [#2](https://github.com/zzjcool/kraal/issues/2) | ~~diff 帧没包同步输出 + resize 清 scrollback~~ **已修，已 CLOSED** | `fix/render-sync-and-clear`（已合并） | 0 |
 | [#1](https://github.com/zzjcool/kraal/issues/1) | 命名色 SGR 偏一档 | `fix/named-color-sgr` | 2 |
-| [#3](https://github.com/zzjcool/kraal/issues/3) | OSC 8 / URI 清洗 / 半角假名 / 光标 | `fix/render-links-and-cursor` | 6 |
+| [#3](https://github.com/zzjcool/kraal/issues/3) | OSC 8 / URI 清洗 / 半角假名 / 光标 | `fix/render-links-and-cursor` | 5 |
 | [#9](https://github.com/zzjcool/kraal/issues/9) | 重连倒计时与真实 sleep 差一档 | `fix/reconnect-backoff-report` | 1 |
 | [#5](https://github.com/zzjcool/kraal/issues/5) | 握手用 error 而非 generation + 版本下限 | `fix/handshake-version-order` | 3 |
 | [#8](https://github.com/zzjcool/kraal/issues/8) | setSplitRatio 缺 tab_id / NaN / 网格上界 | `fix/split-request-params` | 3 |
@@ -150,19 +159,19 @@ tracking issue 是 #11。
 ## 五、怎么跑
 
 ```bash
-swift test                                    # 全部：275 条，其中 25 条故意红
+swift test                                    # 全部：283 条，其中 22 条故意红
 swift test --filter "Handshake compatibility"  # 按 suite
 ./Scripts/test-baseline.sh                    # 除已知红外全绿（CI / verify.sh 用这个）
-./Scripts/test-baseline.sh --list             # 打印那 25 条
+./Scripts/test-baseline.sh --list             # 打印那 22 条
 ./Scripts/test-baseline.sh --compare          # 哪些已经修好了（该从名单里删掉）
 ```
 
-红的那 25 条**全部来自本轮新增文件**，原有 119 条测试保持全绿 ——
+红的那 22 条**全部来自本轮新增文件**，原有测试保持全绿 ——
 所以「红」不是回归，是这一轮把差异暴露出来了。
 
 `swift test` 直接跑会红，这会让「有没有真回归」失去信号。所以：
 
-- `./Scripts/test-baseline.sh` 是现在的门禁：跳过已知的 25 条，其余必须全绿；
+- `./Scripts/test-baseline.sh` 是现在的门禁：跳过已知的 22 条，其余必须全绿；
 - `Scripts/verify.sh` 已经改用这个脚本，所以你仍然可以一条命令拿到完整信号；
 - 修好一条后跑 `--compare`，它会告诉你哪条该从名单里删掉 —— 避免名单变陈。
 

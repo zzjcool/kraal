@@ -158,12 +158,19 @@ GUI 型自动化，**不影响 `swift build` / `xcodebuild` 命令行**。可忽
 | 视觉验证 | `screencapture -l <windowNumber>` | ✅ 2360×1520（非全屏 3456×2234），窗口被压下面也能截 |
 
 **没有采用的做法**：`open -g` 单独用无效，因为 app 自己会 `activate`；
-`pkill -f KraalMac` 会误杀用户实例；Accessibility 驱动不可行——pane 内容是
-Ghostty Metal 画的，AX 树几乎为空。
+`pkill -f KraalMac` 会误杀用户实例。
 
 **macOS VM 方案的已知局限**：Tart / VirtualBuddy / UTM 都能给 agent 一个完全
 独立的桌面，但虚拟 GPU 下 `NSVisualEffectView` 的 `.behindWindow` 材质与真机
 不一致。功能回归可以在 VM 里跑，**透明/模糊的视觉定稿必须在真机上做**。
+
+> **更正（2026-10-22，同日复测）**：本节原先写「Accessibility 驱动不可行——
+> pane 内容是 Ghostty Metal 画的，AX 树几乎为空」。这句以偏概全了。
+> 终端 pane **内部**确实是 AX 盲区（Metal 自绘，无元素），但 Chrome 与菜单
+> **不是**：Kraal 在 Tart VM 里实测有 **193 个 AX 节点、105 个带 identifier、
+> 163 个可 `AXPress`**，`AXPress` 驱动菜单项 `Split Right` 能让 daemon 侧
+> pane 数从 1 变 2。AX 路线对"界面骨架"可用，只有"终端内容断言"不可用。
+> 详见 `docs/AUTOMATION.md` §1–2。
 
 ### 4.4 多机行为要在双 daemon 上验
 
@@ -292,6 +299,96 @@ tart ip kraal-agent            # 例如 192.168.64.2
 tart exec kraal-agent uname -a # 不要写 `--`，会 exit 125
 ```
 
+#### `kraal-agent` 是唯一副本（2026-10-22 起）
+
+克隆源 `tahoe-base` 已删除以回收 31GB，所以**没有本地模板可再克隆**。它是
+`gui.sh` 的默认后端（`KRAAL_GUI_VM` 默认值），坏掉就没有 GUI 门禁了。
+
+丢了的重建路径，按代价从低到高：
+
+1. **VM 还在，只是状态脏**：`tart stop --force kraal-agent` 后重启即可；guest 内
+   的 `/tmp/kraal-gui/` 是部署产物，`gui.sh` 每次运行都会重新推一份，不用清理。
+2. **VM 镜像坏了**：`tart pull ghcr.io/cirruslabs/macos-tahoe-base:latest`
+   （走 `ghcr.nju.edu.cn` 镜像源，直连 GHCR 实测 ~116 KB/s）。
+3. **重建后要重做的 guest 侧设置**：autologin 用户 `admin`、SIP 关闭
+   （TCC 预授权需要，见 §4.3）、网络出网。
+
+健康自检（三条都应通过）：
+
+```bash
+./Scripts/vm-bootstrap.sh                                     # 一次检查全部前置条件
+tart exec kraal-agent /bin/bash -lc 'launchctl managername'   # 必须是 Aqua
+./Scripts/gui.sh probe                                        # axTrusted=true
+./Scripts/gui.sh run split-right                              # panes 1 -> 2
+```
+
+#### guest 内的 TCC 授权（迁移时最容易漏的一步）
+
+`tart exec` 走 guest agent，所以**需要授权的进程是 `tart-guest-agent`，不是
+sshd、也不是 Kraal**。三条缺一不可（2026-10-22 实测的条目格式）：
+
+```
+kTCCServiceAccessibility   auth_value=2   AXPress 与元素树
+kTCCServicePostEvent       auth_value=2   CGEvent 点击/拖拽/键盘
+kTCCServiceScreenCapture   auth_value=2   screencapture
+```
+
+`client_type=1` 表示按绝对路径匹配（`/opt/homebrew/Cellar/tart-guest-agent/<ver>/bin/tart-guest-agent`），
+`auth_value=2` 表示允许。
+
+**失败表现很误导**：只缺 `PostEvent` 时，`AXPress` 照常工作，于是
+`split-right` 这类用例全绿，但 `drag-divider` 会报"拖拽没生效"，
+看起来像拖拽功能坏了。缺 `ScreenCapture` 时 `screencapture` 返回 0 却写出
+全黑 PNG（§8.4）。
+
+写入需要两个条件，缺一不可：
+
+1. guest 内 **SIP 关闭**（base 镜像默认就是关的）
+2. **`sudo`** —— `TCC.db` 是 `root:wheel 0644`，普通用户 `sqlite3` 写入直接报
+   `attempt to write a readonly database`。根卷虽然 sealed 只读，但 `sudo` 下
+   sqlite3 能写（2026-10-22 实测 `rc=0`）。guest 的 `admin` 有免密 sudo。
+
+自动修复：
+
+```bash
+./Scripts/vm-bootstrap.sh --fix-tcc
+```
+
+手动等价（guest 内，需 `sqlite3`）：
+
+```sql
+insert or replace into access
+  (service, client, client_type, auth_value, auth_reason, auth_version,
+   csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier,
+   indirect_object_code_identity, flags, last_modified)
+values ('kTCCServicePostEvent', '<agent 绝对路径>', 1, 2, 0, 1,
+        NULL, NULL, 0, 'UNUSED', NULL, 0, strftime('%s','now'));
+```
+
+之后 `killall tccd` 并重启 guest agent 才会生效。
+
+#### ⚠️ 升级 guest 里的 Homebrew 包会让授权全部失效
+
+`client` 存的是**解析符号链接后的绝对路径**，而 Homebrew 的 Cellar 路径含版本号：
+
+```
+TCC 里：  /opt/homebrew/Cellar/tart-guest-agent/0.15.0/bin/tart-guest-agent
+符号链接：/opt/homebrew/bin/tart-guest-agent -> ../Cellar/tart-guest-agent/0.15.0/bin/...
+```
+
+`brew upgrade tart-guest-agent` 之后，`/opt/homebrew/bin/...` 指向 `0.16.0/`，
+而 TCC 里那条 0.15.0 的路径再也没有进程去匹配它。**授权条目仍然"存在"**，
+所以任何只看"条目在不在"的检查都会误报健康。
+
+症状和缺授权完全一样：`AXPress` 正常，但点击/拖拽/截图全部失效。
+
+所以：**guest 里升级 Homebrew 包之后，必须重跑 `./Scripts/vm-bootstrap.sh --fix-tcc`。**
+`--fix-tcc` 用当前的实际路径重新插入条目（`insert or replace`），旧条目会留着但无害。
+
+第一条最关键：`tart exec` 落在 **Aqua** 会话是合成事件能进 app 的唯一原因
+（§4.5）。如果这里返回 `Background`，`drag-divider` 这类用例会全部失败，
+而且看起来像产品 bug。
+
 VM 没起来时无头启动（不抢焦点，和在跑的桌面并存）：
 
 ```bash
@@ -315,15 +412,163 @@ tart run --no-graphics kraal-agent
 | Xcode | **没有**。`xcode-select -p` = `/Library/Developer/CommandLineTools`，`xcodebuild` 报 “requires Xcode” | 能跑 `swift build` / `swift test`，**不能** `xcodebuild`、不能出 `.app` 包 |
 | Swift | 有。`/usr/bin/swift`，Swift 6.4，target `arm64-apple-macosx26.0` | 纯 SwiftPM 验证可行 |
 | 共享目录 | **没有**。`/Volumes` 只有 `Macintosh HD`，无 VirtioFS | 宿主机↔guest 传文件只能靠 `tart exec` 的 stdio 管道或走网络 |
-| Automation Mode | **关着**。有 `TCC.db` 但没有自动化/辅助功能授权 | 需要 UI 自动化的验证（点按、截图驱动）在 guest 里做不了 |
+| Automation Mode | **关着**。有 `TCC.db`，`AXIsProcessTrusted` 返回 true（`sshd-keygen-wrapper` 有授权条目） | 不是权限问题，见下方 |
+| 合成鼠标/键盘事件 | **看通道**：经 SSH ❌（Background 会话）；经 **`tart exec` ✅**（Aqua 会话，2026-10-22 实测） | 见下方「两条通道的行为完全不同」 |
 | 常用命令 | 缺 `mount`、部分 `system_profiler`、`timeout` | 排查挂载用 `df`；guest 的 `sh` 的 `echo` **不支持 `-n`**，用 `printf`；等超时自己写循环 |
 | 网络 | 出网正常但慢；拉 OCI 镜像直连 GHCR 只有 ~116 KB/s | 拉镜像走 `ghcr.nju.edu.cn` 镜像源（实测 ~19 MB/s） |
 
 **不要拉 `macos-tahoe-xcode` 大镜像**，除非明确需要 Xcode 且用户同意——它几十 GB，
 而这里的绝大多数验证（SwiftPM 构建、纯逻辑、协议）用不上 Xcode。
 
-因此分工是：**逻辑与测试放 VM**（`swift test` 全绿），**app 打包与 GUI/点击类验证
-仍留在宿主机**（要 `xcodebuild` 和 Automation Mode）。
+因此分工是：**逻辑与测试放 VM**，**app 打包留在宿主机**（VM 无 Xcode、无外网），
+**GUI 验证也放 VM**（`tart exec` 落在 Aqua 会话，见下）。
+
+#### 两条通道：SSH 是 Background，`tart exec` 是 Aqua
+
+先给结论，再看证据：**这台 VM 里能不能注入鼠标/键盘，取决于用哪条通道进去**，
+而 `Scripts/gui.sh` 用的是能用的那条。
+
+实测记录：2026-10-22（两次，第二次推翻了第一次的结论）
+
+踩过的坑，按顺序：
+
+1. 先判断成「Accessibility 没授权，事件被丢弃」。**错**：
+   `AXIsProcessTrusted` 返回 **true**（`TCC.db` 有 `sshd-keygen-wrapper|2`）。
+2. 再判断成「VM 里没有 Aqua 会话」。**也错**：
+
+   ```bash
+   launchctl print user/501    # subdomains = { gui/501 }
+   launchctl print gui/501     # session = Aqua
+   ```
+
+   VM 登录后一直有一个 Aqua 会话，与 `tart run --no-graphics` 无关——那个
+   开关只影响宿主机要不要建窗口，不影响 guest 内部的 loginwindow。
+3. 真正的问题：**从 SSH 启动的进程不在那个会话里**。
+
+   ```bash
+   launchctl managername        # → Background
+   ```
+
+`CGEvent` 只在 Aqua 会话内被 WindowServer 路由给前台 app。Background 会话
+里，光标位置能设（那是 WindowServer 的直接属性，实测指针确实从 (600,364)
+挪到了 (400,400)），但「投递给 app 的鼠标事件」不成立——连 Dock 图标都点
+不动，自己 post 的事件在自己的 `CGEventTap` 里也看不到。
+
+**为什么绕不过去**：`sudo` 只改 UID/GID，不跨 Mach bootstrap namespace
+（[aahlenst: Accessing the macOS GUI](https://aahlenst.dev/blog/accessing-the-macos-gui-in-automation-contexts/)
+说得很直接：「You cannot switch to a different namespace using `sudo` because
+`sudo` is operating on UID/GID and not on the Mach layer」）。
+
+**试过、都失败的四种方式**（同一天实测，探针自己报 `SessionGetInfo` 的
+`sessionHasGraphicAccess`）：
+
+| 方式 | `sessionHasGraphicAccess` | `AXIsProcessTrusted` |
+| --- | --- | --- |
+| SSH 直接运行 | false | true（sshd 的授权） |
+| 打成 `.app` 后 `open` | false | false |
+| `launchctl bootstrap gui/501` + `LimitLoadToSessionType=Aqua` | false | false |
+| `sudo launchctl asuser <uid>` | 直接报 `Could not switch to audit session` | — |
+
+作为对照，`open ~/Kraal.app` 启动的 app **确实在** Apple 的 GUI 域里：
+
+```bash
+sudo launchctl procinfo <kraal pid>
+#   domain = gui/501 [100003]
+#   spawn type = app (1)
+```
+
+所以「能启动一个 GUI app」与「能从脚本注入输入」是两件事。后者需要一个已经在
+Aqua 会话里的进程去发事件，而这个进程从 SSH 创建不出来。
+
+**tart 侧还有什么可试**（未验证完，写下来避免重复踩）：
+
+- `tart run --vnc-experimental <vm>`：实测**能起**，在
+  `127.0.0.1:<随机端口>` 开 VNC，并自动 `open vnc://…`。宿主机上 Screen Sharing
+  进程确实出现了（`CGWindowListCopyWindowInfo` 能看到），但本次连接只停在一个
+  43×56 的工具栏小窗，没展开成 VM 画面——未确认是等待时间不够还是连接失败。
+  **这条路最有希望**：VNC 客户端在宿主机是普通 Aqua app，往它发输入等于往
+  guest 发真 HID 事件，完全绕开 namespace 问题。
+- `tart run <vm>`（带窗口）从 SSH shell 启动**不加窗口**：`tart` 进程在
+  `Background` domain，创建不了窗口。`open -a tart --args run …` 也不行，
+  因为 `/Applications/tart.app` 的 `CFBundleExecutable` 就是 CLI 本体，不是
+  GUI 前端。要在宿主机开窗，得从一个已经在前台的终端里跑。
+- `open` 打 `.app` 时若报 `-10825`，是 `kLSIncompatibleSystemVersionErr`：
+  编译没指定 deployment target，继承了宿主 SDK（实测 `minos` 比 guest 新）。
+  加 `-target arm64-apple-macosx14.0` 重编即可。
+
+上游说法一致（[mac-type-string](https://github.com/bgolinvaux/mac-type-string)）：
+
+> SSH sessions: Even if you SSH into a Mac, the shell has no connection to the
+> window server. … There is no workaround: CGEvent posting is fundamentally a
+> GUI-session operation.
+
+**结论（仅限 SSH）**：SSH 这条通道在 VM 里验不了「点一下/拖一下」——它落在
+Background 会话，缺的是 WindowServer 的路由通道，与 Accessibility 权限无关。
+
+**但这不等于 VM 里不能注入**。`tart exec` 走 guest agent，落在 **Aqua** 会话，
+图表见下。所以本项目的 GUI 验证一条也不用 SSH。
+
+---
+
+**同一台 VM，`tart exec` 和 SSH 的行为完全不同。**
+
+| 通道 | `launchctl managername` | 能否注入鼠标/键盘 |
+| --- | --- | --- |
+| `ssh admin@<vm-ip>` | `Background` | ❌ 光标会动，点击不进 app |
+| `tart exec <vm> …` | **`Aqua`** | ✅ 实测可用 |
+
+> ⚠️ 早先「要在 VM 里验点按，就得有一个真的 Aqua 会话里的人（VNC、Tart 窗口）」
+> 这句只说对了一半。`tart exec` 就走在那个人所在的会话里——base 镜像配了自动
+> 登录（`autoLoginUser = admin`），WindowServer 与 loginwindow 都在跑，
+> 不需要 VNC，也不需要图形窗口（`--no-graphics` 即可）。
+
+2026-10-22 用 A/B 实测（完整日志 `/tmp/kraal-vm-probe5.log` E25/E26、
+`/tmp/kraal-vm-probe6.log` E27）：
+
+| 项 | 结果 |
+|---|---|
+| `launchctl managername`（cwd = tart exec） | `Aqua` |
+| 靶 app 的 `mouseDown` 回调 | ✅ 收到 `mouseDown at (200.0, 166.0) hits=1` |
+| **对照组**：点在同一 app 窗口之外 | ✅ `hits=0`（证明不是"无条件记一次"） |
+| `NSTextField` 收键盘 | ✅ `KB_RESULT value=abcd` |
+| `screencapture -x -o -l <windowNumber>` | ✅ 1180×760 PNG |
+| **端到端**：`AXPress` 菜单 `Split Right` → daemon | ✅ `herdr pane list` **1→2**，再按 → **2→3**，`Split Down` → **3→4** |
+
+**之前为什么判错（两次）**：
+
+1. 测的是 **SSH**，但结论被推广成了整个 VM。
+2. 首次 `tart exec` 注入失败时，真实原因有两个，都不是 Aqua：
+   - 前台有个 TCC 授权弹窗 `universalAccessAuthWarn` 抢焦点（截图里可见）；
+   - 目标窗口**没激活**，且点击坐标是硬编码的，落在别的窗口上。
+   修法：先 `activate()` → 用 AX 读 `kAXPosition`/`kAXSize` 现算坐标 → 再 post。
+
+这是 `docs/DEBUGGING.md` 第 1 条（样本要能区分对错）和第 3 条（探针要测对对象）
+的又一个实例：**没有对照组时，"没生效"无法区分是事件没送达还是没点中**。
+
+#### 这条通道撑起了整个 GUI 门禁（2026-10-22 再次确认）
+
+`Scripts/gui.sh` 的 `vm` 后端就是走 `tart exec`，五个用例全部真跑：
+
+| 用例 | 需要什么 | 结果 |
+|---|---|---|
+| split-right / menu-split / split-down / close-pane | 只需 `AXPress` | ✅ |
+| **drag-divider** | **真实鼠标拖拽**（CGEvent 按下/拖动/抬起） | ✅ 并测出 2 倍位移 bug（见 §8.8） |
+
+`drag-divider` 是最强的反证：如果 `tart exec` 进不了 Aqua，`CGEvent` 的拖拽
+不可能被 `DragGesture` 接住，更不可能让分隔条移动并算出 ratio。
+
+**所以不需要 VNC 也不需要人操作。**（`KRAAL_AGENT_VM_GRAPHICS=vnc` 仍然保留，
+它的用途是给人**看**画面，不是给脚本**注入**输入。）
+
+#### 探针已删除（原「进程内探针还要不要」一节）
+
+2026-10-22：探针（`KRAAL_PROBE_*` 与同类的 `KRAAL_MACHINES_DEMO`）已从产品代码
+移除，共 -146 行。删除前先补了 `drag-divider` 用例替代其覆盖，理由见
+`docs/AUTOMATION.md` §13 决策 2。
+
+探针当年要验的三件事——命令发出去了吗、参数对不对、daemon 状态变了吗——现在由
+`herdr pane layout` 的几何断言承担，而且比探针更强：它经过真实 AppKit 事件分发，
+那正是 `fa3496e`/`e82c104`/`2156703` 三个 bug 所在的地方。
 
 传文件用 `tart exec -i` 的 stdio 管道，比 scp 稳妥（guest 的 sshd 要单独开，
 而 guest agent 一直可用）：
@@ -431,8 +676,148 @@ tar -czf - ~/.pi/agent/skills | tart exec -i kraal-agent /bin/bash -c 'mkdir -p 
 | 能 | 不能 |
 | --- | --- |
 | `swift build` / `swift test`（Swift 6.4 自带） | `xcodebuild`、出 `.app` 包（没有 Xcode） |
-| 跑 herdr daemon 并作为多机验证的一端 | UI 自动化：Automation Mode 关着，无辅助功能授权 |
+| 跑 herdr daemon 并作为多机验证的一端 | UI 自动化：经 SSH 无 Aqua 会话，合成事件进不了 app（见 §4.6） |
 | 改坏后 `destroy` 重来 | 透明/模糊材质的视觉定稿（虚拟 GPU 与真机不一致，见 §4.3） |
 
 所以分工是：**逻辑与测试放 VM**，**app 打包与 GUI/点击类验证留在宿主机**。
 
+
+---
+
+## 8. 宿主 GUI 自动化能力实测（2026-10-22）
+
+用 `Sources/KraalGUIDriver` 在 M4 Pro / macOS 27.0 上直接测出来的事实。
+这些不是推断，每一条都有可复现的命令。
+
+### 8.1 `AXPress` 不需要焦点
+
+目标 app 用 `orderBack` 送到所有窗口后面、前台是 Brave Browser 时，
+`AXPress` 仍然投递成功（靶 app 收到 press），**前台全程没有变化**。
+
+这是 `local` 后端能在用户正常使用电脑时跑的前提。
+
+### 8.2 `AXWindows` 在 macOS 27 上不可用
+
+树本身是好的（Kraal 的 AX 树 1362 个可寻址元素，菜单项齐全），
+但 `kAXWindowsAttribute` 返回的元素：
+
+| 查询 | 结果 |
+| --- | --- |
+| `AXRole` | `AXApplication`（app 自身，自引用） |
+| `AXPosition` / `AXSize` | AXError **-25205**（`.illegalArgument`） |
+| `AXMainWindow` / `AXFocusedWindow` | 同样返回 app 自身 |
+
+与激活策略无关（`.regular` 与 `.accessory` 都一样），与是否重启无关。
+**Finder 从同一属性返回 `AXScrollArea`**，所以这是系统级问题，不是 Kraal 的。
+
+结论：窗口几何一律走 `CGWindowListCopyWindowInfo`（那里 `kCGWindowBounds`
+和 `kCGWindowNumber` 都是准的）。`screencapture -l` 本来也需要
+`kCGWindowNumber`，所以这不是额外成本。
+
+### 8.3 AX 图不是树，DFS 必须带 visited
+
+`AXMenuBar` 同时可以从 `AXApplication` 和 app 的 children 两条路径到达，
+菜单子树还会在自身之下重复出现。没有 visited 集合时：
+
+```bash
+$ kraal-gui press --title "Split Right"
+kraal-gui: title=Split Right matches 13 elements
+```
+
+**13 个**，而实际上只有一个。这让「这个 title 是否唯一确定一个元素」这个
+driver 赖以拒绝歧义按压的判据失效。加 `Set<CFHashCode>` 后恢复为 1。
+
+### 8.4 截图权限：exit 0 + 全黑
+
+没有「屏幕录制」授权时，`screencapture` **返回 0 并写出一个合法的、
+全黑的 PNG**。把它当成功会让截图断言永远通过而什么都没证明。
+
+实测还有一条更窄的坑：`screencapture -l <windowid>` 在本机对**每个** app 都
+失败（`could not create image from window`），Herdr 的窗口同样失败，
+而全屏 `screencapture -x` 成功。所以驱动先试 `-l`，失败则截全屏 + `sips` 裁剪，
+并且无论如何都检测结果是否均匀纯色，是则 `exit 2` 并说明缺哪个权限。
+
+### 8.5 锁屏会禁用合成事件，但不禁用 AXPress
+
+```bash
+$ ioreg -n Root -d1 | grep -A1 IOConsoleLocked
+  <key>IOConsoleLocked</key>
+  <true/>
+```
+
+锁屏时前台是 `loginwindow`（pid 610），`NSWorkspace.frontmostApplication`
+就是它。此时：
+
+| 手段 | 锁屏下 | 说明 |
+| --- | --- | --- |
+| `AXPress` | ✅ 正常 | 实测 split 1→2 成功 |
+| `CGEvent` 点击/拖拽/键盘 | ❌ 全部无效 | 事件投给 loginwindow |
+
+`activate()` 是 void 且经常静默失败，必须轮询确认真的到了前台再发事件。
+否则点击会落到当前真正前台的 app 上——实测落到 Herdr，表现为「点击成功、
+app 毫无反应」，很容易误判成产品 bug。
+
+### 8.6 `herdr pane list` 没有几何，`pane layout` 才有
+
+| 命令 | 有 | 没有 |
+| --- | --- | --- |
+| `herdr pane list` | `pane_id` / `tab_id` / `focused` / `terminal_title` / `cwd` / `revision` | **尺寸、宽高、rect** |
+| `herdr pane layout` | `panes[].rect{x,y,width,height}` / `splits[].ratio` / `splits[].direction` / `focused_pane_id` / `zoomed` / `area` | — |
+
+单位是终端 **cell**，不是点。split 后 `ratio` 默认 0.5。
+
+所以「split 了但比例错了」这类 bug 只能用 `pane layout` 断言。实测注入
+`ratio: 0.85`：pane 数量断言 ✓（1→2），几何断言 ✗（`widths=[17, 95]`）。
+
+**`pane list` 的顺序不稳定**，既不是字典序也不是创建序（实测
+`w1:p5` 排在 `w1:p2` 之前），看起来是内部 map 顺序。断言必须按 `pane_id`
+建集合比较，不能用下标。
+
+### 8.7 未验证
+
+- `NSMenu.popUpContextMenu` 阻塞期间，**外部进程**的 `AXPress` 是否会投递到
+  正在 tracking 的菜单项。
+- 右键菜单弹出后，其 `AXMenuItem` 挂在 `AXApplication` 子树还是独立 `AXMenu` 下。
+- `KRAAL_DEV_BACKGROUND=1`（窗口 `orderBack`）下 CGEvent 右键的投递行为。
+- `pane list` 顺序是否跨 daemon 重启也稳定（只采样了 3 次，未跨重启）。
+- VM 内 `screencapture -l` 是否也失败（宿主失败，VM 早期实验里曾成功过）。
+
+### 8.8 分隔条拖拽：位移是 2 倍（2026-10-22 实测并修复）
+
+在 `kraal-agent` VM（headless，`tart exec` → Aqua）里用单次 `leftMouseDragged`
+40pt 拖分隔条，终端容器 959pt，起始 ratio 0.5：
+
+| `dragged` 与 `mouseUp` 的间隔 | ratio 变化 | 幅度 |
+| --- | --- | --- |
+| 0 ms（同一 tick） | +0.0462 | **1.11x** |
+| 100 ms | +0.0882 | **2.12x** |
+| 300 ms | +0.0882 | 2.12x |
+| 800 ms | +0.0882 | 2.12x |
+| 只发 `dragged`，不发 `mouseUp` | +0.0462 | 1.11x |
+
+**所以是产品 bug，不是驱动精度问题**：`onChanged` 和 `onEnded` 各自把同一个
+累计 `translation` 发了一遍，daemon 应用了两次。真实拖拽两次事件间隔必然
+>100ms，因此每次都受影响。
+
+两个细节值得记：
+
+- **同一 tick 时正确**。两次调用被 `dragSplitRatio` 的合并逻辑并成一个请求，
+  于是只应用一次。这解释了为什么纯换算的单元测试看不见它。
+- **倍数不是常数**。20pt 时 2.42x、40pt 时 2.12x、80pt 时 1.52x——距离越大倍数
+  越小，因为 0.9 的 clamp 压缩了尾部。一个会随距离变化的"倍数"很容易被误读成
+  单位换算问题，但它其实是「同一段位移被加了两次」加上 clamp。
+
+**修复**：把计算锚定在手势**开始时**的 `split.position`，而不是当前从 daemon
+回来的位置。当前 position 已经包含上一次发出去的 translation，再加同一个累计
+translation 就是重复计算；用起始 position 使计算幂等，同一 translation 发几次
+结果都一样。修复后四种间隔全部是 1.11x，A/B 回退可复现 2.12x。
+
+剩余 ~5pt 的固定偏差来自 `DragGesture` 的起始阈值，随距离从 20pt 到 160pt
+保持恒定（1.21x → 1.03x），不是倍数，可以接受。
+
+### 8.9 拖拽用例的断言容差
+
+`drag-divider` 的容差是 **±0.02**。依据是上面的数据：修好后每个距离的残差
+≤0.005（约 5pt 常数），而 2x bug 在同样条件下是 +0.046。容差宽到能吸收 2x
+就等于给这个 bug 盖章——这也是为什么这个用例第一次跑出偏差时没有调容差，
+而是去查换算公式。

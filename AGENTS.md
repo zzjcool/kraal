@@ -10,6 +10,11 @@ SPDX-FileCopyrightText: 2026 zzjcool
 `docs/` 下是**知识**（协议怎么工作、环境什么版本），这份是**行为**（该跑什么、
 不该做什么、验证到什么程度算完）。两者冲突时以 `docs/` 的实测记录为准。
 
+**第一次进这个仓库、或者换了一台机器，先读 `docs/RUNNING.md`**——那是一份从
+clone 到能验证 UI 改动的最短路径清单（装什么、跑什么、缺什么会表现成什么样）。
+
+文档分工见文末 §5。
+
 ---
 
 ## 0. 三条硬规则
@@ -17,7 +22,14 @@ SPDX-FileCopyrightText: 2026 zzjcool
 ### 0.1 不留探索区
 
 **不要**用真实 herdr 会话做实验：不在这台机器上正在使用的 workspace 里 split /
-close / 发键盘输入 / 改布局。开发与自测必须在隔离环境里做
+close / 发键盘输入 / 改布局。
+
+**桌面本身也算探索区。** 驱动真实窗口会夺走指针和键盘——为了调一个拖拽，曾经
+反复 `activate()` 把窗口拉到前台，把正在干活的人打断了。所以 `gui.sh` 默认后端
+是 `vm`；`local` 下要前台的用例会被直接拒绝，除非显式
+`KRAAL_GUI_ALLOW_FOCUS=1`。
+
+开发与自测必须在隔离环境里做
 （`docs/ENVIRONMENT.md` §4.3、§4.4）。
 
 本项目开发期间发生过：反复在 agent 自己正在运行的 workspace 里 split，
@@ -55,8 +67,21 @@ herdr pane list | ...
 
 ### 工具链：必须用 Xcode，不能用 CLT
 
-`swift test` 需要 `Testing.framework`，它**只随 Xcode 提供**。用
-`/usr/bin/swift`（CommandLineTools 工具链）会得到：
+`swift test` 需要 Xcode 平台框架。用 `/usr/bin/swift`（CommandLineTools
+工具链）会失败。
+
+> **更正（2026-10-22 实测）**：原文写「需要 `Testing.framework`，它只随 Xcode
+> 提供」——现在 CLT 也带了 `Testing.framework`：
+> `/Library/Developer/CommandLineTools/Library/Developer/Frameworks/Testing.framework`
+> 确实存在。真正缺的是 **`XCTest.framework`**（CLT 目录里没有），
+> 而 `Tests/KraalTransportTests/` 有 3 个文件 `import XCTest`。
+>
+> 实测错误是：
+> ```
+> HerdrMachineClientTests.swift:13:8 unable to resolve module dependency: 'XCTest'
+> ```
+> 结论不变（仍然必须 `DEVELOPER_DIR` 指向 Xcode），**但看错误信息时不要再去找
+> `Testing`**——它会先把人往错方向引。
 
 ```
 error: no such module 'Testing'
@@ -73,8 +98,8 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 /usr/bin/swift test
 ```
 
-`Scripts/verify.sh` 直接调 `swift`，在本机默认工具链下会因为上面的原因失败。
-要么先 `export DEVELOPER_DIR`，要么逐条手动跑。
+`Scripts/verify.sh` 现在会自己导出 `DEVELOPER_DIR` 并显式用 `/usr/bin/swift`，
+所以直接跑也行（2026-10-22 起）。手动逐条跑仍需要自己 export。
 
 ### 命令清单
 
@@ -82,11 +107,73 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 /usr/bin/swift build                     # 全部 target
-/usr/bin/swift test                      # 173 个测试，28 个套件
+/usr/bin/swift test                      # 283 条；22 条已知红（见下），门禁用 test-baseline.sh
 export PATH="$HOME/.pi-lens/bin:$PATH"   # swiftlint 不在默认 PATH
 swiftlint --quiet Sources Tests          # 必须零违规
+for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 ./Scripts/build-app.sh                   # 打包 build/Kraal.app（ad-hoc 签名）
+
+./Scripts/verify.sh                      # 六道门禁全跑（推荐）
+./Scripts/test-baseline.sh               # 跑全部 except 22 条已知红；verify.sh 用它
+./Scripts/test-baseline.sh --compare     # 哪些已知红已经修好了（该从名单里删掉）
+./Scripts/gui.sh run split-right         # 单个 UI 用例（需已 build-app.sh）
+./Scripts/gui.sh list                    # 现有用例
+
+./Scripts/vm-bootstrap.sh                # 幂等：建/查 VM、验 Aqua、验三条 TCC 授权
+./Scripts/vm-bootstrap.sh --fix-tcc      # 授权丢了才用（升级 guest 内 Homebrew 包后会丢）
+./Scripts/vm-bootstrap.sh export FILE    # 自己换机器：22GB / 32s
+./Scripts/vm-bootstrap.sh import FILE    # 换机器另一端：17s
 ```
+
+`verify.sh` 六道门禁：`swift build` → `swift test` → `swiftlint` → `shellcheck`
+→ `build-app.sh` → `gui.sh run`。`--fast` 跳过最后两道，`KRAAL_SKIP_GUI=1` 只跳 GUI。
+
+**`swift test` 现在会红，那是故意的。** 从上游三个参考项目移植的测试里有 22 条
+钉的是本客户端还没实现的行为（命名字色 SGR 偏一档、`u8` 写成 varint、OSC 8
+缺失……），逐条见 `docs/PORTED-TESTS.md`。所以测试门禁是
+`Scripts/test-baseline.sh`：**跳过那 22 条，其余必须全绿**，这样真回归仍会被拦住。
+
+修掉其中一条时，**必须从 `Scripts/test-baseline.sh` 的 `REDS` 名单里删掉它**，
+否则名单变陈、那条护栏白丢。`--compare` 就是干这个的：它列出「名单里但已经
+绿了」的条目，输出为空才说明名单是准的。合并 issue 分支后跑一次。
+
+**给别人的时候不要传 .tvm**：公开的基础镜像已自带 Aqua 会话、SIP 关闭、四条 TCC
+授权，他跑一次 `vm-bootstrap.sh` 就行（拉 26.4GB，实测 25 分钟）。传 .tvm 会让
+他的镜像永久冻结在你的 macOS 补丁级别上。细节见 `docs/RUNNING.md` §7。
+
+**`shellcheck` 缺失时门禁判 FAILED**，和 `swiftlint` 同样的策略（`KRAAL_SKIP_LINT=1`
+可跳过）。脚本本身就是门禁的一部分——`gui.sh` 坏了等于 GUI 门禁坏了。
+
+### GUI 门禁：`gui.sh` 能证明界面动作真的改了 daemon
+
+跑在 VM 里（`KRAAL_GUI_BACKEND=vm` 是默认值），所以可以无人值守地跑：
+它不会碰你的指针、键盘，也不会截你的屏。
+
+`swift test` 覆盖不到「点了有没有反应」——§0.2 那三个 bug 全部通过了单元测试。
+补这一层的是 `Scripts/gui.sh`：起一个**隔离的 scratch daemon**，用
+`kraal-gui` 通过 Accessibility 驱动真实窗口，然后断言 **daemon 状态**。
+
+```bash
+./Scripts/gui.sh run split-right
+#   ✓ pane count grows by one (1 -> 2)
+#   ✓ split geometry is two equal halves (ratio=0.5 widths=[56, 56] focused=w1:p2)
+#   ✓ split stays inside one tab, ids distinct (tabs=1 panes=[['w1:p1', 'w1:p2']])
+```
+
+三条纪律：
+
+1. **几何断言必须用 `herdr pane layout`，不能用 `pane list`**。后者没有尺寸
+   字段，只能数数量——「split 了但比例是 0.85」这种 bug 数数量是抓不到的
+   （实测：注入 ratio=0.85，数量断言 ✓、几何断言 ✗）。
+2. **`AXPress` 不需要前台，合成事件需要**。锁屏时（`IOConsoleLocked`）前台是
+   `loginwindow`，任何 app 都无法成为 frontmost，CGEvent 会落到不存在的窗口。
+   这类用例声明 `requires() { echo focus; }`，`gui.sh` 会跳过并 exit 2（环境
+   问题），不当成产品失败。
+3. **断言要打印出来**。`summary.json` 带 `assertions[]`，一次通过的运行也应该
+   能回答"到底验证了什么"。
+
+改 `gui.sh` 或驱动后，**用注入验证它还抓得住**（§0.3）：故意改坏一个被断言的
+行为，确认对应断言变红且退出码是 1。
 
 ### `scripts/build-app.sh` 的 `nested herdr is disabled` 是噪音
 
@@ -104,27 +191,46 @@ see configuration if you want to enable it.
 
 ## 2. 跑起来
 
+### 看真实效果：`make run`
+
+```bash
+make run              # 构建 + 打包 + 启动，连你自己的 daemon
+make run FOCUS=0      # 同上，但让窗口到前台（会抢焦点）
+make socket-status    # 连的是哪个 socket
+make logs             # 跟日志
+make stop
+```
+
 ### debug bundle 默认指向一个不存在的沙箱
 
-`Scripts/build-app.sh` 生成的启动器会强制：
+`Scripts/build-app.sh` 生成的启动器默认强制：
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `KRAAL_HERDR_SOCKET` | `/tmp/kraal-mine/herdr-client.sock` | 不存在时连不上，显示连接面板 |
+| `KRAAL_HERDR_SOCKET` | `/tmp/kraal-mine/herdr-client.sock` | 通常是失效的旧 socket，连不上就显示连接面板 |
 | `KRAAL_DEV_BACKGROUND` | `1` | 不抢焦点、不做常规 App |
 | `KRAAL_HERDR_HOME` | `/tmp/kraal-mine/herdr-home` | 给 `herdr` 子进程一份空名册，避免改到真实 machines |
 
-**连真实 daemon**（也就是用户实际在用的那个）时：
+`make run` 就是替你把三个都覆盖掉。手动等价形式：
 
 ```bash
-open --env KRAAL_HERDR_SOCKET="$HOME/.config/herdr/herdr-client.sock" \
-     --env KRAAL_HERDR_HOME="$HOME" \
-     --env KRAAL_DEV_BACKGROUND=0 \
-     build/Kraal.app
+KRAAL_HERDR_SOCKET="$HOME/.config/herdr/herdr-client.sock" \
+KRAAL_HERDR_HOME="$HOME" KRAAL_DEV_BACKGROUND=1 \
+  build/Kraal.app/Contents/MacOS/KraalMac-bin
 ```
 
-加上 `KRAAL_HERDR_HOME="$HOME"` 才能真正看到 3 台远端机器——否则 Machines
-面板是空的。副作用：`KRAAL_DEV_BACKGROUND=0` 会真的抢焦点和键盘。
+两个容易搞错的地方：
+
+- **两套 socket 不能混**：`herdr-client.sock` 是 Kraal 的 bincode 协议；
+  `herdr.sock` 是 CLI 的 JSON API（`$HERDR_SOCKET_PATH` 指向那个）。用错协议
+  会得到 `EmptyResponse`。
+- **启动 `KraalMac-bin`，不是 `KraalMac`**：后者是 bash 启动器，脚本当
+  `CFBundleExecutable` 会让 `NSRunningApplication` 报 **`pid=-1`**。实测
+  Finder/Safari 正常，只有它报 -1，`kraal-gui window` 因此找不到窗口。
+  代价是启动器提供的沙箱默认值要由调用方自己传。
+
+连真实 daemon 时 `KRAAL_HERDR_HOME="$HOME"` 是必须的，否则 Machines 面板是空的
+（看不到 6 台远端机器）。
 
 ### 日志
 
@@ -137,15 +243,20 @@ open --env KRAAL_HERDR_SOCKET="$HOME/.config/herdr/herdr-client.sock" \
 
 ### 脚本化触发一条真实命令
 
-不要靠人点。`KRAAL_PROBE_COMMAND` 走**与鼠标点击完全相同**的
-`runCommand → dispatch → perform` 路径，只跳过鼠标：
+不要靠人点，也不要往产品代码里埋探针（`KRAAL_PROBE_*` 已于 P2 删除，见
+`docs/AUTOMATION.md` §13 决策 2）。用外部驱动走真实界面：
 
 ```bash
-KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=wS:p5 \
-  open --env KRAAL_HERDR_SOCKET=... --env KRAAL_PROBE_COMMAND=split_right ...
+./Scripts/gui.sh run split-right     # 起隔离 daemon → AXPress 真实窗口 → 断言 daemon
+./Scripts/gui.sh run                 # 全部用例
 ```
 
-然后对着日志和 `herdr pane list` 双向确认。
+**默认后端是 `vm`**（Tart `kraal-agent`），不是宿主。原因是硬性的：驱动真实
+窗口会夺走指针和键盘，而那是你正在用来干活的桌面。`KRAAL_GUI_BACKEND=local`
+只用于需要真 GPU 的视觉判断，且会拒绝任何「要前台」的用例，除非显式
+`KRAAL_GUI_ALLOW_FOCUS=1`。
+
+然后对着日志和 `herdr pane list` 双向确认——这条原则不变，只是手段换了。
 
 ---
 
@@ -217,7 +328,7 @@ docs(env): 记录 Tart VM 作为验证环境及其限制
 ```bash
 git diff --stat        # 行数变化是否符合预期（见 DEBUGGING.md §4）
 git status --short     # 别把无关的未跟踪文件带进来
-swift test             # 全绿
+swift test             # 全绿（22 条已知红除外，见 test-baseline.sh）
 swiftlint --quiet Sources Tests
 ```
 
@@ -228,11 +339,14 @@ swiftlint --quiet Sources Tests
 | 文件 | 写什么 |
 |---|---|
 | `README.md` | 是什么、怎么开始、致谢 |
+| `docs/RUNNING.md` | **怎么跑起来**：上手顺序、命令、迁移到新机器 |
 | `docs/ROADMAP.md` | 里程碑与完成状态 |
 | `docs/DESIGN.md` | 协议与架构设计 |
-| `docs/ENVIRONMENT.md` | **实测**的环境事实：版本、隔离方式、多机验证、Tart VM |
+| `docs/ENVIRONMENT.md` | **实测的环境事实**：版本、隔离方式、多机验证、Tart VM、TCC |
+| `docs/AUTOMATION.md` | GUI 验证闭环：方案、实测数据、未验证项 |
 | `docs/DEBUGGING.md` | **怎么验证一件事是真的**（排查教训） |
-| `AGENTS.md`（本文件） | agent 的操作约定：跑什么命令、验证到什么程度 |
+| `AGENTS.md`（本文件） | agent 的行为约定：跑什么、验证到什么程度算完 |
 
-新发现的排查教训进 `DEBUGGING.md`；新发现的环境事实进 `ENVIRONMENT.md`。
-两处都写明**实测日期**和**未验证的部分**。
+新发现的排查教训进 `DEBUGGING.md`；新发现的环境事实进 `ENVIRONMENT.md`；
+新的操作步骤（装什么、跑什么、怎么迁移）进 `RUNNING.md`。
+都写明**实测日期**和**未验证的部分**。

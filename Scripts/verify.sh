@@ -5,13 +5,28 @@
 # Runs every gate the repo has: build, tests, lint. This is the same set the
 # README documents, so CI and a local check cannot drift apart.
 #
-#   ./Scripts/verify.sh          # build + test + lint
-#   ./Scripts/verify.sh --fast   # skip the app bundle
+#   ./Scripts/verify.sh          # build + test + lint + app bundle + GUI
+#   ./Scripts/verify.sh --fast   # skip the app bundle and the GUI gate
+#
+# KRAAL_SKIP_GUI=1 disables only the GUI gate (needs an unlocked screen for
+# any case that posts synthetic events).
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 2
+
+# `swift test` needs XCTest.framework, which only ships with Xcode. The default
+# CommandLineTools toolchain fails with "unable to resolve module dependency:
+# 'XCTest'" — and the failure looks like a broken test, not a missing toolchain.
+# AGENTS.md §1 documents this; export it here so the gate works when run plainly.
+if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode.app/Contents/Developer ]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+# /usr/bin/swift honours DEVELOPER_DIR; a `swift` from Homebrew would not, and
+# would silently pick its own toolchain instead.
+SWIFT=/usr/bin/swift
+[ -x "$SWIFT" ] || SWIFT=swift
 
 FAILED=0
 section() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
@@ -25,7 +40,7 @@ check() {
 }
 
 section "build (all targets)"
-swift build 2>&1 | tail -3
+"$SWIFT" build 2>&1 | tail -3
 check "${PIPESTATUS[0]}" "swift build"
 
 section "tests"
@@ -33,8 +48,11 @@ section "tests"
 # rootshell pin behaviour this client does not have yet (docs/PORTED-TESTS.md).
 # The gate is "everything outside that known list stays green", which is what
 # test-baseline.sh asserts — otherwise a real regression is indistinguishable
-# from the 25 expected failures.
-./Scripts/test-baseline.sh 2>&1 | grep -E "✔ Test run|✘|error:" | tail -4
+# from the expected failures.
+#
+# test-baseline.sh calls `swift` itself, so DEVELOPER_DIR exported above still
+# applies; if it ever grows a $SWIFT override, pass it through here.
+./Scripts/test-baseline.sh 2>&1 | grep -E "✔ Test run|✘|error:" | tail -8
 check "${PIPESTATUS[0]}" "swift test (excluding known-ported reds)"
 
 # Scratch files go under a per-user directory. A fixed /tmp name collides across
@@ -66,8 +84,30 @@ PY
         swiftlint --quiet Sources Tests
         check 1 "swiftlint ($VIOLATIONS violations)"
     fi
+elif [ "${KRAAL_SKIP_LINT:-0}" = "1" ]; then
+    printf 'swiftlint not installed; skipped because KRAAL_SKIP_LINT=1\n'
 else
-    printf 'swiftlint not installed; skipping\n'
+    # A silently skipped lint gate is worse than no gate: it reports green while
+    # checking nothing, which is exactly the failure mode this repo keeps hitting.
+    printf 'swiftlint not found on PATH\n'
+    check 1 "swiftlint (not installed)"
+fi
+
+section "shell lint"
+# The scripts are part of the product here: gui.sh is the GUI gate, so a broken
+# gui.sh is a broken gate. shellcheck is not installed by default, same policy as
+# swiftlint (missing tool = failure, not silence).
+if command -v shellcheck >/dev/null 2>&1; then
+    SHELL_BAD=0
+    for f in Scripts/*.sh; do
+        shellcheck -S warning "$f" || SHELL_BAD=1
+    done
+    check "$SHELL_BAD" "shellcheck ($(ls Scripts/*.sh | wc -l | tr -d ' ') scripts)"
+elif [ "${KRAAL_SKIP_LINT:-0}" = "1" ]; then
+    printf 'shellcheck not installed; skipped because KRAAL_SKIP_LINT=1\n'
+else
+    printf 'shellcheck not found on PATH\n'
+    check 1 "shellcheck (not installed)"
 fi
 
 if [ "${1:-}" != "--fast" ]; then
@@ -76,6 +116,23 @@ if [ "${1:-}" != "--fast" ]; then
     TAIL=$?
     tail -2 "$SCRATCH/app-build.log"
     check "$TAIL" "Kraal.app"
+fi
+
+if [ "${1:-}" != "--fast" ] && [ "${KRAAL_SKIP_GUI:-0}" != "1" ]; then
+    section "gui (real window, scratch daemon, vm backend)"
+    # The GUI gate drives a real window, so it runs in the VM by default: a local
+    # run takes the pointer and keyboard away from whoever is using the machine.
+    # Set KRAAL_GUI_BACKEND=local to run it here (interactive use only).
+    ./Scripts/gui.sh run > "$SCRATCH/gui.log" 2>&1
+    TAIL=$?
+    # Strip ANSI first: the ✓/✗ lines start with a colour escape, so anchoring the
+    # pattern at ^ matched nothing and the gate printed a green line with no
+    # evidence of what it actually checked.
+    sed 's/\[[0-9;]*m//g' "$SCRATCH/gui.log" | grep -E '^(  ✓|  ✗|ok:|FAILED)' | tail -14
+    check "$TAIL" "gui.sh run"
+    if [ "$TAIL" -ne 0 ]; then
+        printf '    full log: %s\n' "$SCRATCH/gui.log"
+    fi
 fi
 
 printf '\n'

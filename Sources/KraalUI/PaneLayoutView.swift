@@ -29,6 +29,31 @@ struct PaneLayoutView: View {
     /// view, unlike `NSScreen.main`, which follows the menu bar.
     @Environment(\.displayScale) private var displayScale
 
+    /// Where the divider sat when the current drag began.
+    ///
+    /// Held here, not derived per event, because `split.position` comes back from the
+    /// daemon already moved by the translation that was last sent. Adding the
+    /// gesture's cumulative translation to that moving value applies the motion
+    /// twice — measured at 2.12x on a real drag. Anchoring on the pre-drag position
+    /// makes the calculation idempotent: delivering the same translation twice
+    /// yields the same ratio.
+    @State private var dragAnchor: (path: [Bool], position: UInt16)?
+
+    /// The anchor for this split, capturing it on first use within a gesture.
+    ///
+    /// Returns the pre-drag position and stores it for the rest of the gesture.
+    /// A plain `@State` write inside a gesture handler is applied before the next
+    /// event, so `onEnded` sees the same anchor `onChanged` established.
+    private func splitDragAnchor(for split: PaneSurfaceSplit) -> UInt16 {
+        if let dragAnchor, dragAnchor.path == split.path { return dragAnchor.position }
+        dragAnchor = (path: split.path, position: split.position)
+        return split.position
+    }
+
+    private func clearSplitDragAnchor() {
+        dragAnchor = nil
+    }
+
     /// Builds each pane's terminal view; injected so this file stays free of the
     /// Ghostty dependency and can be previewed with a stub.
     let paneContent: (String, PaneSurfacePane) -> AnyView
@@ -196,15 +221,32 @@ struct PaneLayoutView: View {
             .offset(x: hit.minX, y: hit.minY)
             .gesture(
                 DragGesture()
-                    .onEnded { value in
-                        guard let surface = store.surface else { return }
-                        let ratio = ratio(
-                            for: split,
-                            drag: value,
-                            grid: grid,
-                            surface: surface
+                    .onChanged { value in
+                        // The anchor is captured once, on the first change of this
+                        // gesture, and cleared on release. Every later value is
+                        // measured from it, so repeated delivery of the same
+                        // cumulative translation produces the same ratio instead of
+                        // compounding (see the note on `ratio(for:drag:anchoringAt:)`).
+                        let position = splitDragAnchor(for: split)
+                        store.dragSplitRatio(
+                            path: split.path,
+                            ratio: ratio(for: split, drag: value, cellSize: cellSize,
+                                         anchoringAt: position)
                         )
-                        store.setSplitRatio(path: split.path, ratio: ratio)
+                    }
+                    .onEnded { value in
+                        // The final position is authoritative and must not be
+                        // dropped: the last `onChanged` may have been coalesced
+                        // away, and the daemon has no idea where the pointer
+                        // stopped. It is the *same* anchor, so this cannot move the
+                        // divider further than the pointer did.
+                        let position = splitDragAnchor(for: split)
+                        store.dragSplitRatio(
+                            path: split.path,
+                            ratio: ratio(for: split, drag: value, cellSize: cellSize,
+                                         anchoringAt: position)
+                        )
+                        clearSplitDragAnchor()
                     }
             )
             .onHover { hovering in
@@ -229,23 +271,59 @@ struct PaneLayoutView: View {
 
     /// Converts a drag into the ratio the daemon expects: the divider's new
     /// offset within the split's own area, clamped so a pane cannot vanish.
+    ///
+    /// `DragGesture` reports **points**; `position` and `area` are **cells**. The
+    /// conversion therefore has to go through the cell size, which is exactly what
+    /// an earlier version got wrong: it scaled the drag by
+    /// `surface.frame.height / grid.height`, and those two are the same number by
+    /// construction (both come from `surface.frame`), so the factor was always 1
+    /// and a 40-point drag counted as 40 *rows*. In a 45-row surface one small tug
+    /// produced a ratio change of 0.89, hit the clamp, and pinned the divider to an
+    /// edge — which reads as "the divider does not follow the mouse".
+    /// Ratio to send for the current drag position.
+    ///
+    /// Anchored on the divider's position **as it was when the gesture began**, plus
+    /// the gesture's cumulative translation. The naive version — current
+    /// `split.position` plus the same translation — is not idempotent: the position
+    /// that comes back from the daemon already contains the translation that was sent
+    /// last time, so sending the same cumulative translation twice applies the motion
+    /// twice. Measured in a VM against a 959pt container: one 40pt drag moved the
+    /// divider 80pt (2.12x) whenever `onChanged` and `onEnded` were more than 100ms
+    /// apart, which is every real drag. With `onChanged` and `onEnded` in the same
+    /// tick the two calls coalesce into one request and the result was correct
+    /// (1.11x) — which is why unit tests on the arithmetic never saw this.
     private func ratio(
         for split: PaneSurfaceSplit,
         drag: DragGesture.Value,
-        grid: CGSize,
-        surface: PaneSurfaceFrame
+        cellSize: CGSize,
+        anchoringAt position: UInt16
     ) -> Double {
-        let area = split.area
-        let translatedX = drag.translation.width / max(grid.width, 1)
-            * CGFloat(surface.frame.width)
-        let translatedY = drag.translation.height / max(grid.height, 1)
-            * CGFloat(surface.frame.height)
-        return Self.splitRatio(
+        Self.splitRatioForDrag(
             direction: split.direction,
-            position: split.position,
+            position: position,
+            area: split.area,
+            dragPoints: drag.translation,
+            cellSize: cellSize
+        )
+    }
+
+    /// The points-to-cells step, split out so it can be tested without a view.
+    ///
+    /// Delegates to ``PaneSplitAxis/ratio(position:area:dragPoints:cellSize:)``,
+    /// which is the public home of this arithmetic. Kept as a named entry point
+    /// because the tests read better calling it this way.
+    static func splitRatioForDrag(
+        direction: PaneSurfaceSplitDirection,
+        position: UInt16,
+        area: SurfaceRect,
+        dragPoints: CGSize,
+        cellSize: CGSize
+    ) -> Double {
+        PaneSplitAxis(direction).ratio(
+            position: position,
             area: area,
-            translatedX: translatedX,
-            translatedY: translatedY
+            dragPoints: dragPoints,
+            cellSize: cellSize
         )
     }
 
@@ -402,6 +480,46 @@ public enum PaneSplitAxis: Sendable {
         case .verticalDrag: .vertical
         case .horizontalDrag: .horizontal
         }
+    }
+
+    /// Converts a drag in points into the ratio the daemon expects.
+    ///
+    /// `DragGesture` reports **points**; the daemon's `position` and `area` are
+    /// **cells**. Going straight from one to the other is the mistake that made the
+    /// divider leap to an edge: the old conversion multiplied by
+    /// `surface.height / grid.height`, and those are the same number by
+    /// construction, so a 40-point drag counted as 40 rows — 0.89 of a 45-row
+    /// surface, straight into the 0.9 clamp.
+    ///
+    /// Lives on the axis type because "which way does this move" and "in what unit"
+    /// are the same question: each axis divides by the cell extent along itself.
+    ///
+    /// A zero cell size is possible (Ghostty reports 0 before its first frame), and
+    /// must not divide by zero; treating one point as one cell is wrong but bounded,
+    /// since the result is clamped anyway.
+    public func ratio(
+        position: UInt16,
+        area: SurfaceRect,
+        dragPoints: CGSize,
+        cellSize: CGSize
+    ) -> Double {
+        let cellsWide = cellSize.width > 0 ? cellSize.width : 1
+        let cellsHigh = cellSize.height > 0 ? cellSize.height : 1
+        let translatedX = dragPoints.width / cellsWide
+        let translatedY = dragPoints.height / cellsHigh
+        // `.vertical` names a horizontal divider line between stacked panes, so it
+        // moves along Y; `.horizontal` is a vertical line, so it moves along X.
+        let base: Double
+        let span: Double
+        switch self {
+        case .verticalDrag:
+            base = Double(position) - Double(area.originY) + Double(translatedY)
+            span = Double(max(area.height, 1))
+        case .horizontalDrag:
+            base = Double(position) - Double(area.originX) + Double(translatedX)
+            span = Double(max(area.width, 1))
+        }
+        return min(max(base / span, 0.1), 0.9)
     }
 }
 

@@ -260,15 +260,6 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         dispatch(command, target: target)
     }
 
-    /// Runs a command as if a context menu over `paneId` had raised it.
-    ///
-    /// Exists so a scripted probe can exercise the real dispatch path instead of
-    /// reimplementing it. Everything a click goes through — target resolution,
-    /// `CommandEnvironment`, `perform` — is the same code.
-    func runProbe(command: AppCommand, paneId: String?) {
-        dispatch(command, target: command.isPaneScoped ? paneId : nil)
-    }
-
     /// The one place a menu command becomes a store action.
     private func dispatch(_ command: AppCommand, target: String?) {
         guard let store else { return }

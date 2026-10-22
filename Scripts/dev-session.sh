@@ -30,7 +30,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 2
 
 APP="$ROOT/build/Kraal.app"
 STATE_DIR="${TMPDIR:-/tmp}/kraal-dev-$(id -u)"
