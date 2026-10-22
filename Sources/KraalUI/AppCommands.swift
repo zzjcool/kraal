@@ -80,6 +80,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
     case closePane = "close_pane"
     case renamePane = "rename_pane"
     case clearPane = "clear_pane"
+    case paste = "paste"
     case toggleZoom = "toggle_zoom"
     case focusLeft = "focus_left"
     case focusRight = "focus_right"
@@ -125,6 +126,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
         case .closePane: return "Close Pane"
         case .renamePane: return "Rename Pane…"
         case .clearPane: return "Clear Pane"
+        case .paste: return "Paste"
         case .toggleZoom: return "Toggle Pane Zoom"
         case .focusLeft: return "Focus Left"
         case .focusRight: return "Focus Right"
@@ -244,7 +246,7 @@ public extension AppCommand {
     /// there is no pane to act on. When these were separate switches, a command
     /// could be routed with a pane and validated without one.
     static let paneScopedCommands: Set<AppCommand> = [
-        .closePane, .clearPane, .toggleZoom, .renamePane,
+        .closePane, .clearPane, .paste, .toggleZoom, .renamePane,
         .splitRight, .splitDown, .previousPane, .nextPane,
         .focusLeft, .focusRight, .focusUp, .focusDown,
         .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
@@ -344,7 +346,7 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
          .focusTab6, .focusTab7, .focusTab8, .focusTab9:
         performNavigation(command, on: store)
 
-    case .splitRight, .splitDown, .clearPane, .toggleZoom,
+    case .splitRight, .splitDown, .clearPane, .paste, .toggleZoom,
          .focusLeft, .focusRight, .focusUp, .focusDown,
          .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
          .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown:
@@ -443,6 +445,17 @@ private func performPaneAction(
         if let target { store.splitPane(paneId: target, orientation: .down) }
     case .clearPane:
         if let target { store.clearPane(paneId: target) }
+    case .paste:
+        // Terminal paste is a wire event, not a keystroke replay — see
+        // `AppStore.sendPaste`. Routing both entry points here means ⌘V and the
+        // pane context menu take the same path. Before, ⌘V went through
+        // `NSText.paste` and the responder chain (which nothing in the pane
+        // implements, so it did nothing) while the context menu sent raw bytes
+        // (so every pasted newline arrived as Enter).
+        if let target, let text = NSPasteboard.general.string(forType: .string),
+           !text.isEmpty {
+            store.sendPaste(text, to: target)
+        }
     case .toggleZoom:
         if let target { store.toggleZoom(paneId: target) }
     default:

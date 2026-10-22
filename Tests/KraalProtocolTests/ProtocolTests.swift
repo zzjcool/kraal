@@ -523,6 +523,37 @@ struct ClientMessageEncodingTests {
         // | cell(0) | col 3 | row 4 | no geometry | mods 0 | lines 0
         #expect(Array(payload) == [13, 1, 0x70, 1, 2, 0, 1, 0, 3, 4, 0, 0, 0])
     }
+
+    /// Issue #20: pasted text was sent as keystrokes, so every newline arrived as
+    /// Enter and a three-line paste ran three commands. The wire already has a
+    /// dedicated paste event; this pins that it is tag 3 and carries the text as
+    /// one unit, newlines included.
+    @Test("paste encodes as its own event, not as text commits")
+    func pasteEvent() {
+        let payload = ClientMessageEncoder.encode(
+            .clientShellPaneInput(paneId: "p", events: [.paste("a\nb\n")])
+        )
+        // tag 13 | "p" | 1 event | paste(3) | len 4 | "a\nb\n"
+        #expect(Array(payload) == [13, 1, 0x70, 1, 3, 4, 0x61, 0x0A, 0x62, 0x0A])
+    }
+
+    /// Why the contrast is worth stating: the decoder coalesces runs of text into
+    /// one `textCommit`, so sending a paste as bytes does *not* produce a
+    /// per-character event stream on this side. The damage happens at the daemon:
+    /// a `textCommit` is typed into the program, newline by newline, whereas
+    /// `paste` tells it the text arrived as a unit. That difference is visible in
+    /// the tag (1 vs 3) — which the test above pins — not in the event count here.
+    @Test("pasted text decoded as input collapses into one text commit")
+    func textIsCoalesced() {
+        var decoder = TerminalInputDecoder()
+        let events = decoder.decode(Data("a\nb\n".utf8))
+        #expect(events.count == 1)
+        guard case let .textCommit(text) = events.first else {
+            Issue.record("expected a text commit, got \(events)")
+            return
+        }
+        #expect(text == "a\nb\n")
+    }
 }
 
 @Suite("Text projection")
@@ -686,6 +717,62 @@ struct TerminalInputDecoderTests {
             0x1B, 0x5B, 0x36, 0x7E, // PGDN
         ]))
         #expect(codes(events) == ["key(delete, m0)", "key(pageUp, m0)", "key(pageDown, m0)"])
+    }
+
+    /// Issue #20: SS3 was parsed as exactly three bytes with the modifier
+    /// hard-wired to 0, so `ESC O 1;5 P` (F1 with Ctrl, what a terminal sends when
+    /// modifyOtherKeys is on) decoded the `1` as the final byte and left `;5 P` to
+    /// be typed into the pane as literal text. Both halves are asserted: the key
+    /// event must be right, and nothing may be left over.
+    @Test("SS3 sequences carry their modifier parameter")
+    func ss3Modifiers() {
+        var decoder = TerminalInputDecoder()
+        // ESC O 1;5 P -> F1 with Ctrl.
+        let events = decoder.decode(Data([0x1B, 0x4F, 0x31, 0x3B, 0x35, 0x50]))
+        #expect(codes(events) == ["key(function(1), m2)"], "got \(codes(events))")
+        // Nothing may remain to be typed as text.
+        #expect(decoder.decode(Data()).isEmpty)
+
+        // A bare SS3 sequence still means "no modifier": `ESC O P` has no
+        // parameter at all, and `1` is xterm's way of writing "no modifier".
+        for bytes: [UInt8] in [
+            [0x1B, 0x4F, 0x50],
+            [0x1B, 0x4F, 0x31, 0x3B, 0x31, 0x50],
+        ] {
+            var bare = TerminalInputDecoder()
+            #expect(codes(bare.decode(Data(bytes))) == ["key(function(1), m0)"],
+                    "bytes \(bytes)")
+        }
+        // Arrows take the parameter too.
+        var arrow = TerminalInputDecoder()
+        #expect(codes(arrow.decode(Data([0x1B, 0x4F, 0x31, 0x3B, 0x33, 0x44])))
+            == ["key(arrowLeft, m4)"])
+    }
+
+    /// Issue #20: every key event was sent with `tracksRelease: false`, so a
+    /// program that enabled kitty's report-all-keys mode still saw a press as a
+    /// complete keystroke. The flag has to reach the wire field.
+    @Test("report-all-keys sets tracksRelease on key events")
+    func reportAllKeysSetsTracksRelease() {
+        var decoder = TerminalInputDecoder()
+        decoder.reportsAllKeys = true
+        let events = decoder.decode(Data([0x1B, 0x5B, 0x41])) // Up arrow
+        #expect(events.count == 1)
+        guard case let .key(_, _, _, _, _, _, tracksRelease, _, _) = events.first else {
+            Issue.record("expected a key event, got \(events)")
+            return
+        }
+        #expect(tracksRelease)
+
+        // Off by default: a program that never asked must keep getting plain
+        // presses, or every program would start seeing duplicate keystrokes.
+        var plain = TerminalInputDecoder()
+        let plainEvents = plain.decode(Data([0x1B, 0x5B, 0x41]))
+        guard case let .key(_, _, _, _, _, _, plainTracks, _, _) = plainEvents.first else {
+            Issue.record("expected a key event, got \(plainEvents)")
+            return
+        }
+        #expect(!plainTracks)
     }
 
     @Test("function keys decode from both SS3 and CSI forms")

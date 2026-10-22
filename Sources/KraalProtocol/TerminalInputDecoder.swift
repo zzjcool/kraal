@@ -25,6 +25,17 @@ public struct TerminalInputDecoder {
     /// complete escape sequence.
     private var pending: [UInt8] = []
 
+    /// Whether the focused program asked for every key event, including bare
+    /// modifiers and releases (`ServerMessage::ClientShellKeyboardReportAll`).
+    ///
+    /// Upstream keeps this per connection and pushes it to the host terminal as
+    /// the kitty "report all keys" enhancement (`shell_runtime.rs:98-115`). Here it
+    /// decides the wire field the daemon reads: `tracksRelease` tells the program
+    /// that a press will be followed by a release, so a program that enabled the
+    /// mode stops treating the first event as a complete keystroke. Leaving it
+    /// false while the mode is on is why the setting appeared to do nothing.
+    public var reportsAllKeys = false
+
     public init() {}
 
     /// Maximum bytes buffered while waiting for a sequence to complete. A real
@@ -66,7 +77,7 @@ public struct TerminalInputDecoder {
                     repeatCount: 1,
                     shiftedCodepoint: nil,
                     generatedText: nil,
-                    tracksRelease: false,
+                    tracksRelease: reportsAllKeys,
                     physicalKeyId: nil,
                     windowsRecord: nil
                 ))
@@ -112,7 +123,7 @@ public struct TerminalInputDecoder {
             repeatCount: 1,
             shiftedCodepoint: nil,
             generatedText: nil,
-            tracksRelease: false,
+            tracksRelease: reportsAllKeys,
             physicalKeyId: nil,
             windowsRecord: nil
         )
@@ -139,7 +150,7 @@ public struct TerminalInputDecoder {
                 repeatCount: 1,
                 shiftedCodepoint: nil,
                 generatedText: nil,
-                tracksRelease: false,
+                tracksRelease: reportsAllKeys,
                 physicalKeyId: nil,
                 windowsRecord: nil
             )
@@ -156,7 +167,7 @@ public struct TerminalInputDecoder {
             repeatCount: 1,
             shiftedCodepoint: nil,
             generatedText: nil,
-            tracksRelease: false,
+            tracksRelease: reportsAllKeys,
             physicalKeyId: nil,
             windowsRecord: nil
         )
@@ -174,24 +185,21 @@ public struct TerminalInputDecoder {
         guard start + 2 < bytes.count else { return nil }
         let introducer = bytes[start + 1]
         let bodyStart = start + 2
-        let modifiers: UInt8 = 0
 
-        if introducer == 0x4F { // SS3: ESC O <final>
-            let final = bytes[bodyStart]
-            return (3, ss3Event(final, modifiers: modifiers))
-        }
-
-        // CSI: parameters then a final byte in 0x40...0x7E.
+        // Both forms are "parameters then a final byte in 0x40...0x7E". SS3 was
+        // special-cased as exactly three bytes with no parameters, which dropped
+        // the modifier parameter: `ESC O 1;5 P` (F1+Ctrl, what xterm sends when
+        // modifyOtherKeys is on) decoded the `1` as the final and left `;5 P` to
+        // be typed into the pane as text. Reading the shape once for both means
+        // there is no second code path to forget.
         var cursor = bodyStart
         var parameters = ""
         while cursor < bytes.count {
             let byte = bytes[cursor]
             if byte >= 0x40, byte <= 0x7E {
-                let event = csiEvent(
-                    final: byte,
-                    parameters: parameters,
-                    modifiers: modifiers
-                )
+                let event = introducer == 0x4F
+                    ? ss3Event(byte, parameters: parameters)
+                    : csiEvent(final: byte, parameters: parameters, modifiers: 0)
                 return (cursor - start + 1, event)
             }
             parameters.append(Character(UnicodeScalar(byte)))
@@ -201,7 +209,17 @@ public struct TerminalInputDecoder {
         return nil
     }
 
-    private func ss3Event(_ final: UInt8, modifiers: UInt8) -> ClientPaneInputEvent? {
+    private func ss3Event(
+        _ final: UInt8,
+        parameters: String
+    ) -> ClientPaneInputEvent? {
+        // `ESC O` takes the same `;N` modifier parameter as the CSI form, so the
+        // rule lives in one place. A bare `ESC O P` has no parameter at all and
+        // must stay unmodified rather than be treated as malformed.
+        let parts = parameters.split(separator: ";").compactMap { Int($0) }
+        let modifiers: UInt8 = parts.count >= 2
+            ? TerminalInputDecoder.modifiers(fromXterm: parts[1])
+            : 0
         switch final {
         case 0x41: return key(.arrowUp, modifiers: modifiers)
         case 0x42: return key(.arrowDown, modifiers: modifiers)
@@ -218,7 +236,7 @@ public struct TerminalInputDecoder {
                 repeatCount: 1,
                 shiftedCodepoint: nil,
                 generatedText: nil,
-                tracksRelease: false,
+                tracksRelease: reportsAllKeys,
                 physicalKeyId: nil,
                 windowsRecord: nil
             )
@@ -263,7 +281,7 @@ public struct TerminalInputDecoder {
                     repeatCount: 1,
                     shiftedCodepoint: nil,
                     generatedText: nil,
-                    tracksRelease: false,
+                    tracksRelease: reportsAllKeys,
                     physicalKeyId: nil,
                     windowsRecord: nil
                 )
@@ -275,7 +293,7 @@ public struct TerminalInputDecoder {
                     repeatCount: 1,
                     shiftedCodepoint: nil,
                     generatedText: nil,
-                    tracksRelease: false,
+                    tracksRelease: reportsAllKeys,
                     physicalKeyId: nil,
                     windowsRecord: nil
                 )

@@ -38,6 +38,7 @@ struct Options {
         case call
         case keys
         case sendText
+        case paste
     }
 }
 
@@ -135,6 +136,7 @@ func parse() -> Options {
         case "call": options.command = .call
         case "keys": options.command = .keys
         case "send-text": options.command = .sendText
+        case "paste": options.command = .paste
         case "--help", "-h":
             printUsage()
             exit(0)
@@ -328,7 +330,7 @@ struct KraalCLI {
         case .call:
             await runCall(options: options, connection: connection)
 
-        case .keys, .sendText:
+        case .keys, .sendText, .paste:
             await runInput(options: options, connection: connection)
         }
     }
@@ -374,9 +376,9 @@ struct KraalCLI {
         }
         let text: String
         switch options.command {
-        case .sendText:
+        case .sendText, .paste:
             guard let provided = options.text else {
-                fail("--text is required for `send-text`")
+                fail("--text is required for `send-text` / `paste`")
             }
             text = provided
         default:
@@ -386,8 +388,17 @@ struct KraalCLI {
         // so the CLI's own surface read does not race the echo.
         try? await Task.sleep(nanoseconds: 200_000_000)
         do {
-            try await connection.sendPaneInput(paneId, events: [.textCommit(text)])
-            print("sent \(text.count) characters to \(paneId)")
+            // `paste` sends the dedicated event, not keystrokes. The two differ at
+            // the daemon: text commits are typed into the program one at a time,
+            // while a paste arrives as one unit (which is what lets a shell offer
+            // "paste N lines?" instead of running them). Having both here makes
+            // the difference observable instead of theoretical.
+            let event: ClientPaneInputEvent = options.command == .paste
+                ? .paste(text)
+                : .textCommit(text)
+            try await connection.sendPaneInput(paneId, events: [event])
+            print("sent \(text.count) characters to \(paneId) as "
+                + (options.command == .paste ? "paste" : "text"))
         } catch {
             fail("send failed: \(error)")
         }

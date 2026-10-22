@@ -134,6 +134,19 @@ daemon」——这是错的，沙箱里完全可以再起一个 session（见
 **推论**：任何"检测 + 修复"脚本，第一次运行前先在**已知健康**的环境里跑一遍，
 确认它报健康；再手工破坏，确认它报缺失。只验后者会漏掉"永远通过"。
 
+**同日第二例（`gui.sh` 的断言与退出码脱钩）**：`check` 把失败记进
+`ASSERTION_FAILURES`，但 `run_case` 只按 `fixture`/`action`/`assert` 的**返回码**
+判成败。`assert` 最后一条 `check` 通过就返回 0，于是一个打印了
+`✗ the app sent the text as a paste event` 的用例被判为 **passed**，退出码 0 ——
+门禁对它专门要抓的那个 bug 无法失败。
+
+它是一次真实观察暴露的：`paste` 用例的第一版 `assert` 以失败的 `check` 开头、
+以通过的 `check` 结尾，输出 `✗ … ✓ …` 却显示 `ok: paste passed`。
+修法是让 `ASSERTION_FAILURES > 0` 直接参与判定。
+
+> **一条门禁必须能红。** 写完断言先故意让它失败一次（本次是 A/B 回退成
+> `sendInput`），看到退出码 1 才算这条门禁存在。
+
 ## 9. 路径含版本号 = 授权会静默失效
 
 TCC 的 `client` 列存**解析符号链接后的绝对路径**，而 Homebrew 的 Cellar 路径含
