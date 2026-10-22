@@ -85,6 +85,23 @@ else
     check 1 "swiftlint (not installed)"
 fi
 
+section "shell lint"
+# The scripts are part of the product here: gui.sh is the GUI gate, so a broken
+# gui.sh is a broken gate. shellcheck is not installed by default, same policy as
+# swiftlint (missing tool = failure, not silence).
+if command -v shellcheck >/dev/null 2>&1; then
+    SHELL_BAD=0
+    for f in Scripts/*.sh; do
+        shellcheck -S warning "$f" || SHELL_BAD=1
+    done
+    check "$SHELL_BAD" "shellcheck ($(ls Scripts/*.sh | wc -l | tr -d ' ') scripts)"
+elif [ "${KRAAL_SKIP_LINT:-0}" = "1" ]; then
+    printf 'shellcheck not installed; skipped because KRAAL_SKIP_LINT=1\n'
+else
+    printf 'shellcheck not found on PATH\n'
+    check 1 "shellcheck (not installed)"
+fi
+
 if [ "${1:-}" != "--fast" ]; then
     section "app bundle"
     ./Scripts/build-app.sh > "$SCRATCH/app-build.log" 2>&1

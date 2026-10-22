@@ -10,6 +10,11 @@ SPDX-FileCopyrightText: 2026 zzjcool
 `docs/` 下是**知识**（协议怎么工作、环境什么版本），这份是**行为**（该跑什么、
 不该做什么、验证到什么程度算完）。两者冲突时以 `docs/` 的实测记录为准。
 
+**第一次进这个仓库、或者换了一台机器，先读 `docs/RUNNING.md`**——那是一份从
+clone 到能验证 UI 改动的最短路径清单（装什么、跑什么、缺什么会表现成什么样）。
+
+文档分工见文末 §5。
+
 ---
 
 ## 0. 三条硬规则
@@ -17,7 +22,14 @@ SPDX-FileCopyrightText: 2026 zzjcool
 ### 0.1 不留探索区
 
 **不要**用真实 herdr 会话做实验：不在这台机器上正在使用的 workspace 里 split /
-close / 发键盘输入 / 改布局。开发与自测必须在隔离环境里做
+close / 发键盘输入 / 改布局。
+
+**桌面本身也算探索区。** 驱动真实窗口会夺走指针和键盘——为了调一个拖拽，曾经
+反复 `activate()` 把窗口拉到前台，把正在干活的人打断了。所以 `gui.sh` 默认后端
+是 `vm`；`local` 下要前台的用例会被直接拒绝，除非显式
+`KRAAL_GUI_ALLOW_FOCUS=1`。
+
+开发与自测必须在隔离环境里做
 （`docs/ENVIRONMENT.md` §4.3、§4.4）。
 
 本项目开发期间发生过：反复在 agent 自己正在运行的 workspace 里 split，
@@ -281,11 +293,14 @@ swiftlint --quiet Sources Tests
 | 文件 | 写什么 |
 |---|---|
 | `README.md` | 是什么、怎么开始、致谢 |
+| `docs/RUNNING.md` | **怎么跑起来**：上手顺序、命令、迁移到新机器 |
 | `docs/ROADMAP.md` | 里程碑与完成状态 |
 | `docs/DESIGN.md` | 协议与架构设计 |
-| `docs/ENVIRONMENT.md` | **实测**的环境事实：版本、隔离方式、多机验证、Tart VM |
+| `docs/ENVIRONMENT.md` | **实测的环境事实**：版本、隔离方式、多机验证、Tart VM、TCC |
+| `docs/AUTOMATION.md` | GUI 验证闭环：方案、实测数据、未验证项 |
 | `docs/DEBUGGING.md` | **怎么验证一件事是真的**（排查教训） |
-| `AGENTS.md`（本文件） | agent 的操作约定：跑什么命令、验证到什么程度 |
+| `AGENTS.md`（本文件） | agent 的行为约定：跑什么、验证到什么程度算完 |
 
-新发现的排查教训进 `DEBUGGING.md`；新发现的环境事实进 `ENVIRONMENT.md`。
-两处都写明**实测日期**和**未验证的部分**。
+新发现的排查教训进 `DEBUGGING.md`；新发现的环境事实进 `ENVIRONMENT.md`；
+新的操作步骤（装什么、跑什么、怎么迁移）进 `RUNNING.md`。
+都写明**实测日期**和**未验证的部分**。

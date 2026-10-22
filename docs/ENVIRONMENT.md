@@ -316,10 +316,49 @@ tart exec kraal-agent uname -a # 不要写 `--`，会 exit 125
 健康自检（三条都应通过）：
 
 ```bash
+./Scripts/vm-bootstrap.sh                                     # 一次检查全部前置条件
 tart exec kraal-agent /bin/bash -lc 'launchctl managername'   # 必须是 Aqua
 ./Scripts/gui.sh probe                                        # axTrusted=true
 ./Scripts/gui.sh run split-right                              # panes 1 -> 2
 ```
+
+#### guest 内的 TCC 授权（迁移时最容易漏的一步）
+
+`tart exec` 走 guest agent，所以**需要授权的进程是 `tart-guest-agent`，不是
+sshd、也不是 Kraal**。三条缺一不可（2026-10-22 实测的条目格式）：
+
+```
+kTCCServiceAccessibility   auth_value=2   AXPress 与元素树
+kTCCServicePostEvent       auth_value=2   CGEvent 点击/拖拽/键盘
+kTCCServiceScreenCapture   auth_value=2   screencapture
+```
+
+`client_type=1` 表示按绝对路径匹配（`/opt/homebrew/Cellar/tart-guest-agent/<ver>/bin/tart-guest-agent`），
+`auth_value=2` 表示允许。
+
+**失败表现很误导**：只缺 `PostEvent` 时，`AXPress` 照常工作，于是
+`split-right` 这类用例全绿，但 `drag-divider` 会报"拖拽没生效"，
+看起来像拖拽功能坏了。缺 `ScreenCapture` 时 `screencapture` 返回 0 却写出
+全黑 PNG（§8.4）。
+
+写入需要 guest 内 **SIP 关闭**（base 镜像默认关闭）。自动修复：
+
+```bash
+./Scripts/vm-bootstrap.sh --fix-tcc
+```
+
+手动等价（guest 内，需 `sqlite3`）：
+
+```sql
+insert or replace into access
+  (service, client, client_type, auth_value, auth_reason, auth_version,
+   csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier,
+   indirect_object_code_identity, flags, last_modified)
+values ('kTCCServicePostEvent', '<agent 绝对路径>', 1, 2, 0, 1,
+        NULL, NULL, 0, 'UNUSED', NULL, 0, strftime('%s','now'));
+```
+
+之后 `killall tccd` 并重启 guest agent 才会生效。
 
 第一条最关键：`tart exec` 落在 **Aqua** 会话是合成事件能进 app 的唯一原因
 （§4.5）。如果这里返回 `Background`，`drag-divider` 这类用例会全部失败，

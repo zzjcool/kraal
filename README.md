@@ -64,13 +64,44 @@ surface 逐行一致 36/36」，所以渲染结果与桌面端一致。
 ## 快速开始
 
 ```bash
-# 构建、测试、lint 一次跑完
+# 构建、测试、lint、GUI 门禁一次跑完
 ./Scripts/verify.sh
 
 # 打包成真正的 .app（ad-hoc 签名）并启动
 ./Scripts/build-app.sh
 open build/Kraal.app
 ```
+
+### 换一台机器 / 新 clone 之后（agent 和人都看这里）
+
+两条命令起步，其余自动：
+
+```bash
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer   # CLT 缺 XCTest
+./Scripts/build-app.sh            # 打包（VM 里没有 Xcode，必须在宿主做）
+./Scripts/gui.sh probe            # 起 VM → 部署 → 自检
+```
+
+`gui.sh` 默认后端是 **`vm`**，它跑在一个叫 `kraal-agent` 的 Tart 虚拟机上。第一次
+在新机器上跑，先执行一次（幂等，已有就只做检查）：
+
+```bash
+./Scripts/vm-bootstrap.sh
+```
+
+它会：检查 `tart` → 没有就 clone（走国内镜像源）→ headless 启动 → **确认
+`launchctl managername` 是 `Aqua`** → 检查三条约 TCC 授权。
+
+如果是全新机器，有两件事 `bootstrap` 只能报告、不能替你决定：
+
+| 缺什么 | 症状 | 怎么补 |
+| --- | --- | --- |
+| guest 内 SIP 未关 | 写不了 `TCC.db`，三条约授权缺失 | 关 SIP（`docs/ENVIRONMENT.md` §4.6） |
+| tart-guest-agent 未被授权 | `AXPress` 能用但点击/拖拽/截图全部失效，看起来像产品 bug | `./Scripts/vm-bootstrap.sh --fix-tcc` |
+
+**为什么不能用 `local` 后端：** 它会驱动你正在用的那张桌面，夺走指针和键盘。
+`local` 只用于需要真 GPU 的视觉判断，且会拒绝任何要前台的用例，除非显式
+`KRAAL_GUI_ALLOW_FOCUS=1`。
 
 Kraal 启动时会自动连本机。没连上（Herdr 没跑）会显示连接面板，
 也可以直接连远端：
