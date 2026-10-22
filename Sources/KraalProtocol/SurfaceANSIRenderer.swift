@@ -26,6 +26,15 @@ import Foundation
 public struct SurfaceANSIRenderer {
     /// Cells from the previous frame, for diffing. Empty until the first render.
     private var previous: FrameData?
+    /// Where the cursor was last *shown*.
+    ///
+    /// A frame with no cursor, or with a hidden one, still has to put the host
+    /// cursor somewhere: parking it at the last visible position keeps the IME
+    /// candidate window near the text the user is typing instead of in a corner.
+    private var lastVisibleCursor: (row: UInt16, column: UInt16)?
+    /// The DECSCUSR shape currently applied, so the sequence is only re-emitted
+    /// when it changes.
+    private var lastShape: UInt8 = 0
 
     public init() {}
 
@@ -36,6 +45,11 @@ public struct SurfaceANSIRenderer {
     /// leaves the tail of each row behind.
     public mutating func reset() {
         previous = nil
+        // The screen is being cleared, so a parked cursor position from the old
+        // frame points at nothing. Forget it rather than emit a CUP into a region
+        // that no longer has content.
+        lastVisibleCursor = nil
+        lastShape = 0
     }
 
     /// Returns the ANSI bytes that bring a terminal from the previous frame to
@@ -81,19 +95,28 @@ public struct SurfaceANSIRenderer {
             appendRow(row, frame: frame, stream: &stream, output: &output)
         }
 
-        // Cursor: only when it moved or its visibility flipped, and never while
-        // a patch leaves it hidden. The `?25l` above is unconditional, so
-        // re-showing is what has to be conditional — otherwise every frame would
-        // emit a redundant `?25h`.
-        if let cursor = frame.cursor, cursor.visible {
-            let moved = previous?.cursor.map {
-                $0.column != cursor.column || $0.row != cursor.row
-            } ?? true
-            if moved {
-                output.appendUTF8("\u{1B}[\(Int(cursor.row) + 1);\(Int(cursor.column) + 1)H")
-            }
-            output.appendUTF8("\u{1B}[?25h")
+        // Cursor. Three separate requirements, all from `render_ansi.rs:778`
+        // (`resolve_host_cursor_state`) and `:838` (`write_host_cursor_state`):
+        //
+        //   position — move it even when hidden, so a hidden cursor does not sit
+        //              where the previous program left it (the IME candidate
+        //              window follows the cursor, and parked in a corner it looks
+        //              broken).
+        //   shape    — DECSCUSR (`CSI Ps SP q`), only when it changed. Without
+        //              it a bar or underline cursor is always drawn as a block.
+        //   visible  — `?25h` last, so the cursor never flashes at an
+        //              intermediate position.
+        //
+        // A frame with no cursor at all still hides the host cursor, at its last
+        // visible position.
+        let hostCursor = resolveHostCursor(frame)
+        lastVisibleCursor = hostCursor.visible ? (hostCursor.row, hostCursor.column) : lastVisibleCursor
+        output.appendUTF8("\u{1B}[\(Int(hostCursor.row) + 1);\(Int(hostCursor.column) + 1)H")
+        if hostCursor.shape != lastShape {
+            output.appendUTF8("\u{1B}[\(hostCursor.shape) q")
+            lastShape = hostCursor.shape
         }
+        output.appendUTF8(hostCursor.visible ? "\u{1B}[?25h" : "\u{1B}[?25l")
 
         // Close the synchronized-output pair opened above. Unconditional, to
         // match the unconditional open — a diff frame that opened `?2026h` and
@@ -103,6 +126,37 @@ public struct SurfaceANSIRenderer {
 
         previous = frame
         return output
+    }
+
+    /// Where the host cursor goes, and whether it is shown.
+    ///
+    /// Mirror of the daemon's `resolve_host_cursor_state`. The only non-obvious
+    /// case is "no cursor at all": park at the last place it was visible, or at
+    /// the bottom-right corner when there is none, and hide it.
+    private func resolveHostCursor(_ frame: FrameData) -> HostCursor {
+        let maxRow = frame.height &- 1
+        let maxColumn = frame.width &- 1
+        func clamp(_ row: UInt16, _ column: UInt16) -> HostCursor {
+            HostCursor(row: min(row, maxRow), column: min(column, maxColumn))
+        }
+        guard let cursor = frame.cursor else {
+            var parked = lastVisibleCursor.map { clamp($0.row, $0.column) }
+                ?? HostCursor(row: maxRow, column: maxColumn)
+            parked.visible = false
+            return parked
+        }
+        var resolved = clamp(cursor.row, cursor.column)
+        resolved.visible = cursor.visible
+        // DECSCUSR takes 0–6; anything else means "terminal default".
+        resolved.shape = cursor.shape <= 6 ? cursor.shape : 0
+        return resolved
+    }
+
+    private struct HostCursor {
+        var row: UInt16
+        var column: UInt16
+        var visible = false
+        var shape: UInt8 = 0
     }
 
     // MARK: - Row diffing
@@ -243,15 +297,32 @@ enum StyleCode {
         var foreground = TerminalColor(raw: cell.foreground)
         var background = TerminalColor(raw: cell.background)
 
-        let reversed = cell.modifier & (CellModifier.reverse | CellModifier.reversed) != 0
+        let reversed = cell.modifier & CellModifier.reversed != 0
         if reversed {
+            // The daemon swaps the two colours *and* emits `7`
+            // (`render_ansi.rs:455`): the swap makes the actual colours right,
+            // and `7` tells the terminal so that anything it draws itself — a
+            // selection, the cursor block — inverts too.
             swap(&foreground, &background)
         }
         if cell.modifier & CellModifier.bold != 0 { parts.append("1") }
         if cell.modifier & CellModifier.dim != 0 { parts.append("2") }
         if cell.modifier & CellModifier.italic != 0 { parts.append("3") }
-        if cell.modifier & CellModifier.underline != 0 { parts.append("4") }
-        if cell.modifier & CellModifier.blink != 0 { parts.append("5") }
+        if cell.modifier & CellModifier.underline != 0 {
+            // The extended form carries the style: `4:2` double, `4:3` curly,
+            // `4:4` dotted, `4:5` dashed (`render_ansi.rs:445`). Plain `4` means
+            // "single", so an unset style keeps the short form.
+            switch CellModifier.underlineStyle(cell.modifier) {
+            case 2: parts.append("4:2")
+            case 3: parts.append("4:3")
+            case 4: parts.append("4:4")
+            case 5: parts.append("4:5")
+            default: parts.append("4")
+            }
+        }
+        if cell.modifier & CellModifier.slowBlink != 0 { parts.append("5") }
+        if cell.modifier & CellModifier.rapidBlink != 0 { parts.append("6") }
+        if reversed { parts.append("7") }
         if cell.modifier & CellModifier.hidden != 0 { parts.append("8") }
         if cell.modifier & CellModifier.strikethrough != 0 { parts.append("9") }
 

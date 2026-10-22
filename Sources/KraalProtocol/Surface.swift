@@ -249,6 +249,16 @@ public enum SurfaceText {
 
     /// East Asian width check, matching the daemon's own continuation rules.
     public static func isWide(_ symbol: String) -> Bool {
+        // Halfwidth katakana plus a voiced sound mark is one grapheme that takes
+        // **two** columns even though neither scalar is wide on its own — the
+        // base sits in the halfwidth block and `FF9E`/`FF9F` are combining marks,
+        // so the East-Asian-width lookup on the first scalar answers 1 and every
+        // glyph after it shifts one column left.
+        //
+        // `render_ansi.rs:757` `is_halfwidth_katakana_voiced_grapheme` handles
+        // exactly this pair; a general width table cannot, which is why it is a
+        // special case over there too.
+        if isHalfwidthKatakanaVoiced(symbol) { return true }
         guard let first = symbol.unicodeScalars.first else { return false }
         let value = first.value
         return (0x1100 ... 0x115F).contains(value)
@@ -260,5 +270,15 @@ public enum SurfaceText {
             || (0xFFE0 ... 0xFFE6).contains(value)
             || (0x1F300 ... 0x1F9FF).contains(value)
             || (0x20000 ... 0x3FFFD).contains(value)
+    }
+
+    /// `U+FF66...U+FF9D` followed by `U+FF9E`/`U+FF9F` and nothing else.
+    private static func isHalfwidthKatakanaVoiced(_ symbol: String) -> Bool {
+        var iterator = symbol.unicodeScalars.makeIterator()
+        guard let base = iterator.next(), let mark = iterator.next(), iterator.next() == nil else {
+            return false
+        }
+        guard (0xFF66 ... 0xFF9D).contains(base.value) else { return false }
+        return mark.value == 0xFF9E || mark.value == 0xFF9F
     }
 }
