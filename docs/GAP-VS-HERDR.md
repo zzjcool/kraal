@@ -94,8 +94,30 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 | IME 光标锚点 | `experimental.reveal_hidden_cursor_for_cjk_ime`（`render_ansi.rs:852+`） | ✅ 语义等价，见下方说明 | ✅ **不需要上游那个开关** |
 | 同步输出 | `?2026h/l` 包帧 | ✅ `SurfaceANSIRenderer.swift:80,124` | ✅ |
 | Kitty graphics | 完整 `\x1b_G` 编码 + 文件直传（`kitty_graphics.rs`） | `graphics: Data()` 恒空（`PaneTerminal.swift:408`），`SurfaceGraphicsScene` 解了不用 | ❌ 图片/图表不显示 |
-| 滚动条 | `scrollbar_rect` + `ui.pane_scrollbars`（`ui/scrollbar.rs`） | `scrollbarRect` 解出来但**没有人画**（全仓 grep 只在 Decoder/Wire） | ❌ 见 §5 |
+| 滚动条 | `scrollbar_rect` + `ui.pane_scrollbars`（`ui/scrollbar.rs`） | ✅ SwiftUI 叠加层（`PaneScrollbar.swift`），画在 daemon 预留的 lane 里 | ✅ 指示器可看，**不可点/拖**（见下） |
 | 滚动位置指示 | copy mode 底栏 `{cur}/{total}`（`render.rs:170-176`） | 无 | ❌ |
+
+### 滚动条：画在哪、为什么不可点
+
+daemon 发两个字段：`scrollbar_rect`（**轨道**，1 cell 宽、pane 全高的绝对坐标）和
+`scroll`（offset / max / viewport 三个数）。两个字段从协议层就一直解着，UI 零引用
+——所以 pane 里从来没有滚动位置指示。
+
+实现分两块：
+
+- `PaneScrollbar.thumb` 是纯函数，照着上游 `ui/scrollbar.rs:41-70` 逐行移植（含
+  `round()`）。拇指长度 = `viewport / (max + viewport) * lane`，位置 = 从顶部算的
+  比例。
+- 画法是 **SwiftUI 叠加层**，不是往 ANSI 流里写字。原因：每帧 cell 都被重新编码成
+  VT 序列喂给真实 Ghostty surface，写字进 lane 等于写进 Ghostty 的 scrollback，
+  而 daemon 的 scrollback 是另一份，两边会不一致，下一次 diff 就会画错行。daemon
+  是画进自己的 buffer，本客户端的等价物就是叠加层。
+
+**是不可点的**（`allowsHitTesting(false)`）。点击/拖拽的换算
+（`offset(forClickAtRow:)` / `offset(forDragToRow:)` / `grabOffset(atRow:)`）已经写好
+并有测试，但还没接线：pane 的鼠标输入属于它的 AppKit surface，在同一个 pane 上开
+第二条 hit-test 路径正是两套代码对「这一下点击是什么意思」产生分歧的来源。接线时
+要记住 `AGENTS.md` 的「一条连接一个命令」——滚动不能和 focus 在同一 tick 发。
 
 ### IME 光标锚点：为什么这里不需要上游那个开关
 

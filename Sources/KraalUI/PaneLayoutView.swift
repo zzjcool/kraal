@@ -84,6 +84,47 @@ struct PaneLayoutView: View {
                             // shrink it made Ghostty compute a narrower grid
                             // than the cells it was sent, and every row wrapped.
                             .frame(width: frame.width, height: frame.height)
+                            // The scroll indicator, in the lane the daemon
+                            // reserved for it.
+                            //
+                            // Attached **before** `.position` on purpose. After
+                            // `.position` the view's bounds are the whole pane
+                            // container, not the pane — that is the contract
+                            // `PaneFrameReporter` relies on (`:625-640`), and the
+                            // reason it has to add the pane's offset by hand. An
+                            // overlay attached there covers every pane at once, so
+                            // the lane landed a pane-width to the left of where it
+                            // belonged (and always at the container's top edge
+                            // vertically). Here the bounds are exactly the pane, so
+                            // the lane's container coordinates can be rebased onto
+                            // the pane origin by subtracting it.
+                            .overlay(alignment: .topLeading) {
+                                if let lane = pane.scrollbarRect {
+                                    let laneFrame = rect(
+                                        for: lane,
+                                        grid: grid,
+                                        in: proxy.size,
+                                        cellSize: pointsPerCell
+                                    )
+                                    let localLane = PaneScrollbarOverlay.laneRect(
+                                        lane: laneFrame,
+                                        pane: frame
+                                    )
+                                    PaneScrollbarOverlay(
+                                        lane: localLane,
+                                        thumb: pane.scrollbarThumb,
+                                        // In cells, straight from the daemon — the
+                                        // overlay needs it to size a cell, and it
+                                        // cannot be recovered from the thumb.
+                                        laneCells: pane.scrollbarLaneHeight ?? 0,
+                                        paneId: pane.paneId,
+                                        paneSize: frame.size,
+                                        isFocused: pane.focused
+                                    )
+                                    .frame(width: localLane.width, height: localLane.height)
+                                    .position(x: localLane.midX, y: localLane.midY)
+                                }
+                            }
                             // `position`, not `offset`: offset is a rendering
                             // transform applied after layout, so the pane's real
                             // NSView never moves and reports the wrong rectangle
