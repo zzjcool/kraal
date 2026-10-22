@@ -309,6 +309,25 @@ struct SurfaceANSIRendererTests {
         #expect(afterReset.contains("\u{1B}[2J"), "a reset must clear: \(afterReset)")
     }
 
+    /// The visibility the frame leaves the terminal in.
+    ///
+    /// Every frame opens with `?25l`, so `contains("?25l")` is true for any input
+    /// and proves nothing. The last switch is the state the terminal ends in, and
+    /// that is the one the IME anchor is read against.
+    private enum Visibility { case hidden, visible }
+
+    private func lastVisibilitySwitch(in text: String) -> Visibility? {
+        let hide = text.range(of: "\u{1B}[?25l", options: .backwards)
+        let show = text.range(of: "\u{1B}[?25h", options: .backwards)
+        switch (hide, show) {
+        case (nil, nil): return nil
+        case (.some, nil): return .hidden
+        case (nil, .some): return .visible
+        case let (hide?, show?):
+            return hide.lowerBound > show.lowerBound ? .hidden : .visible
+        }
+    }
+
     @Test("the cursor is hidden before any cell write, on every frame")
     func cursorHiddenBeforeCellWrites() {
         // The cursor is moved with CUP while painting, so a terminal that draws
@@ -369,12 +388,17 @@ struct SurfaceANSIRendererTests {
     // happened to be left — the top-left corner of the pane, or the position of
     // whatever last drew — which is what "候选框位置不对" looks like.
     //
-    // These cases were implemented in `e7f6983`. There *was* one test for the
-    // parking behaviour (`ANSIConformanceTests.hiddenCursorParked`, ported from
-    // `render_ansi.rs:2218`), but it only asserted that the output contains a
-    // bare `"H"` — any CUP satisfies that, so it could not tell the right
-    // coordinate from a wrong one, and it said nothing about a *hidden* cursor
-    // being positioned at all. These assert the coordinate.
+    // These cases were implemented in `e7f6983`. One test existed
+    // (`ANSIConformanceTests.hiddenCursorParked`, ported from
+    // `render_ansi.rs:2218`), and it does pin that *a* CUP is still emitted for a
+    // hidden cursor: its second frame is 1x1 with identical cells, so there is no
+    // row-level CUP and the only `H` in the output can be the cursor's.
+    //
+    // What it cannot pin is the *coordinate* — both of its frames put the cursor
+    // at (0,0), so "the right cell" and "wherever it was parked" are byte for
+    // byte identical. Its `contains("H")` would also be satisfied by a CUP that
+    // some future row writer emitted for another reason. These tests assert the
+    // coordinate itself.
 
     /// A pane that hid its cursor (`?25l`, what vim's normal mode and every TUI
     /// drawing its own cursor does) must still have the host cursor *moved* to
@@ -395,8 +419,13 @@ struct SurfaceANSIRendererTests {
         // Row 2, column 5 → CUP `3;6` (1-based).
         #expect(text.contains("\u{1B}[3;6H"), "the hidden cursor was not positioned: \(text)")
         // ...and it is still hidden, because the program asked for that.
-        #expect(text.contains("\u{1B}[?25l"))
+        //
+        // Asserting `contains("?25l")` here would prove nothing: every frame opens
+        // with an unconditional `?25l` before the cell writes, so it is true for
+        // any input. What matters is the *terminal* state the frame ends in, so
+        // this checks the last visibility switch instead.
         #expect(!text.contains("\u{1B}[?25h"), "a hidden cursor must not be revealed")
+        #expect(lastVisibilitySwitch(in: text) == .hidden, "frame did not end hidden: \(text)")
     }
 
     /// A frame carrying no cursor at all — the daemon's way of saying "the
@@ -428,7 +457,7 @@ struct SurfaceANSIRendererTests {
         let second = String(bytes: renderer.render(cursorless), encoding: .utf8) ?? ""
         #expect(second.contains("\u{1B}[2;5H"),
                 "the anchor left its last visible position: \(second)")
-        #expect(second.contains("\u{1B}[?25l"),
+        #expect(lastVisibilitySwitch(in: second) == .hidden,
                 "a cursorless frame must leave the host cursor hidden")
     }
 

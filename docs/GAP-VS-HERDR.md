@@ -92,7 +92,7 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 | `SLOW_BLINK`/`RAPID_BLINK` 位 | bit4 → `5`，bit5 → `6`（`render_ansi.rs:428-458`） | 把 bit4 当 blink(`5`)，bit5 当 reverse（`Wire.swift:189-192`） | 💥 见 §7-1 |
 | 光标形状 DECSCUSR | `CSI Ps SP q`（`render_ansi.rs:838-850`） | ✅ `CSI <n> SP q`，仅在变化时发（`SurfaceANSIRenderer.swift:115-118`，`e7f6983`） | ✅ |
 | IME 光标锚点 | `experimental.reveal_hidden_cursor_for_cjk_ime`（`render_ansi.rs:852+`） | ✅ 语义等价，见下方说明 | ✅ **不需要上游那个开关** |
-| 同步输出 | `?2026h/l` 包帧 | ✅ `SurfaceANSIRenderer.swift:46-50,81-83` | ✅ |
+| 同步输出 | `?2026h/l` 包帧 | ✅ `SurfaceANSIRenderer.swift:80,124` | ✅ |
 | Kitty graphics | 完整 `\x1b_G` 编码 + 文件直传（`kitty_graphics.rs`） | `graphics: Data()` 恒空（`PaneTerminal.swift:408`），`SurfaceGraphicsScene` 解了不用 | ❌ 图片/图表不显示 |
 | 滚动条 | `scrollbar_rect` + `ui.pane_scrollbars`（`ui/scrollbar.rs`） | `scrollbarRect` 解出来但**没有人画**（全仓 grep 只在 Decoder/Wire） | ❌ 见 §5 |
 | 滚动位置指示 | copy mode 底栏 `{cur}/{total}`（`render.rs:170-176`） | 无 | ❌ |
@@ -117,8 +117,8 @@ Kraal 的链路不同，这条信息从来没丢：
 
 **未验证**：VM 里没装中文输入法（`AppleEnabledInputSources` 只有 U.S. + CharacterPalette），
 所以没有真机 IME 候选框位置的截图证据。上面三条是对着 Ghostty 源码
-（`Surface.zig:2222-2260`）和渲染器字节输出确认的；`SurfaceANSIRendererTests` 的
-3 条 IME 用例钉住了「隐藏时仍定位」「无 cursor 停在上一可见位置」这两条断言。
+（`Surface.zig:2222-2260`）和渲染器字节输出确认的；`SurfaceANSIRendererTests` 的 4 条 IME 用例钉住了「隐藏时仍定位坐标」
+「无 cursor 停在上一可见位置」「隐藏位置不更新停放点」这三条断言。
 
 ---
 
