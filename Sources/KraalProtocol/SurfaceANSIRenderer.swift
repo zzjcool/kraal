@@ -75,16 +75,10 @@ public struct SurfaceANSIRenderer {
             output.appendUTF8("\u{1B}[2J")
         }
 
-        var lastStyle: String?
+        var stream = RowStream()
         let rows = repaintAll ? Array(0 ..< Int(frame.height)) : changedRows(frame)
         for row in rows {
-            appendRow(
-                row,
-                frame: frame,
-                full: repaintAll,
-                output: &output,
-                lastStyle: &lastStyle
-            )
+            appendRow(row, frame: frame, stream: &stream, output: &output)
         }
 
         // Cursor: only when it moved or its visibility flipped, and never while
@@ -129,12 +123,22 @@ public struct SurfaceANSIRenderer {
         return rows
     }
 
+    /// What the terminal currently has applied, carried across rows.
+    ///
+    /// OSC 8 is a *state*, not a per-cell attribute: a run of linked cells is
+    /// wrapped once, not once per glyph. Styles are the same. Keeping both in one
+    /// value makes the "reset at end of row" rule explicit and keeps `appendRow`
+    /// within the parameter limit.
+    private struct RowStream {
+        var lastStyle: String?
+        var activeLink: String?
+    }
+
     private func appendRow(
         _ row: Int,
         frame: FrameData,
-        full: Bool,
-        output: inout Data,
-        lastStyle: inout String?
+        stream: inout RowStream,
+        output: inout Data
     ) {
         let width = Int(frame.width)
         let start = row * width
@@ -153,12 +157,20 @@ public struct SurfaceANSIRenderer {
                 continue
             }
 
+            // Links are emitted before the style so the style applies inside the
+            // link run, matching `write_cell` in the daemon.
+            writeHyperlinkIfChanged(
+                requested: linkURI(for: cell, in: frame),
+                active: &stream.activeLink,
+                output: &output
+            )
+
             let style = StyleCode.encode(cell)
-            if style != lastStyle {
+            if style != stream.lastStyle {
                 output.appendUTF8("\u{1B}[0")
                 output.appendUTF8(style)
                 output.appendUTF8("m")
-                lastStyle = style
+                stream.lastStyle = style
             }
 
             let symbol = cell.symbol.isEmpty ? " " : cell.symbol
@@ -166,10 +178,57 @@ public struct SurfaceANSIRenderer {
             column += SurfaceText.isWide(symbol) ? 2 : 1
         }
 
-        // A styled row must not leak its background into the next one.
-        if lastStyle != nil, lastStyle != StyleCode.encode(.blank) {
+        // A styled row must not leak its background into the next one, and an
+        // open link must not leak either — an unterminated OSC 8 would make the
+        // rest of the pane clickable.
+        if stream.activeLink != nil {
+            output.appendUTF8("\u{1B}]8;;\u{1B}\\")
+            stream.activeLink = nil
+        }
+        if stream.lastStyle != nil, stream.lastStyle != StyleCode.encode(.blank) {
             output.appendUTF8("\u{1B}[0m")
-            lastStyle = nil
+            stream.lastStyle = nil
+        }
+    }
+
+    /// The sanitized URI this cell links to, if any.
+    ///
+    /// A URI is daemon-controlled text placed *inside* an escape sequence, so it
+    /// is untrusted input: an embedded `ESC` or `BEL` would end the OSC early and
+    /// the remainder would be interpreted as terminal input. Strip every control
+    /// character, and drop a link that sanitizes to nothing.
+    ///
+    /// `render_ansi.rs:910` `sanitized_hyperlink_uri`.
+    private func linkURI(for cell: CellData, in frame: FrameData) -> String? {
+        guard let index = cell.hyperlink, Int(index) < frame.hyperlinks.count else {
+            return nil
+        }
+        let raw = frame.hyperlinks[Int(index)]
+        let sanitized = String(raw.unicodeScalars.filter {
+            $0 != "\u{1B}" && $0 != "\u{07}" && !CharacterSet.controlCharacters.contains($0)
+        })
+        return sanitized.isEmpty ? nil : sanitized
+    }
+
+    /// Opens, closes or leaves the OSC 8 state so the stream matches `requested`.
+    ///
+    /// Emitting the pair per cell instead would add ~40 bytes per linked glyph;
+    /// emitting nothing is the bug this fixes (`render_ansi.rs:1618`
+    /// `blit_frame_emits_osc8_for_linked_cells`).
+    private func writeHyperlinkIfChanged(
+        requested: String?,
+        active: inout String?,
+        output: inout Data
+    ) {
+        if active == requested { return }
+        if active != nil {
+            output.appendUTF8("\u{1B}]8;;\u{1B}\\")
+        }
+        active = requested
+        if let requested {
+            output.appendUTF8("\u{1B}]8;;")
+            output.appendUTF8(requested)
+            output.appendUTF8("\u{1B}\\")
         }
     }
 }

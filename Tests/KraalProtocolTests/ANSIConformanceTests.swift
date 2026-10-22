@@ -249,9 +249,9 @@ struct ANSICursorAndHyperlinkTests {
     /// `render_ansi.rs:1618` `blit_frame_emits_osc8_for_linked_cells`.
     ///
     /// Cells carry an index into `frame.hyperlinks`; the daemon wraps them in
-    /// OSC 8 so the terminal makes them clickable. RED AS PORTED: the renderer
-    /// decodes the indices and then never emits them, so links in a pane are
-    /// plain text.
+    /// OSC 8 so the terminal makes them clickable. issue #3: the renderer now
+    /// emits the pair, tracking the open link across a run of cells rather than
+    /// per glyph.
     @Test("a linked cell emits OSC 8")
     func osc8() {
         let ansi = render(frame(

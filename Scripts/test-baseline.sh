@@ -46,7 +46,7 @@ REDS=(
     # 256-color fallback with the real 30-37 / 90-97 named-colour table.
     "KraalProtocolTests.TerminalColorEncodingTests/curlyUnderline()"
     "KraalProtocolTests.WideGlyphTests/halfwidthVoicedKana()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/osc8()"
+    # osc8 used to be here: issue #3 emits OSC 8, sanitized first (see below).
     "KraalProtocolTests.ANSICursorAndHyperlinkTests/cursorShape()"
     "KraalProtocolTests.ANSICursorAndHyperlinkTests/hiddenCursorParked()"
     # missingCursorHides / synchronizedOutputOnDiffs / sizeChangeDoesNotClear were
