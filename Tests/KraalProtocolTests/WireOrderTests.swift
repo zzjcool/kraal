@@ -160,6 +160,37 @@ struct IndependentWireShapeTests {
         #expect(Array(payload) == expected)
     }
 
+    /// `u8` fields are one raw byte. The 4 `modifiers` fields and
+    /// `ClientKeyCode.function(u8)` only ever carry small values, so a varint
+    /// there is invisible — but `AttachScrollSource.pageKey` carries arbitrary
+    /// bytes, and `0xFF` is where the two encodings diverge (raw `FF` vs
+    /// `251 FF 00`). This is the one input that can actually catch it.
+    @Test("page-key scroll input keeps raw u8 bytes")
+    func pageKeyRawBytes() {
+        let payload = ClientMessageEncoder.encode(
+            .attachScroll(
+                source: .pageKey(input: [0xFF, 0x00, 0xFA]),
+                direction: .downward,
+                lines: 3,
+                column: 7,
+                row: nil,
+                modifiers: 0xFF
+            )
+        )
+        let expected: [UInt8] = [
+            6, // attach_scroll
+            1, // AttachScrollSource::PageKey
+            3, // input length
+            0xFF, 0x00, 0xFA, // the three raw bytes
+            1, // direction: Downward
+            3, // lines
+            1, 7, // column: Some(7)
+            0, // row: None
+            0xFF, // modifiers
+        ]
+        #expect(Array(payload) == expected, "encoded \(Array(payload))")
+    }
+
     @Test("resize and endpoint-request layouts are frozen")
     func smallLayouts() {
         let resize = ClientMessageEncoder.encode(
@@ -245,13 +276,9 @@ struct HostThemeEncodingTests {
     /// Ported from `herdr-gpui/.../tests/host_theme.rs`. The expected bytes are
     /// hand-written bincode, not derived from this encoder.
     ///
-    /// RED AS PORTED. bincode writes `u8` fields as one raw byte (only integers
-    /// wider than 8 bits get the varint treatment), but `encodeHostTheme` writes
-    /// the palette index and the three colour components through
-    /// `writeVarint`. That is invisible for values <= 250 and wrong above it:
-    /// index 255 goes out as `251 255 0` instead of `255`. Same defect in the
-    /// full-palette test below. Left failing on purpose — it is the reason to
-    /// port this test at all.
+    /// bincode writes `u8` fields as one raw byte (only integers wider than 8
+    /// bits get the varint treatment). This was red until #4 fixed
+    /// `encodeHostTheme` to use `writeU8`; it now guards that encoding.
     @Test("each update variant matches the handmade layout")
     func hostThemeLayout() {
         let color = ClientHostColor(red: 0x2E, green: 0x34, blue: 0x40)

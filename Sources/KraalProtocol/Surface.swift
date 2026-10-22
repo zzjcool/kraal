@@ -16,6 +16,7 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
     case cursorBounds(column: UInt16, row: UInt16, width: UInt16, height: UInt16)
     case patchIdentity
     case patchRowBounds
+    case patchRowOverlap(row: UInt16)
     case patchGeometry(paneId: String)
     case patchCursorBounds
     case patchBeforeBaseline
@@ -33,6 +34,8 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
             "surface patch identity mismatch"
         case .patchRowBounds:
             "surface patch row outside frame"
+        case let .patchRowOverlap(row):
+            "surface patch rows overlap on row \(row)"
         case let .patchGeometry(paneId):
             "surface patch changed geometry for pane \(paneId)"
         case .patchCursorBounds:
@@ -130,6 +133,23 @@ public extension PaneSurfaceFrame {
                     )
                 }
             }
+        }
+        // Rows must not cover the same cell twice. Overlap is not a bounds
+        // problem, so the loop above cannot see it: the later row silently wins
+        // and the screen shows content the daemon never composed. Sorted by
+        // (row, column) so out-of-order-but-disjoint patches are still accepted
+        // — upstream accepts those too.
+        let ordered = patch.rows.sorted {
+            $0.row == $1.row ? $0.column < $1.column : $0.row < $1.row
+        }
+        var previousEnd: (row: UInt16, column: Int)?
+        for row in ordered where !row.cells.isEmpty {
+            let start = Int(row.column)
+            let end = start + row.cells.count
+            if let previousEnd, previousEnd.row == row.row, start < previousEnd.column {
+                throw SurfaceError.patchRowOverlap(row: row.row)
+            }
+            previousEnd = (row.row, end)
         }
         for patched in patch.panes {
             let unchanged = panes.contains { existing in
@@ -229,6 +249,16 @@ public enum SurfaceText {
 
     /// East Asian width check, matching the daemon's own continuation rules.
     public static func isWide(_ symbol: String) -> Bool {
+        // Halfwidth katakana plus a voiced sound mark is one grapheme that takes
+        // **two** columns even though neither scalar is wide on its own — the
+        // base sits in the halfwidth block and `FF9E`/`FF9F` are combining marks,
+        // so the East-Asian-width lookup on the first scalar answers 1 and every
+        // glyph after it shifts one column left.
+        //
+        // `render_ansi.rs:757` `is_halfwidth_katakana_voiced_grapheme` handles
+        // exactly this pair; a general width table cannot, which is why it is a
+        // special case over there too.
+        if isHalfwidthKatakanaVoiced(symbol) { return true }
         guard let first = symbol.unicodeScalars.first else { return false }
         let value = first.value
         return (0x1100 ... 0x115F).contains(value)
@@ -240,5 +270,15 @@ public enum SurfaceText {
             || (0xFFE0 ... 0xFFE6).contains(value)
             || (0x1F300 ... 0x1F9FF).contains(value)
             || (0x20000 ... 0x3FFFD).contains(value)
+    }
+
+    /// `U+FF66...U+FF9D` followed by `U+FF9E`/`U+FF9F` and nothing else.
+    private static func isHalfwidthKatakanaVoiced(_ symbol: String) -> Bool {
+        var iterator = symbol.unicodeScalars.makeIterator()
+        guard let base = iterator.next(), let mark = iterator.next(), iterator.next() == nil else {
+            return false
+        }
+        guard (0xFF66 ... 0xFF9D).contains(base.value) else { return false }
+        return mark.value == 0xFF9E || mark.value == 0xFF9F
     }
 }

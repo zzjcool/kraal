@@ -70,10 +70,8 @@ struct FramingLimitTests {
     /// padding. Returning success would let a desynchronised stream keep
     /// "decoding" garbage as the start of the next message.
     ///
-    /// RED AS PORTED: `ServerMessageDecoder.decode` stops at the end of the
-    /// message it understood and never checks `reader.isAtEnd`. Upstream returns
-    /// `TrailingBytes` here, and `BincodeError.trailingBytes` is currently dead
-    /// code — declared, never thrown.
+    /// issue #7: `ServerMessageDecoder.decode` now consumes the payload exactly;
+    /// `BincodeError.trailingBytes` is no longer dead code.
     @Test("bytes after a complete message are rejected")
     func trailingBytes() {
         // endpoint_control with empty kind and empty data decodes cleanly on its
@@ -93,10 +91,8 @@ struct SurfacePatchAtomicityTests {
     /// half-apply it, because the second row would silently win and the frame
     /// would show content the daemon never composited.
     ///
-    /// RED AS PORTED: `validatePatch` checks each row's bounds but not whether
-    /// rows overlap, so this patch is accepted today. Note the rows are sized to
-    /// fit the frame — an earlier version of this test passed for the wrong
-    /// reason (a row that was out of bounds).
+    /// issue #7: `validatePatch` now sorts by (row, column) and rejects overlap;
+    /// out-of-order-but-disjoint rows are still accepted, matching upstream.
     @Test("overlapping rows are rejected")
     func overlappingRows() {
         var surface = Self.baseline()
@@ -158,6 +154,31 @@ struct SurfacePatchAtomicityTests {
         )
         #expect(throws: SurfaceError.self) { try surface.apply(patch) }
         #expect(surface == before, "a rejected patch touched the frame")
+    }
+
+    /// The other half of the overlap rule: rows that arrive out of order but do
+    /// not overlap must still be accepted. Upstream accepts these too, and a
+    /// naive "adjacent rows must be non-decreasing" check would reject a legal
+    /// patch — so this guards the fix from over-correcting.
+    @Test("out-of-order rows that do not overlap are accepted")
+    func outOfOrderDisjoint() throws {
+        var surface = Self.baseline()
+        let patch = PaneSurfacePatch(
+            bootId: "boot-a",
+            projectionRevision: 3,
+            baseSurfaceRevision: 7,
+            surfaceRevision: 8,
+            rows: [
+                PaneSurfacePatchRow(column: 2, row: 0, cells: [Self.cell("C")]),
+                PaneSurfacePatchRow(column: 0, row: 0, cells: [Self.cell("A")]),
+                PaneSurfacePatchRow(column: 0, row: 1, cells: [Self.cell("B")]),
+            ],
+            panes: [],
+            cursor: nil
+        )
+        try surface.apply(patch)
+        #expect(surface.frame.cells[0].symbol == "A")
+        #expect(surface.frame.cells[2].symbol == "C")
     }
 
     private static func baseline() -> PaneSurfaceFrame {

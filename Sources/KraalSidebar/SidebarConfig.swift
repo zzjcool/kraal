@@ -156,22 +156,96 @@ public enum SidebarConfigResolver {
                 )
             }
             for raw in rawRules {
-                guard let ruleTable = raw.table,
-                      let whenText = ruleTable["when"]?.string,
-                      let condition = StyleRuleCondition(rawValue: whenText),
-                      let value = ruleTable["value"]?.string
-                else {
-                    continue
+                guard let ruleTable = raw.table else { continue }
+                // One malformed rule drops only that rule. The daemon rejects
+                // the whole `ui.sidebar` section instead, but resetting a
+                // user's sidebar over a single bad line is the worse failure.
+                if let rule = parseRule(ruleTable) {
+                    rules.append(rule)
                 }
-                rules.append(StyleRule(
-                    when: condition,
-                    value: value,
-                    ignoreCase: ruleTable["ignore_case"]?.boolean ?? false,
-                    style: parseStyle(ruleTable)
-                ))
             }
         }
         return SidebarTokenSpec(kind: kind, style: style, rules: rules)
+    }
+
+    /// Expands one `rules = [{...}]` table.
+    ///
+    /// The condition is an **inline** key — `{ equals = "Local" }`,
+    /// `{ gt = 80 }` — and `RawRule` is `deny_unknown_fields`, so the
+    /// `{ when = ..., value = ... }` spelling this parser used to read matched
+    /// nothing and silently dropped every rule in a hand-written config.
+    ///
+    /// Upstream also requires exactly one condition per rule and rejects
+    /// `ignore_case` on a numeric one (`src/config/sidebar/rules.rs`).
+    /// Both checks are reproduced here so a config written against the docs
+    /// behaves the same way in Kraal as in the terminal client.
+    static func parseRule(_ table: [String: TOMLValue]) -> StyleRule? {
+        var found: [RuleCondition] = []
+        for condition in [
+            StyleRuleCondition.equals,
+            .contains,
+            .startsWith,
+            .greaterThan,
+            .lessThan,
+        ] {
+            let raw = table[condition.rawValue]
+            if let string = raw?.string {
+                found.append(.text(condition, string))
+            } else if condition.isNumeric, let number = numericValue(raw) {
+                found.append(.number(condition, number))
+            }
+        }
+
+        // "sidebar rule requires exactly one of equals, contains, starts_with,
+        // gt, lt"
+        guard found.count == 1, let only = found.first else { return nil }
+
+        let hide = table["hide"]?.boolean ?? false
+        switch only {
+        case let .text(condition, text):
+            return StyleRule(
+                when: condition,
+                value: text,
+                ignoreCase: table["ignore_case"]?.boolean ?? false,
+                style: parseStyle(table),
+                hide: hide
+            )
+        case let .number(condition, threshold):
+            // "ignore_case applies only to sidebar text conditions"
+            guard table["ignore_case"] == nil else { return nil }
+            return StyleRule(
+                when: condition,
+                threshold: threshold,
+                style: parseStyle(table),
+                hide: hide
+            )
+        }
+    }
+
+    /// One condition as written in `config.toml`, before it becomes a rule.
+    ///
+    /// A named enum rather than a tuple: the two arms carry different operands,
+    /// and naming them keeps the "exactly one condition" check readable.
+    private enum RuleCondition {
+        case text(StyleRuleCondition, String)
+        case number(StyleRuleCondition, Double)
+    }
+
+    /// Reads a numeric threshold, rejecting non-finite values the way the daemon
+    /// does (`"sidebar numeric rule threshold must be finite"`).
+    private static func numericValue(_ value: TOMLValue?) -> Double? {
+        let number: Double
+        switch value {
+        case let .integer(integer):
+            number = Double(integer)
+        case let .double(double):
+            number = double
+        case let .string(string):
+            number = Double(string) ?? .nan
+        default:
+            return nil
+        }
+        return number.isFinite ? number : nil
     }
 
     private static func parseStyle(_ table: [String: TOMLValue]) -> TokenStyle {

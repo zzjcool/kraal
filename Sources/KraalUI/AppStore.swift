@@ -103,7 +103,6 @@ public final class AppStore {
     /// knowing that connections are per-machine.
     var connection: EndpointConnection? { activeEndpoint?.connection }
     @ObservationIgnored private var healthTask: Task<Void, Never>?
-    @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored var inputDecoders: [String: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
     /// In-flight `client_shell_resize` sender, so a drag coalesces.
@@ -170,7 +169,6 @@ public final class AppStore {
             return
         }
         intentionalStop = false
-        reconnectAttempt = 0
         connectActiveEndpoint()
     }
 
@@ -218,13 +216,11 @@ public final class AppStore {
             endpoint.reconnectAttempt = 0
             disconnectEndpoint(endpoint)
         }
-        let attempt = max(endpoint.reconnectAttempt, 1)
-        let delay = min(pow(2.0, Double(attempt - 1)), 30)
-        phase = .reconnecting(
-            attempt: attempt,
-            retryAt: Date().addingTimeInterval(delay)
-        )
-        scheduleEndpointRetry(endpoint)
+        // `scheduleEndpointRetry` owns the counter and the delay. Deriving the
+        // phase countdown here as well meant two reads of one counter — this one
+        // before the increment, the sleep after it — so from the second retry on
+        // the banner counted down one step short of the real wait.
+        scheduleEndpointRetry(endpoint, report: true)
     }
 
     // MARK: - Events
@@ -403,7 +399,11 @@ public final class AppStore {
     }
 
     public func setSplitRatio(path: [Bool], ratio: Double) {
-        let params = Self.splitRatioParams(path: path, ratio: ratio)
+        let params = Self.splitRatioParams(
+            path: path,
+            ratio: ratio,
+            tabId: snapshot?.focusedTabId
+        )
         Task { await call("layout.set_split_ratio", params) }
     }
 
@@ -413,14 +413,29 @@ public final class AppStore {
     /// silently targets the wrong thing is only testable as a value, and the
     /// daemon does not reject a wrong or missing key.
     ///
-    /// `SplitRatioPortTests` pins this against
-    /// `rootshell/rootshellTests/HerdrProtocolTests.swift:29`, which asserts the
-    /// exact param shape — including a `tab_id` this function does not send yet.
-    static func splitRatioParams(path: [Bool], ratio: Double) -> [String: Any] {
-        [
-            "path": path,
-            "ratio": ratio,
-        ]
+    /// `tab_id` is what keeps the resize pointed at the tab the user is looking
+    /// at. Without it the daemon falls back to "the current tab of the current
+    /// workspace" (`src/app/api/layouts.rs` `resolve_layout_export_target`, the
+    /// `(None, None)` arm), which is only the same tab while this client happens
+    /// to be showing it — so a drag that lands just after a focus change resizes
+    /// a tab nobody is watching, with no error on either side.
+    ///
+    /// `pane_id` must never appear: `layout.set_split_ratio` names a divider by
+    /// `path`, and a pane id here would be ignored at best.
+    ///
+    /// `tabId == nil` (no snapshot yet) omits the key rather than sending an
+    /// empty string — an empty id is a tab that does not exist, while a missing
+    /// key is the documented "current tab" fallback.
+    static func splitRatioParams(
+        path: [Bool],
+        ratio: Double,
+        tabId: String?
+    ) -> [String: Any] {
+        let namedTab = tabId.flatMap { $0.isEmpty ? nil : $0 }
+        guard let namedTab else {
+            return ["path": path, "ratio": ratio]
+        }
+        return ["path": path, "ratio": ratio, "tab_id": namedTab]
     }
 
     /// Moves a divider while it is being dragged.

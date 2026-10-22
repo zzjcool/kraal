@@ -40,11 +40,10 @@ struct TerminalColorEncodingTests {
 
     /// `render_ansi.rs:1110` `color_to_sgr_fg_named_colors`.
     ///
-    /// The daemon maps the 16 named palette entries onto SGR 30–37 / 90–97.
-    /// RED AS PORTED: `StyleCode` emits `38;5;<n>` for every named colour, and
-    /// its index is the wire value, so `named(1)` (black) is drawn as 256-colour
-    /// entry 1, which is red. Every named colour is off by one against the
-    /// daemon and against what the desktop client shows.
+    /// The daemon maps the 16 named palette entries onto SGR 30–37 / 90–97 — an
+    /// explicit table, not the 256-colour index. issue #1 replaced the
+    /// `38;5;<n>` fallback: `named(1)` is black and must be `30`; as `38;5;1` it
+    /// was drawn as palette entry 1, which is red.
     @Test("named foreground colors use SGR 30-37 / 90-97")
     func namedForeground() {
         let cases: [(UInt32, String)] = [
@@ -101,8 +100,8 @@ struct TerminalColorEncodingTests {
     ///
     /// The modifier's top nibble carries the underline style (1 = single,
     /// 2 = double, 3 = curly, …) and the daemon renders it as the extended
-    /// `4:<style>` form. RED AS PORTED: `StyleCode` only ever emits plain `4`, so
-    /// a curly underline draws as a straight one.
+    /// `4:<style>` form. issue #3: `StyleCode` now reads bits 12-15 and emits
+    /// `4:2`/`4:3`/`4:4`/`4:5`, so a curly underline stays curly.
     @Test("curly underline keeps its style parameter")
     func curlyUnderline() {
         // modifier with UNDERLINED set plus style 3 in the top nibble.
@@ -118,6 +117,31 @@ struct TerminalColorEncodingTests {
         let code = StyleCode.encode(Self.cell())
         #expect(code == "39;49")
     }
+
+    /// `render_ansi.rs:445-460`: the modifier bits are ratatui's, so bit 5 is
+    /// **rapid** blink and bit 6 is **reversed**.
+    ///
+    /// This is a wire contract, and getting it wrong is invisible in the bytes —
+    /// a rapidly blinking region simply draws in reverse video. issue #19 fixed
+    /// the table; this test pins both halves.
+    @Test("blink and reverse use distinct, correct bits")
+    func blinkAndReverseBits() {
+        // Rapid blink alone: `6`, and no reverse (`7`).
+        let rapid = StyleCode.encode(Self.cell(modifier: CellModifier.rapidBlink))
+        #expect(rapid.contains("6"), "rapid blink missing from \(rapid)")
+        #expect(!rapid.contains("7"), "rapid blink became reverse: \(rapid)")
+
+        // Slow blink alone: `5`, and no reverse.
+        let slow = StyleCode.encode(Self.cell(modifier: CellModifier.slowBlink))
+        #expect(slow.contains("5"), "slow blink missing from \(slow)")
+        #expect(!slow.contains("7"), "slow blink became reverse: \(slow)")
+
+        // Reversed alone swaps the colours and emits `7`.
+        let reversed = StyleCode.encode(
+            Self.cell(foreground: 0x0000_0001, background: 0x0000_0002, modifier: CellModifier.reversed)
+        )
+        #expect(reversed.contains("7"), "reverse missing from \(reversed)")
+    }
 }
 
 @Suite("Wide glyph measurement")
@@ -126,9 +150,8 @@ struct WideGlyphTests {
     ///
     /// A halfwidth katakana base plus its voiced mark is one grapheme that
     /// occupies **two** columns. The daemon special-cases it because the base is
-    /// not wide on its own. RED AS PORTED: `SurfaceText.isWide` looks only at the
-    /// first scalar and `U+FF66…U+FF9D` is outside every range it tests, so the
-    /// renderer advances one column and shifts the rest of the row left by one.
+    /// not wide on its own. issue #3: `SurfaceText.isWide` now checks for this
+    /// grapheme before falling back to the first-scalar width table.
     @Test("halfwidth katakana plus voiced mark is two columns")
     func halfwidthVoicedKana() {
         // U+FF76 (ｶ) + U+FF9E (゛): one cluster, two columns.
@@ -186,9 +209,8 @@ struct ANSICursorAndHyperlinkTests {
     /// painting a half-built grid. Upstream wraps *every* frame, not just the
     /// first: a diff frame writes several rows and is just as visible mid-write.
     ///
-    /// RED AS PORTED: `render` only emits the pair when `full` is true, so every
-    /// patch-driven repaint is visible half-painted — exactly the tear this
-    /// sequence exists to prevent.
+    /// issue #2 fixed this: `render` wraps every frame, diff or not, because a
+    /// diff frame writes several rows and is just as visible mid-write.
     @Test("every frame is wrapped in synchronized output")
     func synchronizedOutputOnDiffs() {
         var renderer = SurfaceANSIRenderer()
@@ -223,8 +245,8 @@ struct ANSICursorAndHyperlinkTests {
     /// away output the user was reading. Upstream only clears on the very first
     /// frame of a pane.
     ///
-    /// RED AS PORTED: `render` treats "grid changed" as `full` and sends `2J`
-    /// with it, so every window resize wipes the pane's scrollback.
+    /// issue #2 fixed this: "grid changed" and "may we clear?" are separate
+    /// questions now, so a resize repaints without wiping scrollback.
     @Test("a size change repaints without clearing the screen")
     func sizeChangeDoesNotClear() {
         var renderer = SurfaceANSIRenderer()
@@ -250,9 +272,9 @@ struct ANSICursorAndHyperlinkTests {
     /// `render_ansi.rs:1618` `blit_frame_emits_osc8_for_linked_cells`.
     ///
     /// Cells carry an index into `frame.hyperlinks`; the daemon wraps them in
-    /// OSC 8 so the terminal makes them clickable. RED AS PORTED: the renderer
-    /// decodes the indices and then never emits them, so links in a pane are
-    /// plain text.
+    /// OSC 8 so the terminal makes them clickable. issue #3: the renderer now
+    /// emits the pair, tracking the open link across a run of cells rather than
+    /// per glyph.
     @Test("a linked cell emits OSC 8")
     func osc8() {
         let ansi = render(frame(
@@ -276,6 +298,43 @@ struct ANSICursorAndHyperlinkTests {
             linkIndex: 0
         ))
         #expect(!ansi.contains("\u{1B}]0;"), "URI control bytes reached the terminal")
+    }
+
+    /// The other half of OSC 8: the link must be *closed*, not left open.
+    ///
+    /// An unterminated OSC 8 makes the rest of the pane clickable, and the
+    /// existing `osc8` test cannot see that — its frame is a single linked cell,
+    /// so "never close" and "close at end of row" produce the same assertion
+    /// result. This one puts an unlinked cell after the linked run and requires
+    /// the closer to appear between them.
+    /// The other half of OSC 8: the link must be *closed*, not left open.
+    ///
+    /// An unterminated OSC 8 makes the rest of the pane clickable. The existing
+    /// `osc8` test cannot see this — it only asserts the opener. The case that
+    /// actually leaks is a linked run that ends at the **last column of a row**:
+    /// there is no following cell to trigger the "link changed" close, so only
+    /// the end-of-row flush can terminate it.
+    @Test("a link that ends at the row edge is still closed")
+    func osc8Closed() {
+        let linked = CellData(
+            symbol: "a",
+            foreground: 0,
+            background: 0,
+            modifier: 0,
+            skip: false,
+            hyperlink: 0
+        )
+        // Width 1: the linked cell is the whole row, so nothing follows it.
+        let ansi = render(FrameData(
+            cells: [linked],
+            width: 1,
+            height: 1,
+            cursor: nil,
+            hyperlinks: ["https://example.com"],
+            graphics: Data()
+        ))
+        let closer = "\u{1B}]8;;\u{1B}\\"
+        #expect(ansi.contains(closer), "link was never closed: \(ansi)")
     }
 
     /// `render_ansi.rs:1508` — cursor *shape* (DECSCUSR) travels before

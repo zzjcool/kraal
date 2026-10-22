@@ -27,8 +27,17 @@ struct UpstreamFixtureTests {
     }
 
     /// The welcome is the compatibility contract: generation, four codecs, the
-    /// method list. This frozen copy advertises no capabilities and one method,
-    /// so it must be refused for the *right* reason.
+    /// method list. This frozen copy is from 0.8.2 and advertises no capabilities
+    /// and one method.
+    ///
+    /// It must be refused — but *which* refusal is now decided by the version
+    /// floor first (`0.8.2 < minimumDaemonVersion`), so it reports `serverTooOld`
+    /// rather than `missingCapability`. That matches upstream, which folds
+    /// `MissingSurfaceInterest` / `MissingHealthCheck` into `DaemonOutdated`
+    /// (`herdr-gpui/crates/herdr-client/src/compat.rs:89-94`).
+    ///
+    /// What matters here is that the *frozen fixture decodes* and is refused with
+    /// advice pointing at the daemon, not that a particular internal case wins.
     @Test("the frozen welcome decodes and names the missing capability")
     func welcomeDecodes() throws {
         let welcome = try JSONDecoder().decode(
@@ -41,12 +50,10 @@ struct UpstreamFixtureTests {
         #expect(welcome.capabilities.isEmpty)
         #expect(welcome.methods == ["pane.focus"])
 
-        // No capabilities at all: the first required one is what we should say.
-        guard case let .missingCapability(capability) = Compatibility.evaluate(welcome) else {
-            Issue.record("expected a missing capability, got \(Compatibility.evaluate(welcome))")
-            return
-        }
-        #expect(EndpointProtocol.requiredSurfaceCapabilities.contains(capability))
+        // Refused, and the advice must point at the daemon rather than the app.
+        let result = Compatibility.evaluate(welcome)
+        #expect(!result.isOK)
+        #expect(result.userMessage?.contains("Update Herdr") == true, "got \(result)")
     }
 
     /// The hello fixture omits `surface_active`, `surface_reuse`, `surface_delta`
@@ -55,11 +62,8 @@ struct UpstreamFixtureTests {
     /// forward compatibility — a fixture written by another client must not be
     /// rejected just for leaving defaults out.
     ///
-    /// RED AS PORTED: `EndpointClientHello` has no custom `init(from:)`, so every
-    /// field is required. Kraal only ever *sends* a hello today, so nothing in the
-    /// app breaks — but the type does not describe the wire contract it claims to
-    /// (upstream's serde defaults are part of that contract), and a future reader
-    /// of a hello, or a test double, would fail on a perfectly valid payload.
+    /// issue #10: `EndpointClientHello` now has a custom `init(from:)` carrying
+    /// those defaults, so the type describes the contract it claims to.
     @Test("the frozen hello keeps every negotiated field")
     func helloDecodes() throws {
         let hello = try JSONDecoder().decode(
@@ -75,6 +79,35 @@ struct UpstreamFixtureTests {
         #expect(hello.surfaceCodecs == [EndpointProtocol.surfaceCodecV1])
         #expect(hello.inputCodecs == [EndpointProtocol.inputCodecV1])
         #expect(hello.blobCodecs == [EndpointProtocol.blobCodecV1])
+    }
+
+    /// An absent `surface_active` means **active**, not inactive: upstream's
+    /// `serde(default = "default_true")` (`endpoint.rs:28`). Reading that default
+    /// backwards would silently suppress the surface stream, and every other
+    /// omitted field falls back to `false` / `[]`.
+    @Test("omitted hello fields take the upstream serde defaults")
+    func helloDefaults() throws {
+        let minimal = Data("""
+        {
+          "generation": 1,
+          "cell_width_px": 8,
+          "cell_height_px": 16,
+          "surface_size": { "cols": 80, "rows": 24 },
+          "pixel_mouse": false,
+          "direct_graphics": false,
+          "endpoint_keybindings": false,
+          "mouse_capture": false
+        }
+        """.utf8)
+        let hello = try JSONDecoder().decode(EndpointClientHello.self, from: minimal)
+        #expect(hello.surfaceActive, "an omitted surface_active must default to true")
+        #expect(!hello.surfaceReuse)
+        #expect(!hello.surfaceDelta)
+        #expect(!hello.surfaceScroll)
+        #expect(hello.snapshotCodecs.isEmpty)
+        #expect(hello.surfaceCodecs.isEmpty)
+        #expect(hello.inputCodecs.isEmpty)
+        #expect(hello.blobCodecs.isEmpty)
     }
 
     /// A snapshot from another client, including `agent_status` values no version

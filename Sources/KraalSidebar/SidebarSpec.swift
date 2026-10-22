@@ -83,44 +83,133 @@ public enum StyleRuleCondition: String, Sendable {
     case startsWith = "starts_with"
     case greaterThan = "gt"
     case lessThan = "lt"
+
+    /// Whether the condition compares numbers rather than text.
+    ///
+    /// Numeric rules reject `ignore_case` in the daemon, and their threshold is
+    /// a float rather than a string, so the two families store their operand
+    /// differently (``StyleRule/value`` vs ``StyleRule/threshold``).
+    public var isNumeric: Bool {
+        self == .greaterThan || self == .lessThan
+    }
 }
 
+/// One `rules = [{...}]` entry on a styled sidebar token.
+///
+/// The daemon spells the condition as an inline key — `{ contains = "claude" }`,
+/// not `{ when = "contains", value = "claude" }` (`src/config/sidebar/rules.rs`,
+/// `RawRule` with `deny_unknown_fields`). Reading the wrong spelling silently
+/// drops every rule in a hand-written config, which is what this type used to do.
 public struct StyleRule: Equatable, Sendable {
     public var when: StyleRuleCondition
+    /// Operand for text conditions.
     public var value: String
+    /// Operand for numeric conditions. Kept apart from ``value`` so a threshold
+    /// of `80` compares as a number instead of re-parsing a string per row.
+    public var threshold: Double
     public var ignoreCase: Bool
     public var style: TokenStyle
+    /// `hide = true` removes the matching token, and with it its separator.
+    public var hide: Bool
 
     public init(
         when: StyleRuleCondition,
         value: String,
         ignoreCase: Bool = false,
-        style: TokenStyle
+        style: TokenStyle,
+        hide: Bool = false
     ) {
         self.when = when
         self.value = value
+        self.threshold = Double(value) ?? 0
         self.ignoreCase = ignoreCase
         self.style = style
+        self.hide = hide
+    }
+
+    public init(
+        when: StyleRuleCondition,
+        threshold: Double,
+        style: TokenStyle,
+        hide: Bool = false
+    ) {
+        self.when = when
+        self.value = Self.describe(threshold)
+        self.threshold = threshold
+        self.ignoreCase = false
+        self.style = style
+        self.hide = hide
+    }
+
+    /// Renders a threshold the way `config.toml` would spell it, so a resolved
+    /// rule can be echoed back to the user.
+    private static func describe(_ threshold: Double) -> String {
+        threshold == threshold.rounded() && abs(threshold) < 1e15
+            ? String(Int(threshold))
+            : String(threshold)
     }
 
     /// Applies the rule to a token's rendered text.
     public func matches(_ text: String) -> Bool {
-        let subject = ignoreCase ? text.lowercased() : text
-        let target = ignoreCase ? value.lowercased() : value
         switch when {
         case .equals:
-            return subject == target
+            return ignoreCase ? Self.asciiEqualsIgnoringCase(text, value) : text == value
         case .contains:
-            return subject.contains(target)
+            return ignoreCase ? Self.asciiContainsIgnoringCase(text, value) : text.contains(value)
         case .startsWith:
-            return subject.hasPrefix(target)
-        case .greaterThan:
-            guard let lhs = Double(subject), let rhs = Double(target) else { return false }
-            return lhs > rhs
-        case .lessThan:
-            guard let lhs = Double(subject), let rhs = Double(target) else { return false }
-            return lhs < rhs
+            return ignoreCase ? Self.asciiHasPrefixIgnoringCase(text, value) : text.hasPrefix(value)
+        case .greaterThan, .lessThan:
+            guard let number = Self.parseNumber(text) else { return false }
+            return when == .greaterThan ? number > threshold : number < threshold
         }
+    }
+
+    // MARK: - ASCII-only case folding
+
+    // `ignore_case` is ASCII-only upstream: `equals`, `starts_with`, and
+    // `contains` all use `eq_ignore_ascii_case` on byte slices, so "codex" does
+    // not match "CODEX" and a Turkish dotless i is its own letter. Folding whole
+    // strings with `String.compare(.caseInsensitive)` would match more than the
+    // daemon does, which is how a sidebar could disagree with the desktop client.
+
+    private static func fold(_ byte: UInt8) -> UInt8 {
+        (0x41 ... 0x5A).contains(byte) ? byte | 0x20 : byte
+    }
+
+    private static func asciiEqualsIgnoringCase(_ text: String, _ target: String) -> Bool {
+        let lhs = Array(text.utf8)
+        let rhs = Array(target.utf8)
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { fold($0) == fold($1) }
+    }
+
+    private static func asciiHasPrefixIgnoringCase(_ text: String, _ target: String) -> Bool {
+        let rhs = Array(target.utf8)
+        let lhs = Array(text.utf8)
+        guard lhs.count >= rhs.count else { return false }
+        return zip(lhs.prefix(rhs.count), rhs).allSatisfy { fold($0) == fold($1) }
+    }
+
+    private static func asciiContainsIgnoringCase(_ text: String, _ target: String) -> Bool {
+        let rhs = Array(target.utf8)
+        // The daemon's `contains` is vacuously true for an empty needle.
+        guard !rhs.isEmpty else { return true }
+        let lhs = Array(text.utf8)
+        guard lhs.count >= rhs.count else { return false }
+        for start in 0 ... (lhs.count - rhs.count) {
+            let window = lhs[start ..< (start + rhs.count)]
+            if zip(window, rhs).allSatisfy({ fold($0) == fold($1) }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// The daemon parses the token's text as a finite float and drops the rule
+    /// when it does not parse (`rules.rs`, `Condition::GreaterThan` arm).
+    private static func parseNumber(_ text: String) -> Double? {
+        guard let number = Double(text), number.isFinite else { return nil }
+        return number
     }
 }
 
@@ -179,14 +268,28 @@ public struct SidebarTokenSpec: Equatable, Sendable {
 
     /// The effective style for a token whose text resolved to `text`.
     ///
-    /// Rules are applied in declaration order, later rules winning field by
-    /// field, which is how the daemon layers them.
-    public func resolvedStyle(for text: String) -> TokenStyle {
-        var result = style
+    /// Returns `nil` when a matching rule says `hide = true`: the daemon removes
+    /// that token and its separator from the row, which is why this returns an
+    /// optional instead of a style.
+    ///
+    /// Only the **first** matching rule applies (`rules.rs`, `matching_style`),
+    /// and it overrides just the fields it sets; the rest inherit from the token.
+    /// Layering every matching rule instead would diverge from the desktop
+    /// client for any config that stacks rules on the same token. Numeric
+    /// conditions share one parse of the token text, as upstream does.
+    public func resolvedStyle(for text: String) -> TokenStyle? {
         for rule in rules where rule.matches(text) {
-            result = result.merging(rule.style)
+            if rule.hide { return nil }
+            return TokenStyle(
+                foreground: rule.style.foreground ?? style.foreground,
+                background: rule.style.background ?? style.background,
+                bold: rule.style.bold ?? style.bold,
+                italic: rule.style.italic ?? style.italic,
+                dim: rule.style.dim ?? style.dim,
+                underlined: rule.style.underlined ?? style.underlined
+            )
         }
-        return result
+        return style
     }
 }
 

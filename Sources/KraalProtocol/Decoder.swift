@@ -299,11 +299,24 @@ public enum ServerMessageDecoder {
         var reader = BincodeReader(payload)
         guard !reader.isAtEnd else { throw WireDecodeError.emptyPayload }
         let tag = try reader.readVarint()
+        let message: ServerMessage
         do {
-            return try decodeBody(tag: tag, &reader)
+            message = try decodeBody(tag: tag, &reader)
         } catch let error as BincodeError {
             throw WireDecodeError.bincode(error)
         }
+        // The payload must be consumed exactly. Without this, a stream that has
+        // slipped by one byte decodes garbage as a "legal extra tail" and the
+        // *next* message starts from the wrong offset — surfacing later as a
+        // random unknown tag, or as a structurally valid message with wrong
+        // contents. `BincodeError.trailingBytes` existed but was never thrown.
+        //
+        // Ported from `herdr-gpui/.../tests/compatibility.rs:430` and `codec.rs`
+        // (`if used != payload.len() { return Err(Error::TrailingBytes) }`).
+        guard reader.isAtEnd else {
+            throw WireDecodeError.bincode(.trailingBytes(count: reader.remaining))
+        }
+        return message
     }
 
     /// Splits the 21 tags into readability-sized groups; the wire order stays

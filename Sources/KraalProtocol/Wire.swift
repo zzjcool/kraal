@@ -181,16 +181,34 @@ public enum ClientPaneInputEvent: Equatable, Sendable {
 // MARK: - Surface payloads
 
 /// Cell modifier bits.
+/// ratatui / daemon `Modifier` bits, in the order the daemon defines them
+/// (`render_ansi.rs:428-458`, matching ratatui 0.30's `Modifier`).
+///
+/// These are a wire contract: bit 5 is **rapid** blink and bit 6 is **reversed**.
+/// An earlier version of this type had no rapid-blink entry and called bit 5
+/// `reverse`, so a rapidly blinking region was drawn in reverse video instead
+/// of blinking, and SGR 6 could never be emitted.
 public enum CellModifier {
     public static let bold: UInt16 = 1 << 0
     public static let dim: UInt16 = 1 << 1
     public static let italic: UInt16 = 1 << 2
     public static let underline: UInt16 = 1 << 3
-    public static let blink: UInt16 = 1 << 4
-    public static let reverse: UInt16 = 1 << 5
+    public static let slowBlink: UInt16 = 1 << 4
+    public static let rapidBlink: UInt16 = 1 << 5
     public static let reversed: UInt16 = 1 << 6
     public static let hidden: UInt16 = 1 << 7
     public static let strikethrough: UInt16 = 1 << 8
+
+    /// The underline style lives in bits 12–15 (`UNDERLINE_STYLE_SHIFT` /
+    /// `_MASK` in `wire.rs:1576`): 1 single, 2 double, 3 curly, 4 dotted,
+    /// 5 dashed.
+    public static let underlineStyleMask: UInt16 = 0xF000
+    public static let underlineStyleShift: UInt16 = 12
+
+    /// `0` means "no extended style" — a plain `4`.
+    public static func underlineStyle(_ modifier: UInt16) -> UInt8 {
+        UInt8((modifier & underlineStyleMask) >> underlineStyleShift)
+    }
 }
 
 /// A single terminal cell.

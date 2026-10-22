@@ -42,24 +42,39 @@ struct SplitRatioPortTests {
     /// showing it, so a drag that lands just after a focus change resizes a tab
     /// the user is not looking at — silently, with no error on either side.
     ///
-    /// RED AS PORTED: `splitRatioParams` sends only `path` and `ratio`.
+    /// The issue #8 fix: a tab id is always named, and a pane id never is.
     @Test("a ratio request names its tab and never a pane")
     @MainActor
     func ratioRequestShape() {
-        let params = AppStore.splitRatioParams(path: [false, true], ratio: 0.5)
-        #expect(params["tab_id"] != nil, "params carried no tab_id: \(params)")
+        let params = AppStore.splitRatioParams(
+            path: [false, true],
+            ratio: 0.5,
+            tabId: "w1:t2"
+        )
+        #expect(params["tab_id"] as? String == "w1:t2", "params carried no tab_id: \(params)")
         #expect(params["pane_id"] == nil, "params carried a pane_id: \(params)")
         #expect(params["path"] as? [Bool] == [false, true])
         #expect(params["ratio"] as? Double == 0.5)
+    }
+
+    /// No snapshot yet means no tab to name. The key must be *absent* rather
+    /// than empty: an empty `tab_id` is a tab that does not exist, while a
+    /// missing key is the daemon's documented "current tab" fallback.
+    @Test("without a snapshot the tab id is omitted, not blank")
+    @MainActor
+    func ratioRequestWithoutSnapshot() {
+        let params = AppStore.splitRatioParams(path: [true], ratio: 0.25, tabId: nil)
+        #expect(params["tab_id"] == nil, "sent a blank tab_id: \(params)")
+        #expect(params["pane_id"] == nil)
+        #expect(params["ratio"] as? Double == 0.25)
     }
 
     /// The daemon's `layout.set_split_ratio` rejects a non-finite ratio
     /// (`src/app/api/layouts.rs:235`). A drag that produced `NaN` would come back
     /// as an error the user never sees, and the divider would not move at all.
     ///
-    /// RED AS PORTED: `splitRatio` divides by `max(area.height, 1)` but never
-    /// guards the *numerator*, so `translatedY` of `.nan` / `.infinity` propagates
-    /// straight into the return value. `min`/`max` do not sanitise NaN.
+    /// issue #8: `splitRatio` now guards both deltas up front — `min`/`max` do
+    /// not sanitise `NaN`, so guarding the numerator is the only way.
     @Test("a non-finite drag cannot produce a ratio")
     func nonFiniteDrag() {
         for delta in [CGFloat.nan, .infinity, -.infinity] {

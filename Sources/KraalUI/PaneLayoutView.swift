@@ -340,6 +340,12 @@ struct PaneLayoutView: View {
     /// other axis therefore both misplaces the divider and drags it backwards.
     ///
     /// Clamped to 0.1…0.9 so a pane cannot be dragged to nothing.
+    ///
+    /// A non-finite drag delta is refused up front rather than clamped: `min` and
+    /// `max` return `NaN` unchanged, so a `.nan` translation would sail straight
+    /// out as the ratio. The daemon rejects that (`src/app/api/layouts.rs:235`
+    /// `if !params.ratio.is_finite()`), but the error never reaches the user —
+    /// the divider simply does not move.
     static func splitRatio(
         direction: PaneSurfaceSplitDirection,
         position: UInt16,
@@ -347,6 +353,8 @@ struct PaneLayoutView: View {
         translatedX: CGFloat,
         translatedY: CGFloat
     ) -> Double {
+        // 0.5 is the neutral "stay put" ratio: it is what an unusable drag means.
+        guard translatedX.isFinite, translatedY.isFinite else { return 0.5 }
         switch direction {
         case .vertical:
             let base = Double(position - area.originY)

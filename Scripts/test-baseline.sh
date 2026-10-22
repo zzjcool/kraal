@@ -42,50 +42,52 @@ SWIFT=/usr/bin/swift
 
 REDS=(
     # ANSI re-encoding — herdr/src/protocol/render_ansi.rs
-    "KraalProtocolTests.TerminalColorEncodingTests/namedForeground()"
-    "KraalProtocolTests.TerminalColorEncodingTests/namedBackground()"
-    "KraalProtocolTests.TerminalColorEncodingTests/curlyUnderline()"
-    "KraalProtocolTests.WideGlyphTests/halfwidthVoicedKana()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/osc8()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/cursorShape()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/hiddenCursorParked()"
+    # namedForeground / namedBackground used to be here: issue #1 replaced the
+    # 256-color fallback with the real 30-37 / 90-97 named-colour table.
+    # curlyUnderline / halfwidthVoicedKana / cursorShape / hiddenCursorParked
+    # used to be here: issue #3 fixed the underline style nibble, the halfwidth
+    # katakana + voiced mark width, and the three cursor rules (DECSCUSR, hide on
+    # a missing cursor, park a hidden one). osc8 left earlier in the same issue.
     # missingCursorHides / synchronizedOutputOnDiffs / sizeChangeDoesNotClear were
     # on this list until issue #2 landed on main (diff frames wrapped in
     # synchronized output, resize no longer clears scrollback). `--compare` is
     # what surfaced them; they now guard again instead of being skipped.
     # Wire shape — herdr-gpui herdr-protocol/tests/host_theme.rs
-    "KraalProtocolTests.HostThemeEncodingTests/hostThemeLayout()"
-    "KraalProtocolTests.HostThemeEncodingTests/wideColorBytes()"
-    "KraalProtocolTests.HostThemeEncodingTests/fullPalette()"
+    # hostThemeLayout / wideColorBytes / fullPalette used to be here: issue #4
+    # fixed the u8-as-varint encoding (BincodeWriter.writeU8), so they guard now.
     # Frozen upstream fixture — endpoint.rs serde defaults
-    "KraalProtocolTests.UpstreamFixtureTests/helloDecodes()"
+    # helloDecodes used to be here: issue #10 gave EndpointClientHello a custom
+    # init(from:) with the nine serde defaults, so it guards now.
     # Payload hygiene — compatibility.rs / render_ansi.rs:1882
-    "KraalProtocolTests.FramingLimitTests/trailingBytes()"
-    "KraalProtocolTests.SurfacePatchAtomicityTests/overlappingRows()"
+    # trailingBytes / overlappingRows used to be here: issue #7 made the decoder
+    # consume the payload exactly and made validatePatch reject row overlap.
     # Handshake — version_mismatch.rs / framing.rs / rootshell version floor
-    "KraalClientTests.CompatibilityPortTests/generationBeatsError()"
-    "KraalClientTests.CompatibilityPortTests/olderDaemon()"
-    "KraalClientTests.CompatibilityPortTests/versionFloor()"
-    "KraalClientTests.CompatibilityPortTests/gridLimit()"
+    # generationBeatsError / olderDaemon / versionFloor used to be here: issue #5
+    # put generation before error and added DaemonVersion.parse + the floor.
+    # gridLimit used to be here: issue #8 added the per-axis and total-cell
+    # ceiling to resizeSurface (SurfaceGeometry.isAcceptableGrid).
     # Snapshot fences — session_state.rs / rootshell snapshot validation
-    "KraalClientTests.SnapshotFencePortTests/revisionRegression()"
-    "KraalClientTests.SnapshotFencePortTests/duplicatePaneIDs()"
+    # revisionRegression / duplicatePaneIDs used to be here: issue #6 added
+    # snapshotIsCurrent (boot-aware revision fence) and decode-time id checks.
     # Drag arithmetic — rootshell TmuxDividerResizeTests:66
-    "KraalClientTests.SplitRatioPortTests/nonFiniteDrag()"
+    # nonFiniteDrag used to be here: issue #8 refuses a non-finite drag delta
+    # before it can reach the ratio.
     # Split request shape — rootshell HerdrProtocolTests:29
-    "KraalClientTests.SplitRatioPortTests/ratioRequestShape()"
+    # ratioRequestShape used to be here: issue #8 sends the tab id (and omits it,
+    # rather than blank, when there is no snapshot yet).
     # Backoff reporting — herdr supervisor.rs:1132
-    "KraalClientTests.ConnectionLimitTests/backoffIsBounded()"
+    # backoffIsBounded used to be here: issue #9 made scheduleEndpointRetry the
+    # single source of the delay, so the countdown now matches the sleep.
 )
 
 if [ "${1:-}" = "--list" ]; then
-    printf '%s\n' "${REDS[@]}"
+    printf '%s\n' ${REDS[@]+"${REDS[@]}"}
     exit 0
 fi
 
 if [ "${1:-}" = "--compare" ]; then
     available=$("$SWIFT" test --list-tests 2>/dev/null || true)
-    for red in "${REDS[@]}"; do
+    for red in ${REDS[@]+"${REDS[@]}"}; do
         if ! printf '%s\n' "$available" | grep -qxF "$red"; then
             printf 'gone:       %s\n' "$red"
             continue
@@ -97,9 +99,12 @@ if [ "${1:-}" = "--compare" ]; then
     exit 0
 fi
 
+# Empty is the goal state: every ported difference is fixed, so this degrades to
+# a plain `swift test`. The `+`-guarded expansion is what makes that legal under
+# `set -u` — a bare `${REDS[@]}` on an empty array aborts the script.
 SKIP_ARGS=()
-for red in "${REDS[@]}"; do
+for red in ${REDS[@]+"${REDS[@]}"}; do
     SKIP_ARGS+=(--skip "${red%()}")
 done
 
-"$SWIFT" test "${SKIP_ARGS[@]}"
+"$SWIFT" test ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"}

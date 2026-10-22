@@ -27,6 +27,74 @@ public enum EndpointProtocol {
 
     /// Capabilities the client needs to be able to ask for a surface at all.
     public static let requiredSurfaceCapabilities = ["surface_interest", "health_check"]
+
+    /// The oldest daemon this client will drive.
+    ///
+    /// Not a guess: it is the first release whose `endpoint.welcome.v1` carries
+    /// the codecs and methods this client uses. A daemon below it handshakes
+    /// successfully and then fails later, in pieces — missing methods, absent
+    /// capabilities, fields that decode as defaults — which is worse than a clear
+    /// refusal at the door.
+    ///
+    /// Deliberately *not* bumped per release: only raise it when an older daemon
+    /// genuinely cannot work.
+    public static let minimumDaemonVersion = DaemonVersion(major: 0, minor: 9, patch: 0)
+}
+
+/// A daemon version string, parsed far enough to compare against a floor.
+///
+/// Accepts the shapes a real `server_version` takes: `0.9.4`, and the
+/// fork/build suffixed `0.9.0-rootshell.0.1.2`, `1.0.0+build.7`. Only the
+/// numeric prefix is compared — a fork's suffix says nothing about whether it
+/// speaks this protocol, and rejecting it would lock out every downstream
+/// build.
+public struct DaemonVersion: Comparable, Equatable, Sendable, CustomStringConvertible {
+    public var major: Int
+    public var minor: Int
+    public var patch: Int
+
+    public init(major: Int, minor: Int, patch: Int) {
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+    }
+
+    public var description: String { "\(major).\(minor).\(patch)" }
+
+    public static func < (lhs: DaemonVersion, rhs: DaemonVersion) -> Bool {
+        (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
+    }
+
+    /// Parses a leading `major.minor.patch`, ignoring any `-fork` or `+build`
+    /// suffix. Fails (rather than defaulting to 0.0.0) so the caller can refuse
+    /// a daemon it cannot identify instead of trusting it.
+    public static func parse(_ raw: String) -> Result<DaemonVersion, ParseFailure> {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        // Stop at the first character that cannot belong to the numeric core.
+        let core = trimmed.prefix { $0.isNumber || $0 == "." }
+        let parts = core.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2, parts.count <= 4 else {
+            return .failure(.notAVersion(raw))
+        }
+        var numbers: [Int] = []
+        for part in parts {
+            guard !part.isEmpty, let value = Int(part), value >= 0 else {
+                return .failure(.notAVersion(raw))
+            }
+            numbers.append(value)
+        }
+        return .success(
+            DaemonVersion(
+                major: numbers[0],
+                minor: numbers[1],
+                patch: numbers.count > 2 ? numbers[2] : 0
+            )
+        )
+    }
+
+    public enum ParseFailure: Error, Equatable, Sendable {
+        case notAVersion(String)
+    }
 }
 
 public struct EndpointClientHello: Codable, Equatable, Sendable {
@@ -107,6 +175,41 @@ public struct EndpointClientHello: Codable, Equatable, Sendable {
         surfaceCodecs = [EndpointProtocol.surfaceCodecV1]
         inputCodecs = [EndpointProtocol.inputCodecV1]
         blobCodecs = [EndpointProtocol.blobCodecV1]
+    }
+
+    /// Decodes a hello the way the wire contract allows it to arrive.
+    ///
+    /// Kraal only *sends* a hello today, so nothing in the app depends on this.
+    /// It exists because the type claims to describe the wire contract, and that
+    /// contract has `serde(default)` on nine fields (`endpoint.rs:20-38`): a peer
+    /// may omit them, and a type that demands them is wrong about the protocol it
+    /// names.
+    ///
+    /// The one that matters most is `surface_active`, whose serde default is
+    /// `true` — an absent value means *active*, not *inactive*. Getting that
+    /// backwards would silently suppress the surface stream.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generation = try container.decode(UInt32.self, forKey: .generation)
+        cellWidthPx = try container.decode(UInt32.self, forKey: .cellWidthPx)
+        cellHeightPx = try container.decode(UInt32.self, forKey: .cellHeightPx)
+        surfaceSize = try container.decode(Size.self, forKey: .surfaceSize)
+        pixelMouse = try container.decode(Bool.self, forKey: .pixelMouse)
+        directGraphics = try container.decode(Bool.self, forKey: .directGraphics)
+        endpointKeybindings = try container.decode(Bool.self, forKey: .endpointKeybindings)
+        mouseCapture = try container.decode(Bool.self, forKey: .mouseCapture)
+        // `serde(default = "default_true")` upstream: absent means active.
+        surfaceActive = try container.decodeIfPresent(Bool.self, forKey: .surfaceActive) ?? true
+        surfaceReuse = try container.decodeIfPresent(Bool.self, forKey: .surfaceReuse) ?? false
+        surfaceDelta = try container.decodeIfPresent(Bool.self, forKey: .surfaceDelta) ?? false
+        surfaceScroll = try container.decodeIfPresent(Bool.self, forKey: .surfaceScroll) ?? false
+        snapshotCodecs = try container.decodeIfPresent(
+            [String].self,
+            forKey: .snapshotCodecs
+        ) ?? []
+        surfaceCodecs = try container.decodeIfPresent([String].self, forKey: .surfaceCodecs) ?? []
+        inputCodecs = try container.decodeIfPresent([String].self, forKey: .inputCodecs) ?? []
+        blobCodecs = try container.decodeIfPresent([String].self, forKey: .blobCodecs) ?? []
     }
 }
 
@@ -193,6 +296,7 @@ public enum Compatibility: Equatable, Sendable {
     case compatible
     case serverTooOld(String?)
     case clientTooOld(serverVersion: String, generation: UInt32)
+    case unusableVersion(String)
     case incompatibleCodecs(String)
     case missingCapability(String)
     case rejected(code: String, message: String)
@@ -210,6 +314,10 @@ public enum Compatibility: Equatable, Sendable {
         case let .clientTooOld(serverVersion, generation):
             "The daemon (\(serverVersion)) speaks endpoint generation \(generation); "
                 + "Kraal speaks generation \(EndpointProtocol.generation). Update Kraal."
+        case let .unusableVersion(version):
+            "The daemon reports an unreadable version string (\"\(version)\"), so its "
+                + "protocol support cannot be checked. Update Herdr to "
+                + "\(EndpointProtocol.minimumDaemonVersion) or newer."
         case let .incompatibleCodecs(detail):
             "No shared wire codec: \(detail)"
         case let .missingCapability(capability):
@@ -222,15 +330,41 @@ public enum Compatibility: Equatable, Sendable {
 
     /// Mirrors the checks `herdr-client/src/session.rs` performs, in the same
     /// order, so both clients accept and reject the same daemons.
+    ///
+    /// Order matters: generation first, error second. Upstream decides which side
+    /// is outdated from the generation *even when the welcome also carries an
+    /// error* (`version_mismatch.rs:40`
+    /// `generation_says_which_side_is_older_even_in_a_rejection`). A daemon that
+    /// refuses an unsupported generation attaches `{"code":
+    /// "unsupported_generation"}`, so checking `error` first reports a generic
+    /// rejection and tells the user to update the wrong side.
     public static func evaluate(_ welcome: EndpointServerWelcome) -> Compatibility {
+        if welcome.generation != EndpointProtocol.generation {
+            // A higher generation means this client is the outdated one; a lower
+            // one means the daemon is.
+            if welcome.generation > EndpointProtocol.generation {
+                return .clientTooOld(
+                    serverVersion: welcome.serverVersion,
+                    generation: welcome.generation
+                )
+            }
+            return .serverTooOld(welcome.serverVersion)
+        }
+        // Same generation, so an error is a real rejection of something else.
         if let error = welcome.error {
             return .rejected(code: error.code, message: error.message)
         }
-        guard welcome.generation == EndpointProtocol.generation else {
-            return .clientTooOld(
-                serverVersion: welcome.serverVersion,
-                generation: welcome.generation
-            )
+        // The generation matches but the daemon may still predate what this
+        // client needs (`rootshell testVersionsBelowMinimumAreRefused`). An
+        // unparseable version is refused rather than trusted: a daemon that
+        // cannot say what it is cannot be checked against a floor.
+        switch DaemonVersion.parse(welcome.serverVersion) {
+        case .success(let version):
+            guard version >= EndpointProtocol.minimumDaemonVersion else {
+                return .serverTooOld(welcome.serverVersion)
+            }
+        case .failure:
+            return .unusableVersion(welcome.serverVersion)
         }
         guard welcome.snapshotCodec == EndpointProtocol.snapshotCodecV1,
               welcome.surfaceCodec == EndpointProtocol.surfaceCodecV1,

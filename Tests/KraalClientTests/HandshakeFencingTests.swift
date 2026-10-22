@@ -59,8 +59,8 @@ struct CompatibilityPortTests {
     /// generation is an old client, and the user has to update Kraal — telling
     /// them to update Herdr sends them to the wrong machine.
     ///
-    /// RED AS PORTED: `evaluate` checks `welcome.error` first, so this reports a
-    /// generic rejection.
+    /// issue #5: `evaluate` now decides from the generation before looking at
+    /// `welcome.error`, so the rejection names the right side to update.
     @Test("generation, not the error code, says which side is older")
     func generationBeatsError() throws {
         let parsed = try welcome(compatibleJSON(
@@ -75,9 +75,8 @@ struct CompatibilityPortTests {
     /// "update Herdr", and `serverVersion` has to survive into the message so the
     /// user can see what they are running.
     ///
-    /// RED AS PORTED: the `.serverTooOld` case exists but `evaluate` never
-    /// produces it — a lower generation currently falls into `clientTooOld`,
-    /// which tells the user to update the wrong thing.
+    /// issue #5: a lower generation now maps to `.serverTooOld`, so the banner
+    /// no longer tells the user to update the wrong end.
     @Test("an older daemon is reported as too old")
     func olderDaemon() throws {
         let parsed = try welcome(compatibleJSON(generation: 0, version: "0.8.2"))
@@ -93,7 +92,9 @@ struct CompatibilityPortTests {
     /// right generation but is older than the client's minimum must be refused
     /// with advice, not accepted and then driven into a half-working state.
     ///
-    /// RED AS PORTED: nothing parses `server_version`, so `0.4.0` is accepted.
+    /// issue #5: `server_version` is parsed (`DaemonVersion`) and checked against
+    /// `EndpointProtocol.minimumDaemonVersion`; an unreadable string is refused
+    /// rather than trusted.
     @Test("a version below the client minimum is refused")
     func versionFloor() throws {
         for version in ["0.4.0", "0.8.9", "not-a-version"] {
@@ -110,7 +111,7 @@ struct CompatibilityPortTests {
     /// daemon cannot render must be refused locally. The daemon's own limit is
     /// 4096 per axis and 1 000 000 cells total.
     ///
-    /// RED AS PORTED: `resizeSurface` only checks for zero.
+    /// issue #8: `resizeSurface` used to check only for zero.
     @Test("an unrenderable grid is refused by the store")
     @MainActor
     func gridLimit() {
@@ -122,18 +123,25 @@ struct CompatibilityPortTests {
         // Total-cell limit: 1001 x 1000 = 1 001 000.
         store.resizeSurface(cols: 1001, rows: 1000)
         #expect(store.surfaceSize == before, "1 001 000 cells was accepted")
+        // A legal grid still goes through, so the guard is not a blanket refusal.
+        store.resizeSurface(cols: 120, rows: 40)
+        #expect(store.surfaceSize == ClientSurfaceSize(cols: 120, rows: 40))
     }
 }
 
 @Suite("Snapshot fencing")
 struct SnapshotFencePortTests {
-    private static func snapshotJSON(revision: UInt64, panes: String? = nil) -> Data {
+    private static func snapshotJSON(
+        revision: UInt64,
+        bootId: String = "boot-v1",
+        panes: String? = nil
+    ) -> Data {
         let paneList = panes ?? """
             [{"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "focused": true}]
             """
         let json = """
         {
-          "boot_id": "boot-v1",
+          "boot_id": "\(bootId)",
           "revision": \(revision),
           "update_install_command": "",
           "worktree_directory": "",
@@ -157,8 +165,14 @@ struct SnapshotFencePortTests {
         return Data(json.utf8)
     }
 
-    private static func snapshot(revision: UInt64) throws -> ClientShellSnapshot {
-        try JSONDecoder().decode(ClientShellSnapshot.self, from: snapshotJSON(revision: revision))
+    private static func snapshot(
+        revision: UInt64,
+        bootId: String = "boot-v1"
+    ) throws -> ClientShellSnapshot {
+        try JSONDecoder().decode(
+            ClientShellSnapshot.self,
+            from: snapshotJSON(revision: revision, bootId: bootId)
+        )
     }
 
     /// `session_state.rs:104` `session_deadlines_and_snapshot_revision_fence`.
@@ -168,7 +182,9 @@ struct SnapshotFencePortTests {
     /// `projectionRevision == snapshot.revision`, so adopting a regressed
     /// revision makes every live frame look stale at once.
     ///
-    /// RED AS PORTED: `handleSnapshot` assigns unconditionally.
+    /// issue #6: `handleSnapshot` now fences through `snapshotIsCurrent`, which
+    /// compares boot ids first so a daemon restart (same id, lower revision) is
+    /// still accepted.
     @Test("a snapshot revision regression is not published")
     @MainActor
     func revisionRegression() throws {
@@ -189,11 +205,25 @@ struct SnapshotFencePortTests {
         #expect(store.snapshot?.revision == 7)
     }
 
+    /// A daemon restart resets the revision counter, so a *lower* revision under
+    /// a *different* boot id is legitimate and must be accepted. Getting this
+    /// wrong would freeze the screen on every daemon restart.
+    @Test("a lower revision under a new boot id is accepted")
+    @MainActor
+    func newBootResetsRevision() throws {
+        let store = AppStore()
+        store.handleSnapshot(try Self.snapshot(revision: 7, bootId: "boot-v1"))
+        store.handleSnapshot(try Self.snapshot(revision: 2, bootId: "boot-v2"))
+        #expect(store.snapshot?.revision == 2)
+        #expect(store.snapshot?.bootId == "boot-v2")
+    }
+
     /// `rootshell testSessionSnapshotRejectsDuplicateTopologyIDs`: duplicate
     /// identifiers in a snapshot make pane lookup ambiguous — every hit test and
     /// every surface slice would pick whichever entry happened to be first.
     ///
-    /// RED AS PORTED: nothing validates uniqueness.
+    /// issue #6: `ClientShellSnapshot.init(from:)` now rejects duplicates in all
+    /// four id layers.
     @Test("duplicate pane ids are rejected at decode time")
     func duplicatePaneIDs() {
         let duplicated = Self.snapshotJSON(
@@ -237,17 +267,13 @@ struct ConnectionLimitTests {
     ///
     /// Asserted through `phase`, because `retryAt` is what the UI counts down.
     ///
-    /// RED AS PORTED: the delay is computed twice from two different reads of the
-    /// same counter. `scheduleReconnect` derives `attempt`/`retryAt` from
-    /// `endpoint.reconnectAttempt` *before* `scheduleEndpointRetry` increments it,
-    /// so the countdown the user sees lags the timer that is actually running.
-    /// Measured on this build: reported delays are 1, 1, 2, 4, 8, 16, 30 while the
-    /// sleeps are 1, 2, 4, 8, 16, 30 — from the second retry on, the banner says
-    /// "1 s" for a 2 s wait. Not a reconnect storm, but every backoff after the
-    /// first shows the wrong number.
+    /// The backoff lives on the endpoint, not the store (every machine keeps its
+    /// own connection), so the store needs one before it can schedule a retry.
     ///
-    /// The backoff now lives on the endpoint, not the store (every machine keeps
-    /// its own connection), so the store needs one before it can schedule a retry.
+    /// This was red until #9: the delay was computed twice from two reads of one
+    /// counter — `scheduleReconnect` derived `attempt`/`retryAt` before
+    /// `scheduleEndpointRetry` incremented it, so the countdown lagged the real
+    /// sleep. `scheduleEndpointRetry` is now the single source of both.
     @Test("reconnect backoff doubles and is capped")
     @MainActor
     func backoffIsBounded() {
