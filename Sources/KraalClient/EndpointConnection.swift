@@ -21,7 +21,12 @@ public enum ConnectionEvent: Sendable {
     case windowTitle(String?)
     case mouseCapture(enabled: Bool, sgrPixels: Bool)
     /// The focused program asked the host to report every key, including bare
-    /// modifiers and key releases (`ServerMessage::ClientShellKeyboardReportAll`).
+    /// modifiers (`ServerMessage::ClientShellKeyboardReportAll`).
+    ///
+    /// **Not** about key releases: whether a release follows a press is decided by
+    /// the key itself upstream (`protocol/wire.rs:315`), and claiming otherwise
+    /// makes the daemon hold every press waiting for a release this client never
+    /// sends. See `TerminalInputDecoder.reportsAllKeys`.
     case keyboardReportAll(enabled: Bool)
     case notification(SemanticNotification)
     case bell(count: UInt16)
@@ -568,9 +573,9 @@ extension EndpointConnection {
                 eventHandler(.error("daemon: \(error)"))
             }
         case let .clientShellKeyboardReportAll(enabled):
-            // Reported, not dropped: without it the decoder keeps sending
-            // `tracksRelease: false`, so a program that turned on kitty's
-            // report-all-keys mode never hears about releases (issue #20).
+            // Reported, not dropped (issue #20): the mode has to be observable
+            // before anything can act on it. It deliberately does *not* touch
+            // `tracksRelease` — see the note on the event itself.
             eventHandler(.keyboardReportAll(enabled: enabled))
         default:
             // Byte-level terminal traffic belongs to the per-pane channels, and
