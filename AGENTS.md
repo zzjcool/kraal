@@ -180,27 +180,46 @@ see configuration if you want to enable it.
 
 ## 2. 跑起来
 
+### 看真实效果：`make run`
+
+```bash
+make run              # 构建 + 打包 + 启动，连你自己的 daemon
+make run FOCUS=0      # 同上，但让窗口到前台（会抢焦点）
+make socket-status    # 连的是哪个 socket
+make logs             # 跟日志
+make stop
+```
+
 ### debug bundle 默认指向一个不存在的沙箱
 
-`Scripts/build-app.sh` 生成的启动器会强制：
+`Scripts/build-app.sh` 生成的启动器默认强制：
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `KRAAL_HERDR_SOCKET` | `/tmp/kraal-mine/herdr-client.sock` | 不存在时连不上，显示连接面板 |
+| `KRAAL_HERDR_SOCKET` | `/tmp/kraal-mine/herdr-client.sock` | 通常是失效的旧 socket，连不上就显示连接面板 |
 | `KRAAL_DEV_BACKGROUND` | `1` | 不抢焦点、不做常规 App |
 | `KRAAL_HERDR_HOME` | `/tmp/kraal-mine/herdr-home` | 给 `herdr` 子进程一份空名册，避免改到真实 machines |
 
-**连真实 daemon**（也就是用户实际在用的那个）时：
+`make run` 就是替你把三个都覆盖掉。手动等价形式：
 
 ```bash
-open --env KRAAL_HERDR_SOCKET="$HOME/.config/herdr/herdr-client.sock" \
-     --env KRAAL_HERDR_HOME="$HOME" \
-     --env KRAAL_DEV_BACKGROUND=0 \
-     build/Kraal.app
+KRAAL_HERDR_SOCKET="$HOME/.config/herdr/herdr-client.sock" \
+KRAAL_HERDR_HOME="$HOME" KRAAL_DEV_BACKGROUND=1 \
+  build/Kraal.app/Contents/MacOS/KraalMac-bin
 ```
 
-加上 `KRAAL_HERDR_HOME="$HOME"` 才能真正看到 3 台远端机器——否则 Machines
-面板是空的。副作用：`KRAAL_DEV_BACKGROUND=0` 会真的抢焦点和键盘。
+两个容易搞错的地方：
+
+- **两套 socket 不能混**：`herdr-client.sock` 是 Kraal 的 bincode 协议；
+  `herdr.sock` 是 CLI 的 JSON API（`$HERDR_SOCKET_PATH` 指向那个）。用错协议
+  会得到 `EmptyResponse`。
+- **启动 `KraalMac-bin`，不是 `KraalMac`**：后者是 bash 启动器，脚本当
+  `CFBundleExecutable` 会让 `NSRunningApplication` 报 **`pid=-1`**。实测
+  Finder/Safari 正常，只有它报 -1，`kraal-gui window` 因此找不到窗口。
+  代价是启动器提供的沙箱默认值要由调用方自己传。
+
+连真实 daemon 时 `KRAAL_HERDR_HOME="$HOME"` 是必须的，否则 Machines 面板是空的
+（看不到 6 台远端机器）。
 
 ### 日志
 

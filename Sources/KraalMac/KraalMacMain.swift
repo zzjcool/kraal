@@ -44,10 +44,27 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         let environment = ProcessInfo.processInfo.environment
         if let path = environment["KRAAL_HERDR_SOCKET"], !path.isEmpty {
             kraalLog("launch: overriding daemon socket -> \(path)")
-            return ConnectionSettings(name: "sandbox", transport: .local)
+            // The name is what the sidebar and the status bar show, so it has to
+            // describe the socket, not the fact that an override was used. Pointing
+            // the override at this Mac's own daemon is exactly how a developer asks
+            // for the real session; calling that "sandbox" made a live run look like
+            // fake data at a glance.
+            return ConnectionSettings(name: connectionName(forSocket: path), transport: .local)
         }
         kraalLog("launch: no socket override, using this Mac's herdr")
         return .local
+    }
+
+    /// "This Mac" when the path is this Mac's own daemon, "sandbox" otherwise.
+    ///
+    /// Compared by canonical path so a symlinked or `~`-relative spelling of the
+    /// real socket still counts as real.
+    private static func connectionName(forSocket path: String) -> String {
+        let candidate = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let real = "\(home)/.config/herdr/herdr-client.sock"
+        return candidate == real ? "This Mac" : "sandbox"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
