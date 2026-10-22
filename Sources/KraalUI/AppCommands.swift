@@ -79,6 +79,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
     case splitDown = "split_down"
     case closePane = "close_pane"
     case renamePane = "rename_pane"
+    case copyMode = "copy_mode"
     case clearPane = "clear_pane"
     case paste = "paste"
     case toggleZoom = "toggle_zoom"
@@ -125,6 +126,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
         case .splitDown: return SplitOrientation.down.title
         case .closePane: return "Close Pane"
         case .renamePane: return "Rename Pane…"
+        case .copyMode: return "Copy Mode…"
         case .clearPane: return "Clear Pane"
         case .paste: return "Paste"
         case .toggleZoom: return "Toggle Pane Zoom"
@@ -246,7 +248,7 @@ public extension AppCommand {
     /// there is no pane to act on. When these were separate switches, a command
     /// could be routed with a pane and validated without one.
     static let paneScopedCommands: Set<AppCommand> = [
-        .closePane, .clearPane, .paste, .toggleZoom, .renamePane,
+        .closePane, .clearPane, .copyMode, .paste, .toggleZoom, .renamePane,
         .splitRight, .splitDown, .previousPane, .nextPane,
         .focusLeft, .focusRight, .focusUp, .focusDown,
         .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
@@ -304,6 +306,14 @@ public struct CommandEnvironment {
     /// synchronous and explicit.
     public var targetPaneId: String?
 
+    /// Enters copy mode for a pane.
+    ///
+    /// A closure rather than a store method because copy mode is *view* state: it
+    /// lives next to the window that draws the mode bar, and the store has no
+    /// business knowing which window is showing it. Everything the store does
+    /// (motions, reading the selection) is already in `AppStore+CopyMode`.
+    public var enterCopyMode: (String) -> Void
+
     public init(
         prompt: @escaping (CommandPrompt) -> Void = { _ in },
         toggleSidebar: @escaping () -> Void = {},
@@ -311,7 +321,8 @@ public struct CommandEnvironment {
         showCommands: @escaping () -> Void = {},
         showShortcuts: @escaping () -> Void = {},
         showSettings: @escaping () -> Void = {},
-        targetPaneId: String? = nil
+        targetPaneId: String? = nil,
+        enterCopyMode: @escaping (String) -> Void = { _ in }
     ) {
         self.prompt = prompt
         self.toggleSidebar = toggleSidebar
@@ -320,6 +331,7 @@ public struct CommandEnvironment {
         self.showShortcuts = showShortcuts
         self.showSettings = showSettings
         self.targetPaneId = targetPaneId
+        self.enterCopyMode = enterCopyMode
     }
 }
 
@@ -345,6 +357,20 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
          .focusTab1, .focusTab2, .focusTab3, .focusTab4, .focusTab5,
          .focusTab6, .focusTab7, .focusTab8, .focusTab9:
         performNavigation(command, on: store)
+
+    case .copyMode:
+        // Not `performPaneAction`: entering copy mode is a *client* state change,
+        // not a daemon command. It is routed here so ⌘F and the menu item take the
+        // same path as everything else.
+        // `resolveTargetPane`, not `store.snapshot.focusedPaneId`: the same reason
+        // every other pane command uses it — a context menu names its pane, and the
+        // focused id has not moved yet at dispatch time.
+        if let target = AppCommands.resolveTargetPane(
+            contextPaneId: env.targetPaneId,
+            focusedPaneId: store.snapshot?.focusedPaneId
+        ) {
+            env.enterCopyMode(target)
+        }
 
     case .splitRight, .splitDown, .clearPane, .paste, .toggleZoom,
          .focusLeft, .focusRight, .focusUp, .focusDown,

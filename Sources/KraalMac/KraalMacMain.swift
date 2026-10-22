@@ -18,6 +18,10 @@ import SwiftUI
 @MainActor
 final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
+    /// Owns the copy-mode session for this window: its cursor, its visible bar and
+    /// the key monitor that drives it. Lives here rather than in the store because
+    /// it is per-window view state.
+    private var copyMode: CopyModeController?
     private let store = AppStore(target: KraalAppDelegate.initialTarget)
     private var mouseForwarder: MouseForwarder?
     /// Terminals, kept so the pane menu can reach a pane's selection and clipboard.
@@ -98,7 +102,13 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        let root = RootView(store: store, windowActions: windowActions) { store, paneId, geometry in
+        let copyController = makeCopyModeController(store: store)
+
+        let root = RootView(
+            store: store,
+            windowActions: windowActions,
+            copyModeBanner: copyController.banner
+        ) { store, paneId, geometry in
             guard let surface = store.surface else {
                 return AnyView(Color(nsColor: .textBackgroundColor))
             }
@@ -156,6 +166,9 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         mouseForwarder = forwarder
         self.paneTerminalPool = pool
 
+        // Now that there is a window, the key monitor can attach to it.
+        copyController.attach(to: window)
+
         // The menu bar is installed after the window exists so validation can
         // consult a live store; a bare NSApplication has no main menu at all, so
         // without this there is no ⌘Q, no Edit menu and no way to reach New Tab
@@ -168,7 +181,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 showCommands: { [windowActions] in windowActions.showCommandPalette() },
                 showShortcuts: { [windowActions] in windowActions.showShortcuts() },
                 showSettings: { [windowActions] in windowActions.showSettings() },
-                showDebugInfo: { [windowActions] in windowActions.showDebugInfo() }
+                showDebugInfo: { [windowActions] in windowActions.showDebugInfo() },
+                enterCopyMode: { [weak self] paneId in self?.copyMode?.enter(paneId: paneId) }
             )
         )
         menu.install()
@@ -176,6 +190,19 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
         store.loadDefaultSidebarConfig()
         store.connect()
+    }
+
+    /// Creates this window's copy-mode controller.
+    ///
+    /// Split out of `applicationDidFinishLaunching`, which the linter holds to 80
+    /// lines — and which is genuinely easier to read without a three-line aside in
+    /// the middle about where the banner goes.
+    private func makeCopyModeController(store: AppStore) -> CopyModeController {
+        // Created before the view so its banner can be handed to the status bar;
+        // attached to the window once there is one.
+        let controller = CopyModeController(store: store)
+        copyMode = controller
+        return controller
     }
 
     /// Builds and shows the main window.

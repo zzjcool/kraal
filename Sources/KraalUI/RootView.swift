@@ -32,13 +32,19 @@ public struct RootView: View {
     /// buildable (and previewable) without the Ghostty framework.
     private let paneContent: (AppStore, String, PaneSurfacePane) -> AnyView
 
+    /// The copy-mode bar's text. `nil` in previews and tests, where there is no
+    /// copy mode — the status bar simply has one less thing to show.
+    private let copyModeBanner: CopyModeBanner?
+
     public init(
         store: AppStore,
         windowActions: WindowActions? = nil,
+        copyModeBanner: CopyModeBanner? = nil,
         paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView
     ) {
         _store = State(initialValue: store)
         self.windowActions = windowActions ?? WindowActions()
+        self.copyModeBanner = copyModeBanner
         self.paneContent = paneContent
     }
 
@@ -65,8 +71,11 @@ public struct RootView: View {
                     Divider()
                 }
                 if statusBarVisible {
-                    StatusBarView { showCommands = true }
-                        .environment(store)
+                    StatusBarView(
+                        onShowCommands: { showCommands = true },
+                        copyMode: copyModeBanner
+                    )
+                    .environment(store)
                 }
             }
         }

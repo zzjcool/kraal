@@ -87,9 +87,18 @@ struct TabBarView: View {
 struct StatusBarView: View {
     @Environment(AppStore.self) private var store
     var onShowCommands: () -> Void
+    /// The copy-mode bar, when this window has one.
+    var copyMode: CopyModeBanner?
 
     var body: some View {
         HStack(spacing: 8) {
+            // Copy mode takes the left of the bar while active, because it changes
+            // what every key does — it is the most important thing on screen and a
+            // user who does not notice it thinks their shell is broken.
+            if let copyMode {
+                CopyModeBannerView(banner: copyMode)
+            }
+
             if let workspace = store.focusedWorkspace {
                 Label {
                     Text(workspace.label.isEmpty ? "w\(workspace.number)" : workspace.label)
@@ -167,5 +176,29 @@ struct StatusBarView: View {
         .padding(.horizontal, KraalTheme.Space.base)
         .frame(height: KraalTheme.statusBarHeight)
         .glassChrome(.bar, rim: false)
+    }
+}
+
+/// The copy-mode indicator.
+///
+/// Its own view so it can observe the banner: `StatusBarView` reads the store from
+/// the environment and would otherwise not be rebuilt when the mode's cursor moves
+/// (the store does not change for a local cursor move).
+struct CopyModeBannerView: View {
+    @ObservedObject var banner: CopyModeBanner
+
+    var body: some View {
+        if let text = banner.text {
+            Label {
+                Text(text)
+                    .font(.system(size: 10, design: .monospaced))
+                    .lineLimit(1)
+            } icon: {
+                Image(systemName: "text.cursor")
+                    .font(.system(size: 9))
+            }
+            .foregroundStyle(Color.accentColor)
+            .help("Copy mode: select text from this pane's history. Esc leaves.")
+        }
     }
 }
