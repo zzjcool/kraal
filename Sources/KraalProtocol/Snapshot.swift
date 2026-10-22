@@ -119,6 +119,36 @@ public struct ClientShellSnapshot: Decodable, Equatable, Sendable {
         panes = try container.decodeIfPresent([ClientShellPane].self, forKey: .panes) ?? []
         agents = try container.decodeIfPresent([ClientShellAgent].self, forKey: .agents) ?? []
         commands = try container.decodeIfPresent([ClientShellCommand].self, forKey: .commands) ?? []
+
+        // Duplicate topology ids make a lookup ambiguous: every hit test and
+        // every surface slice would silently take whichever entry came first,
+        // so clicks land on the wrong pane and no layer reports a problem.
+        //
+        // Ported from `rootshellTests/HerdrProtocolTests.swift:468`
+        // `testSessionSnapshotRejectsDuplicateTopologyIDs`, which checks all
+        // three layers. `agents` is keyed by `paneId` too — one agent per pane —
+        // so it gets the same check; duplicate *workspace* and *tab* ids would
+        // break the sidebar the same way.
+        try Self.rejectDuplicateIDs(workspaces.map(\.workspaceId), layer: "workspaces")
+        try Self.rejectDuplicateIDs(tabs.map(\.tabId), layer: "tabs")
+        try Self.rejectDuplicateIDs(panes.map(\.paneId), layer: "panes")
+        try Self.rejectDuplicateIDs(agents.map(\.paneId), layer: "agents")
+    }
+
+    private static func rejectDuplicateIDs(_ ids: [String], layer: String) throws {
+        guard Set(ids).count == ids.count else {
+            let duplicates = ids.reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 }
+                .filter { $0.value > 1 }
+                .keys
+                .sorted()
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: [],
+                    debugDescription: "snapshot has duplicate \(layer) ids: "
+                        + duplicates.joined(separator: ", ")
+                )
+            )
+        }
     }
 }
 

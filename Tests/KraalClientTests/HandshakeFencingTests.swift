@@ -130,13 +130,17 @@ struct CompatibilityPortTests {
 
 @Suite("Snapshot fencing")
 struct SnapshotFencePortTests {
-    private static func snapshotJSON(revision: UInt64, panes: String? = nil) -> Data {
+    private static func snapshotJSON(
+        revision: UInt64,
+        bootId: String = "boot-v1",
+        panes: String? = nil
+    ) -> Data {
         let paneList = panes ?? """
             [{"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "focused": true}]
             """
         let json = """
         {
-          "boot_id": "boot-v1",
+          "boot_id": "\(bootId)",
           "revision": \(revision),
           "update_install_command": "",
           "worktree_directory": "",
@@ -160,8 +164,14 @@ struct SnapshotFencePortTests {
         return Data(json.utf8)
     }
 
-    private static func snapshot(revision: UInt64) throws -> ClientShellSnapshot {
-        try JSONDecoder().decode(ClientShellSnapshot.self, from: snapshotJSON(revision: revision))
+    private static func snapshot(
+        revision: UInt64,
+        bootId: String = "boot-v1"
+    ) throws -> ClientShellSnapshot {
+        try JSONDecoder().decode(
+            ClientShellSnapshot.self,
+            from: snapshotJSON(revision: revision, bootId: bootId)
+        )
     }
 
     /// `session_state.rs:104` `session_deadlines_and_snapshot_revision_fence`.
@@ -171,7 +181,9 @@ struct SnapshotFencePortTests {
     /// `projectionRevision == snapshot.revision`, so adopting a regressed
     /// revision makes every live frame look stale at once.
     ///
-    /// RED AS PORTED: `handleSnapshot` assigns unconditionally.
+    /// issue #6: `handleSnapshot` now fences through `snapshotIsCurrent`, which
+    /// compares boot ids first so a daemon restart (same id, lower revision) is
+    /// still accepted.
     @Test("a snapshot revision regression is not published")
     @MainActor
     func revisionRegression() throws {
@@ -192,11 +204,25 @@ struct SnapshotFencePortTests {
         #expect(store.snapshot?.revision == 7)
     }
 
+    /// A daemon restart resets the revision counter, so a *lower* revision under
+    /// a *different* boot id is legitimate and must be accepted. Getting this
+    /// wrong would freeze the screen on every daemon restart.
+    @Test("a lower revision under a new boot id is accepted")
+    @MainActor
+    func newBootResetsRevision() throws {
+        let store = AppStore()
+        store.handleSnapshot(try Self.snapshot(revision: 7, bootId: "boot-v1"))
+        store.handleSnapshot(try Self.snapshot(revision: 2, bootId: "boot-v2"))
+        #expect(store.snapshot?.revision == 2)
+        #expect(store.snapshot?.bootId == "boot-v2")
+    }
+
     /// `rootshell testSessionSnapshotRejectsDuplicateTopologyIDs`: duplicate
     /// identifiers in a snapshot make pane lookup ambiguous — every hit test and
     /// every surface slice would pick whichever entry happened to be first.
     ///
-    /// RED AS PORTED: nothing validates uniqueness.
+    /// issue #6: `ClientShellSnapshot.init(from:)` now rejects duplicates in all
+    /// four id layers.
     @Test("duplicate pane ids are rejected at decode time")
     func duplicatePaneIDs() {
         let duplicated = Self.snapshotJSON(
