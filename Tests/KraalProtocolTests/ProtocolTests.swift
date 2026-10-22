@@ -749,30 +749,31 @@ struct TerminalInputDecoderTests {
             == ["key(arrowLeft, m4)"])
     }
 
-    /// Issue #20: every key event was sent with `tracksRelease: false`, so a
-    /// program that enabled kitty's report-all-keys mode still saw a press as a
-    /// complete keystroke. The flag has to reach the wire field.
-    @Test("report-all-keys sets tracksRelease on key events")
-    func reportAllKeysSetsTracksRelease() {
-        var decoder = TerminalInputDecoder()
-        decoder.reportsAllKeys = true
-        let events = decoder.decode(Data([0x1B, 0x5B, 0x41])) // Up arrow
-        #expect(events.count == 1)
-        guard case let .key(_, _, _, _, _, _, tracksRelease, _, _) = events.first else {
-            Issue.record("expected a key event, got \(events)")
-            return
+    /// `tracksRelease` must stay false even when the program asked for every key.
+    ///
+    /// The tempting fix for issue #20 was to set it from the report-all flag, and
+    /// that is wrong: the daemon *holds* a press whose `tracks_release` is true
+    /// until the matching release arrives (`server/clients.rs:275-311`), and Kraal
+    /// never emits releases. So the claim would make keys vanish. Upstream decides
+    /// the field from the key itself (`protocol/wire.rs:315`), which needs release
+    /// events this client does not produce yet.
+    ///
+    /// This test exists to stop that mistake from being made again — it pins the
+    /// opposite of what it looks like it should.
+    @Test("report-all-keys does not claim to track releases")
+    func reportAllKeysDoesNotClaimReleases() {
+        for reportAll in [false, true] {
+            var decoder = TerminalInputDecoder()
+            decoder.reportsAllKeys = reportAll
+            let events = decoder.decode(Data([0x1B, 0x5B, 0x41])) // Up arrow
+            #expect(events.count == 1)
+            guard case let .key(_, _, kind, _, _, _, tracksRelease, _, _) = events.first else {
+                Issue.record("expected a key event, got \(events)")
+                return
+            }
+            #expect(!tracksRelease, "reportAll=\(reportAll) must not claim a release follows")
+            #expect(kind == .press)
         }
-        #expect(tracksRelease)
-
-        // Off by default: a program that never asked must keep getting plain
-        // presses, or every program would start seeing duplicate keystrokes.
-        var plain = TerminalInputDecoder()
-        let plainEvents = plain.decode(Data([0x1B, 0x5B, 0x41]))
-        guard case let .key(_, _, _, _, _, _, plainTracks, _, _) = plainEvents.first else {
-            Issue.record("expected a key event, got \(plainEvents)")
-            return
-        }
-        #expect(!plainTracks)
     }
 
     @Test("function keys decode from both SS3 and CSI forms")

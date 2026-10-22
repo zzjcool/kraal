@@ -258,24 +258,40 @@ xterm 的 SS3 形如 `ESC O 1;5 P`（F1+Ctrl），我方只解析 3 字节 `ESC 
 **一个** `textCommit`，所以差别不在事件数量，而在 wire tag（1 vs 3）与 daemon
 侧的语义——所以测试钉的是 tag。
 
-### ✅ 7-7（已修）`clientShellKeyboardReportAll` 被丢弃
-
-### ⚠️ 7-7 `clientShellKeyboardReportAll` 被丢弃
-`EndpointConnection.swift:442-447` 把 tag17 归进"byte-level terminal traffic"直接
-`break`。上游用它在 prefix/navigate 模式下要求宿主上报所有按键
-（`render.rs:205-226`），并在重放时重发（`surface_interest.rs:801`）。
-我方不需要 prefix 模式，但 **Kitty keyboard 模式的 pane 是否拿到 key release
-完全取决于这个开关**；丢掉的直接后果是需要 release 的 TUI 收到不完整事件。
+### ✅ 7-7（已修，且修法被修正过一次）`clientShellKeyboardReportAll` 被丢弃
+`EndpointConnection.swift:442-447` 曾把 tag17 归进 "byte-level terminal traffic"
+直接 `break`。上游用它要求宿主上报所有按键（`render.rs:205-226`），并在 surface
+重放时重发（`surface_interest.rs:801`）。
 
 **修法**：事件改成 `ConnectionEvent.keyboardReportAll(enabled:)`，存进
-`AppStore.keyboardReportAll`，`sendInput` 每次把它写进新的
-`TerminalInputDecoder.reportsAllKeys`，由后者决定所有 `key` 事件的
-`tracksRelease`（7 处硬编码 `false` 全部替换）。
+`AppStore.keyboardReportAll`，`sendInput` 每次写进
+`TerminalInputDecoder.reportsAllKeys`。模式现在是可观察的，不再被丢弃。
+
+#### ⚠️ 本文档原先的说法是错的，导致过一次错误修复
+
+原文写：「Kitty keyboard 模式的 pane 是否拿到 key release 完全取决于这个开关。」
+
+**这是错的。** 上游把两件事拆开：
+
+| 概念 | 由什么决定 | 我们这边 |
+|---|---|---|
+| 宿主是否上报所有按键 | `ClientShellKeyboardReportAll` | 已有（`reportsAllKeys`） |
+| 一个 press 之后会不会跟 release | key 自身 `generated_text.is_none() \|\| has_physical_identity()`（`protocol/wire.rs:315`） | **没有实现**（从不产生 `ClientKeyKind.release`） |
+
+按错误表述去修，就会把 `tracksRelease` 绑到 report-all 上。而 daemon 对
+`tracks_release: true` 的处理是**把 press 挂起、等配对 release 再发**
+（`server/clients.rs:275-311`）—— 我们的 release 永远不来，于是**这个模式下的
+按键全部消失**，比不改还糟。
+
+现在 `tracksRelease` 恒为 `false`。测试
+`report-all-keys does not claim to track releases` 钉的是**相反的方向**：即使
+`reportsAllKeys == true` 也不得声称跟踪 release。要真正支持 release，需要先让
+按键管线产生 `ClientKeyKind.release` 事件，那是另一件事。
 
 **未做**：`directTerminalKeyboardProtocol`（kitty flags / modifyOtherKeys）仍在
 "byte-level traffic" 分组里被忽略。Kraal 不把键盘协议转发给宿主终端，而是自己
-编码按键；把它接上需要改按键编码器（非 Latin-1 键怎么发），是独立的一块，不在
-issue #20 的验收范围内。
+编码按键；把它接上需要改按键编码器（非 Latin-1 键怎么发），是独立的一块。
+
 
 ### ✅ 7-8（已修 · PR #17）侧边栏 rules 用了不存在的 `when`/`value` 键
 `SidebarConfig.swift:160` 读 `ruleTable["when"]` + `["value"]`；

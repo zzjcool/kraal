@@ -25,15 +25,21 @@ public struct TerminalInputDecoder {
     /// complete escape sequence.
     private var pending: [UInt8] = []
 
-    /// Whether the focused program asked for every key event, including bare
-    /// modifiers and releases (`ServerMessage::ClientShellKeyboardReportAll`).
+    /// Whether the focused program asked for every key event
+    /// (`ServerMessage::ClientShellKeyboardReportAll`).
     ///
-    /// Upstream keeps this per connection and pushes it to the host terminal as
-    /// the kitty "report all keys" enhancement (`shell_runtime.rs:98-115`). Here it
-    /// decides the wire field the daemon reads: `tracksRelease` tells the program
-    /// that a press will be followed by a release, so a program that enabled the
-    /// mode stops treating the first event as a complete keystroke. Leaving it
-    /// false while the mode is on is why the setting appeared to do nothing.
+    /// Recorded so the mode is observable rather than dropped (issue #20), but it
+    /// must **not** be wired to `tracksRelease`: those are two different things.
+    /// `tracksRelease` means "a release for this key is coming", and the daemon
+    /// acts on it by *holding the press* until the release arrives
+    /// (`server/clients.rs:275-311`). Kraal never emits release events, so
+    /// claiming to track them would make every key disappear for a program in
+    /// this mode — worse than ignoring the message.
+    ///
+    /// Upstream derives the field from the key itself — `generated_text.is_none()
+    /// || has_physical_identity()` (`protocol/wire.rs:315`) — not from this flag.
+    /// Applying that rule needs `ClientKeyKind.release` events, which is a change
+    /// to the key pipeline, not to this decoder.
     public var reportsAllKeys = false
 
     public init() {}
@@ -77,7 +83,7 @@ public struct TerminalInputDecoder {
                     repeatCount: 1,
                     shiftedCodepoint: nil,
                     generatedText: nil,
-                    tracksRelease: reportsAllKeys,
+                    tracksRelease: false,
                     physicalKeyId: nil,
                     windowsRecord: nil
                 ))
@@ -123,7 +129,7 @@ public struct TerminalInputDecoder {
             repeatCount: 1,
             shiftedCodepoint: nil,
             generatedText: nil,
-            tracksRelease: reportsAllKeys,
+            tracksRelease: false,
             physicalKeyId: nil,
             windowsRecord: nil
         )
@@ -150,7 +156,7 @@ public struct TerminalInputDecoder {
                 repeatCount: 1,
                 shiftedCodepoint: nil,
                 generatedText: nil,
-                tracksRelease: reportsAllKeys,
+                tracksRelease: false,
                 physicalKeyId: nil,
                 windowsRecord: nil
             )
@@ -167,7 +173,7 @@ public struct TerminalInputDecoder {
             repeatCount: 1,
             shiftedCodepoint: nil,
             generatedText: nil,
-            tracksRelease: reportsAllKeys,
+            tracksRelease: false,
             physicalKeyId: nil,
             windowsRecord: nil
         )
@@ -236,7 +242,7 @@ public struct TerminalInputDecoder {
                 repeatCount: 1,
                 shiftedCodepoint: nil,
                 generatedText: nil,
-                tracksRelease: reportsAllKeys,
+                tracksRelease: false,
                 physicalKeyId: nil,
                 windowsRecord: nil
             )
@@ -281,7 +287,7 @@ public struct TerminalInputDecoder {
                     repeatCount: 1,
                     shiftedCodepoint: nil,
                     generatedText: nil,
-                    tracksRelease: reportsAllKeys,
+                    tracksRelease: false,
                     physicalKeyId: nil,
                     windowsRecord: nil
                 )
@@ -293,7 +299,7 @@ public struct TerminalInputDecoder {
                     repeatCount: 1,
                     shiftedCodepoint: nil,
                     generatedText: nil,
-                    tracksRelease: reportsAllKeys,
+                    tracksRelease: false,
                     physicalKeyId: nil,
                     windowsRecord: nil
                 )
