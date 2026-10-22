@@ -117,8 +117,9 @@ Kraal 的链路不同，这条信息从来没丢：
 
 **未验证**：VM 里没装中文输入法（`AppleEnabledInputSources` 只有 U.S. + CharacterPalette），
 所以没有真机 IME 候选框位置的截图证据。上面三条是对着 Ghostty 源码
-（`Surface.zig:2222-2260`）和渲染器字节输出确认的；`SurfaceANSIRendererTests` 的 4 条 IME 用例钉住了「隐藏时仍定位坐标」
-「无 cursor 停在上一可见位置」「隐藏位置不更新停放点」这三条断言。
+（`Surface.zig:2222-2260`）和渲染器字节输出确认的；`SurfaceANSIRendererTests` 的 4 条 IME 用例：三条钉住「隐藏时仍定位坐标」
+「无 cursor 停在上一可见位置」「隐藏位置不更新停放点」，第四条钉住「从未见过
+可见光标时退到底行末列」的兜底。
 
 ---
 
