@@ -42,8 +42,8 @@ SWIFT=/usr/bin/swift
 
 REDS=(
     # ANSI re-encoding — herdr/src/protocol/render_ansi.rs
-    "KraalProtocolTests.TerminalColorEncodingTests/namedForeground()"
-    "KraalProtocolTests.TerminalColorEncodingTests/namedBackground()"
+    # namedForeground / namedBackground used to be here: issue #1 replaced the
+    # 256-color fallback with the real 30-37 / 90-97 named-colour table.
     "KraalProtocolTests.TerminalColorEncodingTests/curlyUnderline()"
     "KraalProtocolTests.WideGlyphTests/halfwidthVoicedKana()"
     "KraalProtocolTests.ANSICursorAndHyperlinkTests/osc8()"
