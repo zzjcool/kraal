@@ -246,6 +246,83 @@ struct KeybindingProfileTests {
         #expect(KeybindingProfile.binding(for: "new_tab", in: nil) == nil)
     }
 
+    /// A trailing comment containing `[` used to make the parser treat every
+    /// following line as a continuation, so the **entire** `[keys]` table
+    /// vanished. Verified before the fix: 0 entries for a 2-binding table.
+    @Test("a comment containing a bracket does not swallow the table")
+    func commentWithBracket() {
+        let toml = """
+        [keys]
+        new_tab = "prefix+t"  # see [docs
+        next_tab = "prefix+n"
+        """
+        let entries = KeybindingProfile.entries(in: toml)
+        #expect(entries.count == 2)
+        #expect(KeybindingProfile.binding(for: "new_tab", in: toml) == "prefix+t")
+        #expect(KeybindingProfile.binding(for: "next_tab", in: toml) == "prefix+n")
+    }
+
+    /// A trailing comment on an array value made it fail the `]` suffix test, so
+    /// that one binding was dropped while the rest survived — the least
+    /// detectable version of the bug.
+    @Test("a trailing comment does not drop its value")
+    func trailingCommentOnValue() {
+        let toml = """
+        [keys]
+        prefix = ["ctrl+a"]  # note
+        new_tab = "prefix+t"
+        """
+        #expect(KeybindingProfile.binding(for: "prefix", in: toml) == "ctrl+a")
+        #expect(KeybindingProfile.binding(for: "new_tab", in: toml) == "prefix+t")
+    }
+
+    /// `[ keys ]` is legal TOML (`std-table-open = %x5B ws`), and an exact-match
+    /// header test treated it as an unrelated table — zeroing the panel.
+    @Test("a commented or spaced table header is still the keys table")
+    func headerVariants() {
+        let commented = """
+        [keys]  # the keys table
+        new_tab = "prefix+t"
+        """
+        #expect(KeybindingProfile.binding(for: "new_tab", in: commented) == "prefix+t")
+
+        let spaced = """
+        [ keys ]
+        new_tab = "prefix+t"
+        """
+        #expect(KeybindingProfile.binding(for: "new_tab", in: spaced) == "prefix+t")
+    }
+
+    /// A `#` inside a quoted value is not a comment. Stripping comments with a
+    /// plain `split(separator: "#")` would be a new way to lose data.
+    @Test("a hash inside a quoted binding is kept")
+    func hashInsideString() {
+        let toml = """
+        [keys]
+        custom = "prefix+#"
+        new_tab = "prefix+t"
+        """
+        #expect(KeybindingProfile.binding(for: "custom", in: toml) == "prefix+#")
+    }
+
+    /// A decoded `\n` is a real newline, which renders as a broken row. A combo
+    /// is one line, so such an item is not a binding.
+    @Test("an escape-decoded newline does not become a multi-line binding")
+    func newlineEscapeRejected() {
+        // Built by concatenation so the backslash-n stays two characters in the
+        // TOML text. Inside a `"""` literal it would be a real newline, which
+        // splits the statement and turns this into a truncated-document case
+        // rather than an escape case.
+        let backslash = "\\"
+        let toml = "[keys]\n"
+            + "prefix = [\"a" + backslash + "nb\", \"ctrl+a\"]\n"
+            + "new_tab = \"prefix+t\""
+        let binding = KeybindingProfile.binding(for: "prefix", in: toml)
+        // What must not happen is a newline in the displayed value.
+        #expect(binding?.contains("\n") != true)
+        #expect(binding?.contains("ctrl+a") == true)
+    }
+
     /// Comments, blank lines and non-string values are skipped rather than
     /// guessed at — an upstream addition must add unknown keys, not break the
     /// panel.

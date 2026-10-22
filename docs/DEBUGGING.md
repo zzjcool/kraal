@@ -280,7 +280,32 @@ Ghostty 用 Metal 绘制，AX 树几乎是空的，所以**不要指望用 Acces
 
 一条老测试本来断言相反（跳过 `[` 行、保留 `new_tab`），那个期望是错的，已改。
 
-注入验证（三条都能红）：
+### 第二轮 review 又抓到一类：注释
+
+修复后的版本仍有一个 major：**值末尾的 `#` 注释从不清除**。
+
+| 输入 | 后果 | 实测 |
+| --- | --- | --- |
+| `new_tab = "prefix+t"  # see [docs` | 注释里的 `[` 让 `bracketDelta` 报 1，后续所有行被当成续行 | **整张表 0 条** |
+| `prefix = ["ctrl+a"]  # note` | 值不以 `]` 结尾，一个绑定丢失 | 1 条（应为 2） |
+| `[keys]  # the keys table` | 表头全等比较失败 | **整张表 0 条** |
+
+所以现在**先剥注释再解析**，且剥离必须 string-aware（`prefix+#` 里的 `#` 不是注释）——
+用 `split(separator: "#")` 会引入新的一类丢数据。
+
+另一条 minor：`\n` 转义会解成真换行，`trimmingCharacters` 只去首尾，中间的换行留在绑定里
+（SwiftUI 渲染成行高不齐）。改为一律拒绝含换行的项，而不是静默压成 `ab`——后者会显示
+一个不存在的绑定。
+
+注入验证（第二轮，三条都能红）：
+
+| 注入 | 结果 |
+| --- | --- |
+| 关掉注释剥离 | ✘ 4 条 |
+| 注释剥离改成朴素 `split(separator: "#")` | ✘ `a hash inside a quoted binding is kept` |
+| 只 trim 不拒绝中间换行 | ✘ `an escape-decoded newline does not become a multi-line binding` |
+
+第一轮注入验证（三条都能红）：
 
 | 注入 | 结果 |
 | --- | --- |

@@ -102,9 +102,12 @@ public enum KeybindingProfile {
         }
 
         for rawLine in toml.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            // Comment first, then trim: `[keys]  # the keys table` has to read as
+            // the header, and `new_tab = "prefix+t"  # note` as one binding.
+            let line = Self.stripComment(rawLine.trimmingCharacters(in: .whitespaces))
+                .trimmingCharacters(in: .whitespaces)
             // Comments and blanks carry nothing.
-            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            guard !line.isEmpty else { continue }
 
             if bracketDepth > 0, pendingName != nil {
                 // Inside a multi-line value: the text is part of it, brackets and
@@ -121,7 +124,12 @@ public enum KeybindingProfile {
             // the custom-command noise the daemon already stripped.
             if line.hasPrefix("[") {
                 flush()
-                inKeys = line == "[keys]"
+                // `[keys]` only, not `[[keys.command]]`. Inner whitespace is
+                // stripped because `[ keys ]` is legal TOML (`std-table-open =
+                // %x5B ws`), and treating it as "some other table" silently
+                // zeroed the whole panel.
+                let header = line.replacingOccurrences(of: " ", with: "")
+                inKeys = header == "[keys]"
                 continue
             }
             guard inKeys else { continue }
@@ -143,10 +151,56 @@ public enum KeybindingProfile {
         return entries
     }
 
+    /// The text before an unquoted `#`.
+    ///
+    /// TOML comments run to end of line and are legal after a value, so
+    /// `new_tab = "prefix+t"  # see [docs` is a comment, not an unterminated
+    /// array. Without this, three separate things went wrong in the same way —
+    /// silently dropping bindings, which the user reads as "my config was
+    /// ignored":
+    ///
+    /// - a `[` inside the comment made `bracketDelta` report depth 1, so the
+    ///   parser treated **every following line** as a continuation and the whole
+    ///   `[keys]` table vanished;
+    /// - any trailing comment on an array value made it fail `hasSuffix("]")`
+    ///   and the binding was dropped;
+    /// - `[keys]  # the keys table` failed the exact-match header test, so the
+    ///   table was never entered at all.
+    ///
+    /// String-aware on purpose: a `#` inside a quoted value is not a comment.
+    /// `split(separator: "#")` would be a new way to lose data, and the same
+    /// mistake this whole file is here to avoid.
+    static func stripComment(_ line: String) -> String {
+        var result = ""
+        var insideString = false
+        var escaped = false
+        for character in line {
+            if escaped {
+                result.append(character)
+                escaped = false
+                continue
+            }
+            switch character {
+            case "\\" where insideString:
+                result.append(character)
+                escaped = true
+            case "\"":
+                insideString.toggle()
+                result.append(character)
+            case "#" where !insideString:
+                // Everything after an unquoted `#` is a comment.
+                return result.trimmingCharacters(in: .whitespaces)
+            default:
+                result.append(character)
+            }
+        }
+        return result
+    }
+
     /// Net `[` minus `]` outside quoted strings.
     ///
     /// Counting outside strings matters: a keybinding can legitimately be the
-    /// literal `[` (`split_vertical = "prefix+\["`), and counting it would make
+    /// literal `[` (`split_vertical = "prefix+["`), and counting it would make
     /// the parser wait for a closing bracket that never comes.
     private static func bracketDelta(_ text: String) -> Int {
         var depth = 0
@@ -226,7 +280,11 @@ public enum KeybindingProfile {
             }
         }
         guard !sawClosingQuote, !escaped else { return nil }
-        return result.isEmpty ? nil : result
+        // Same rule as the array case: a binding is a single line, so a decoded
+        // newline means this is not a binding at all.
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: \.isNewline) else { return nil }
+        return trimmed
     }
 
     /// An inline array of double-quoted TOML strings, possibly spanning lines.
@@ -271,6 +329,14 @@ public enum KeybindingProfile {
         // partial value as a binding would show half a combo, which is worse than
         // showing the built-in one.
         guard !insideString else { return nil }
-        return items.filter { !$0.isEmpty }
+        // A combo is one line by definition. A `\n` escape decodes to a real
+        // newline, which SwiftUI renders as a row of uneven height; an item that
+        // is only whitespace renders as a gap. Trimming is not enough — the
+        // newline in `"a\nb"` is in the *middle*, so the whole item is refused
+        // rather than silently squashed into `ab`, which would show a binding
+        // that does not exist.
+        return items
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.contains(where: \.isNewline) }
     }
 }
