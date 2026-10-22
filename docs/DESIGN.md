@@ -608,14 +608,21 @@ enum SpaceSidebarToken {
 ```toml
 ui.sidebar.agents.rows = [
   ["state_icon", { token = "agent", bold = true, fg = "red", rules = [
-      { when = "contains",    value = "claude", fg = "purple" },
-      { when = "equals",      value = "codex",  fg = "green"  },
-      { when = "starts_with", value = "pi",     dim = true    },
+      { contains    = "claude", fg = "purple" },
+      { equals      = "codex",  fg = "green"  },
+      { starts_with = "pi",     dim = true    },
   ]}]
 ]
 ```
 
-支持的操作：`equals` / `contains` / `starts_with` / `gt` / `lt`，可选 `ignore_case`（仅 ASCII）。
+**条件是内联键**，不是 `{ when = "...", value = "..." }`。上游 `RawRule` 是
+`deny_unknown_fields`（`src/config/sidebar/rules.rs`），用后一种写法写的规则一条也不会生效 ——
+Kraal 曾经按那种写法解析，导致照官方文档写的 `config.toml` 里 rules 被静默忽略。
+
+支持的条件：`equals` / `contains` / `starts_with` / `gt` / `lt`，每条规则**恰好一个**；
+文本条件可加 `ignore_case`（仅 ASCII），数值条件不允许。
+可选 `hide = true`：命中的 token 连同它的分隔符一起从行里消失。
+只应用**第一条**命中的规则，它只覆盖自己设置的字段，其余继承 token 的默认样式。
 上限：**16 行 × 每行 16 token × 16 条规则**。
 
 ### 5.2 数据驱动设计
@@ -960,7 +967,7 @@ Kraal/
 
 - [ ] TOML 解析
 - [ ] token 解析（16 个）
-- [ ] rules 条件样式
+- [x] rules 条件样式（内联条件键 + `ignore_case` + `hide`，见 §5.1）
 - [ ] `rows_by_agent` 覆盖
 
 **验收**：导入一个自定义 config.toml，侧边栏布局随之变化。
