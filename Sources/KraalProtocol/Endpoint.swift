@@ -108,6 +108,41 @@ public struct EndpointClientHello: Codable, Equatable, Sendable {
         inputCodecs = [EndpointProtocol.inputCodecV1]
         blobCodecs = [EndpointProtocol.blobCodecV1]
     }
+
+    /// Decodes a hello the way the wire contract allows it to arrive.
+    ///
+    /// Kraal only *sends* a hello today, so nothing in the app depends on this.
+    /// It exists because the type claims to describe the wire contract, and that
+    /// contract has `serde(default)` on nine fields (`endpoint.rs:20-38`): a peer
+    /// may omit them, and a type that demands them is wrong about the protocol it
+    /// names.
+    ///
+    /// The one that matters most is `surface_active`, whose serde default is
+    /// `true` — an absent value means *active*, not *inactive*. Getting that
+    /// backwards would silently suppress the surface stream.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generation = try container.decode(UInt32.self, forKey: .generation)
+        cellWidthPx = try container.decode(UInt32.self, forKey: .cellWidthPx)
+        cellHeightPx = try container.decode(UInt32.self, forKey: .cellHeightPx)
+        surfaceSize = try container.decode(Size.self, forKey: .surfaceSize)
+        pixelMouse = try container.decode(Bool.self, forKey: .pixelMouse)
+        directGraphics = try container.decode(Bool.self, forKey: .directGraphics)
+        endpointKeybindings = try container.decode(Bool.self, forKey: .endpointKeybindings)
+        mouseCapture = try container.decode(Bool.self, forKey: .mouseCapture)
+        // `serde(default = "default_true")` upstream: absent means active.
+        surfaceActive = try container.decodeIfPresent(Bool.self, forKey: .surfaceActive) ?? true
+        surfaceReuse = try container.decodeIfPresent(Bool.self, forKey: .surfaceReuse) ?? false
+        surfaceDelta = try container.decodeIfPresent(Bool.self, forKey: .surfaceDelta) ?? false
+        surfaceScroll = try container.decodeIfPresent(Bool.self, forKey: .surfaceScroll) ?? false
+        snapshotCodecs = try container.decodeIfPresent(
+            [String].self,
+            forKey: .snapshotCodecs
+        ) ?? []
+        surfaceCodecs = try container.decodeIfPresent([String].self, forKey: .surfaceCodecs) ?? []
+        inputCodecs = try container.decodeIfPresent([String].self, forKey: .inputCodecs) ?? []
+        blobCodecs = try container.decodeIfPresent([String].self, forKey: .blobCodecs) ?? []
+    }
 }
 
 public struct EndpointHandshakeError: Codable, Equatable, Sendable {

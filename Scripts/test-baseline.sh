@@ -57,7 +57,8 @@ REDS=(
     # hostThemeLayout / wideColorBytes / fullPalette used to be here: issue #4
     # fixed the u8-as-varint encoding (BincodeWriter.writeU8), so they guard now.
     # Frozen upstream fixture — endpoint.rs serde defaults
-    "KraalProtocolTests.UpstreamFixtureTests/helloDecodes()"
+    # helloDecodes used to be here: issue #10 gave EndpointClientHello a custom
+    # init(from:) with the nine serde defaults, so it guards now.
     # Payload hygiene — compatibility.rs / render_ansi.rs:1882
     "KraalProtocolTests.FramingLimitTests/trailingBytes()"
     "KraalProtocolTests.SurfacePatchAtomicityTests/overlappingRows()"
