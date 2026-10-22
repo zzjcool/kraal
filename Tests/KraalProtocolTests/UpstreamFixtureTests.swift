@@ -27,8 +27,17 @@ struct UpstreamFixtureTests {
     }
 
     /// The welcome is the compatibility contract: generation, four codecs, the
-    /// method list. This frozen copy advertises no capabilities and one method,
-    /// so it must be refused for the *right* reason.
+    /// method list. This frozen copy is from 0.8.2 and advertises no capabilities
+    /// and one method.
+    ///
+    /// It must be refused — but *which* refusal is now decided by the version
+    /// floor first (`0.8.2 < minimumDaemonVersion`), so it reports `serverTooOld`
+    /// rather than `missingCapability`. That matches upstream, which folds
+    /// `MissingSurfaceInterest` / `MissingHealthCheck` into `DaemonOutdated`
+    /// (`herdr-gpui/crates/herdr-client/src/compat.rs:89-94`).
+    ///
+    /// What matters here is that the *frozen fixture decodes* and is refused with
+    /// advice pointing at the daemon, not that a particular internal case wins.
     @Test("the frozen welcome decodes and names the missing capability")
     func welcomeDecodes() throws {
         let welcome = try JSONDecoder().decode(
@@ -41,12 +50,10 @@ struct UpstreamFixtureTests {
         #expect(welcome.capabilities.isEmpty)
         #expect(welcome.methods == ["pane.focus"])
 
-        // No capabilities at all: the first required one is what we should say.
-        guard case let .missingCapability(capability) = Compatibility.evaluate(welcome) else {
-            Issue.record("expected a missing capability, got \(Compatibility.evaluate(welcome))")
-            return
-        }
-        #expect(EndpointProtocol.requiredSurfaceCapabilities.contains(capability))
+        // Refused, and the advice must point at the daemon rather than the app.
+        let result = Compatibility.evaluate(welcome)
+        #expect(!result.isOK)
+        #expect(result.userMessage?.contains("Update Herdr") == true, "got \(result)")
     }
 
     /// The hello fixture omits `surface_active`, `surface_reuse`, `surface_delta`
