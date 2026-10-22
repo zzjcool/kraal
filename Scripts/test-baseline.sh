@@ -60,8 +60,8 @@ REDS=(
     # helloDecodes used to be here: issue #10 gave EndpointClientHello a custom
     # init(from:) with the nine serde defaults, so it guards now.
     # Payload hygiene — compatibility.rs / render_ansi.rs:1882
-    "KraalProtocolTests.FramingLimitTests/trailingBytes()"
-    "KraalProtocolTests.SurfacePatchAtomicityTests/overlappingRows()"
+    # trailingBytes / overlappingRows used to be here: issue #7 made the decoder
+    # consume the payload exactly and made validatePatch reject row overlap.
     # Handshake — version_mismatch.rs / framing.rs / rootshell version floor
     "KraalClientTests.CompatibilityPortTests/generationBeatsError()"
     "KraalClientTests.CompatibilityPortTests/olderDaemon()"

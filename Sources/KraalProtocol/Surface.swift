@@ -16,6 +16,7 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
     case cursorBounds(column: UInt16, row: UInt16, width: UInt16, height: UInt16)
     case patchIdentity
     case patchRowBounds
+    case patchRowOverlap(row: UInt16)
     case patchGeometry(paneId: String)
     case patchCursorBounds
     case patchBeforeBaseline
@@ -33,6 +34,8 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
             "surface patch identity mismatch"
         case .patchRowBounds:
             "surface patch row outside frame"
+        case let .patchRowOverlap(row):
+            "surface patch rows overlap on row \(row)"
         case let .patchGeometry(paneId):
             "surface patch changed geometry for pane \(paneId)"
         case .patchCursorBounds:
@@ -130,6 +133,23 @@ public extension PaneSurfaceFrame {
                     )
                 }
             }
+        }
+        // Rows must not cover the same cell twice. Overlap is not a bounds
+        // problem, so the loop above cannot see it: the later row silently wins
+        // and the screen shows content the daemon never composed. Sorted by
+        // (row, column) so out-of-order-but-disjoint patches are still accepted
+        // — upstream accepts those too.
+        let ordered = patch.rows.sorted {
+            $0.row == $1.row ? $0.column < $1.column : $0.row < $1.row
+        }
+        var previousEnd: (row: UInt16, column: Int)?
+        for row in ordered where !row.cells.isEmpty {
+            let start = Int(row.column)
+            let end = start + row.cells.count
+            if let previousEnd, previousEnd.row == row.row, start < previousEnd.column {
+                throw SurfaceError.patchRowOverlap(row: row.row)
+            }
+            previousEnd = (row.row, end)
         }
         for patched in patch.panes {
             let unchanged = panes.contains { existing in
