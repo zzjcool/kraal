@@ -152,8 +152,8 @@ EXC_BREAKPOINT (SIGTRAP)
 
 ### 3.1 为什么是「外部驱动」而不是继续加探针
 
-现状：`Sources/KraalMac/KraalMacMain.swift:148-224` 里 `KRAAL_PROBE_COMMAND` /
-`KRAAL_PROBE_DIVIDER_DRAG` 是**编译进发布产物**的测试脚手架。问题有三个：
+现状（P2 之前）：`KraalMacMain.swift` 里 `KRAAL_PROBE_COMMAND` /
+`KRAAL_PROBE_DIVIDER_DRAG` 是**编译进发布产物**的测试脚手架，P2 已删除。问题有三个：
 
 1. 只能覆盖**已经想到要埋探针**的路径。菜单点击、右键菜单、模态框、命中测试全都没有。
 2. 探针绕过了真实的 AppKit 事件分发——而 `fa3496e`、`e82c104`、`2156703` 三个 bug
@@ -443,7 +443,10 @@ assert() {
 
 - 改写 `AGENTS.md`：删「禁止真实鼠标」的旧约束 → 改为「UI 验证只走 VM」
 - 3 轮修复上限、失败分类、`verify` 作为 merge gate
-- 逐步删除 `KRAAL_PROBE_*`（先标记 deprecated，确认无回归后移除）
+- ~~逐步删除 `KRAAL_PROBE_*`~~ **已完成**：先补上 `drag-divider` 用例
+  （`KRAAL_PROBE_DIVIDER_DRAG` 曾是 `e82c104` 唯一的端到端证据），再删掉 4 个
+  探针变量、2 个私有方法、`MacMenuBar.runProbe`，以及同类的
+  `KRAAL_MACHINES_DEMO`。合计 -146 行产品代码。
 
 **验收**：故意引入一个 UI bug → agent 从红到绿，全程无人参与。
 
@@ -566,7 +569,7 @@ fi
 | # | 决策 | 结论 | 影响 |
 |---|---|---|---|
 | 1 | **后端策略** | **两个后端：`local` 默认 + `vm` 可选；长期存活，不每次重建** | 架构从“一个平面”改成“两后端一套用例”（§3.0）；`gui.sh` 要接受 `KRAAL_GUI_BACKEND` |
-| 2 | **`KRAAL_PROBE_*` 何时删** | **P2**，先留作对照组 | P0/P1 保留探针并行，双跑对比 |
+| 2 | **`KRAAL_PROBE_*` 何时删** | **P2 已删除** | 先用 `drag-divider` 用例替代其覆盖，再删；`KRAAL_MACHINES_DEMO` 同类一并删除 |
 | 3 | **P3 合盖** | **P0–P2 做完再谈** | §10 的未验证项不阻塞任何实现 |
 
 ### 13.1 决策 1 的含义（重要）

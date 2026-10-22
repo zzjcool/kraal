@@ -107,6 +107,9 @@ swiftlint --quiet Sources Tests          # 必须零违规
 
 ### GUI 门禁：`gui.sh` 能证明界面动作真的改了 daemon
 
+跑在 VM 里（`KRAAL_GUI_BACKEND=vm` 是默认值），所以可以无人值守地跑：
+它不会碰你的指针、键盘，也不会截你的屏。
+
 `swift test` 覆盖不到「点了有没有反应」——§0.2 那三个 bug 全部通过了单元测试。
 补这一层的是 `Scripts/gui.sh`：起一个**隔离的 scratch daemon**，用
 `kraal-gui` 通过 Accessibility 驱动真实窗口，然后断言 **daemon 状态**。
@@ -182,15 +185,20 @@ open --env KRAAL_HERDR_SOCKET="$HOME/.config/herdr/herdr-client.sock" \
 
 ### 脚本化触发一条真实命令
 
-不要靠人点。`KRAAL_PROBE_COMMAND` 走**与鼠标点击完全相同**的
-`runCommand → dispatch → perform` 路径，只跳过鼠标：
+不要靠人点，也不要往产品代码里埋探针（`KRAAL_PROBE_*` 已于 P2 删除，见
+`docs/AUTOMATION.md` §13 决策 2）。用外部驱动走真实界面：
 
 ```bash
-KRAAL_PROBE_COMMAND=split_right KRAAL_PROBE_PANE=wS:p5 \
-  open --env KRAAL_HERDR_SOCKET=... --env KRAAL_PROBE_COMMAND=split_right ...
+./Scripts/gui.sh run split-right     # 起隔离 daemon → AXPress 真实窗口 → 断言 daemon
+./Scripts/gui.sh run                 # 全部用例
 ```
 
-然后对着日志和 `herdr pane list` 双向确认。
+**默认后端是 `vm`**（Tart `kraal-agent`），不是宿主。原因是硬性的：驱动真实
+窗口会夺走指针和键盘，而那是你正在用来干活的桌面。`KRAAL_GUI_BACKEND=local`
+只用于需要真 GPU 的视觉判断，且会拒绝任何「要前台」的用例，除非显式
+`KRAAL_GUI_ALLOW_FOCUS=1`。
+
+然后对着日志和 `herdr pane list` 双向确认——这条原则不变，只是手段换了。
 
 ---
 
