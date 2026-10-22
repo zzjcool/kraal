@@ -287,6 +287,7 @@ error 判新旧、快照 revision 回退、patch 行重叠、重连倒计时错�
 - **[移植的上游测试](docs/PORTED-TESTS.md)** —— 抄自哪里、为什么、当时的差异怎么修的
 - **[开发环境](docs/ENVIRONMENT.md)** —— 本机基线、依赖版本、签名与已知坑
 - **[排查方法](docs/DEBUGGING.md)** —— 怎么验证一件事是真的：样本、A/B 回退、探针纪律
+- **[性能测量](docs/PERFORMANCE.md)** —— 怎么量出一件事有多贵：防优化器、真实数据、帧预算
 - **[技术设计文档](docs/DESIGN.md)** —— 完整设计：连接层、协议类型、渲染、侧边栏引擎
 - **[可行性研究（修订版）](docs/feasibility-revised.md)** —— 路线对比与关键实测
 
