@@ -110,7 +110,7 @@ struct CompatibilityPortTests {
     /// daemon cannot render must be refused locally. The daemon's own limit is
     /// 4096 per axis and 1 000 000 cells total.
     ///
-    /// RED AS PORTED: `resizeSurface` only checks for zero.
+    /// issue #8: `resizeSurface` used to check only for zero.
     @Test("an unrenderable grid is refused by the store")
     @MainActor
     func gridLimit() {
@@ -122,6 +122,9 @@ struct CompatibilityPortTests {
         // Total-cell limit: 1001 x 1000 = 1 001 000.
         store.resizeSurface(cols: 1001, rows: 1000)
         #expect(store.surfaceSize == before, "1 001 000 cells was accepted")
+        // A legal grid still goes through, so the guard is not a blanket refusal.
+        store.resizeSurface(cols: 120, rows: 40)
+        #expect(store.surfaceSize == ClientSurfaceSize(cols: 120, rows: 40))
     }
 }
 
