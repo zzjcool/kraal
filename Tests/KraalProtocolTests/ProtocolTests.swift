@@ -300,6 +300,47 @@ struct WelcomeFixtureTests {
     }
 }
 
+@Suite("Daemon version floor")
+struct DaemonVersionTests {
+    /// Only the numeric prefix is compared; forks and build metadata must not be
+    /// locked out. `0.9.0-rootshell.0.1.2` is a real downstream version string.
+    @Test("parses the shapes a real server_version takes")
+    func parsesRealStrings() throws {
+        let cases: [(String, DaemonVersion)] = [
+            ("0.9.4", DaemonVersion(major: 0, minor: 9, patch: 4)),
+            ("0.9.0", DaemonVersion(major: 0, minor: 9, patch: 0)),
+            ("1.0.0+build.7", DaemonVersion(major: 1, minor: 0, patch: 0)),
+            ("0.9.0-rootshell.0.1.2", DaemonVersion(major: 0, minor: 9, patch: 0)),
+            ("0.9", DaemonVersion(major: 0, minor: 9, patch: 0)),
+            (" 0.9.5 ", DaemonVersion(major: 0, minor: 9, patch: 5)),
+        ]
+        for (raw, expected) in cases {
+            #expect(try DaemonVersion.parse(raw).get() == expected, "\(raw)")
+        }
+    }
+
+    /// Unparsable input fails instead of defaulting to 0.0.0 — a daemon that
+    /// cannot say what it is must be refused, not trusted.
+    @Test("refuses to guess at an unreadable version")
+    func refusesGarbage() {
+        for raw in ["not-a-version", "", "v0.9.0", "0", "...", "1.x.0"] {
+            #expect(
+                (try? DaemonVersion.parse(raw).get()) == nil,
+                "\(raw) was accepted"
+            )
+        }
+    }
+
+    @Test("orders by major, then minor, then patch")
+    func ordering() {
+        let sorted = ["0.9.10", "1.0.0", "0.10.0", "0.9.2"]
+            .compactMap { try? DaemonVersion.parse($0).get() }
+            .sorted()
+            .map(\.description)
+        #expect(sorted == ["0.9.2", "0.9.10", "0.10.0", "1.0.0"])
+    }
+}
+
 @Suite("Surface patch invariants")
 struct SurfacePatchTests {
     private func baseline(revision: UInt64 = 7) -> PaneSurfaceFrame {

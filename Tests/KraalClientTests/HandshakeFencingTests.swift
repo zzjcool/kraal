@@ -59,8 +59,8 @@ struct CompatibilityPortTests {
     /// generation is an old client, and the user has to update Kraal — telling
     /// them to update Herdr sends them to the wrong machine.
     ///
-    /// RED AS PORTED: `evaluate` checks `welcome.error` first, so this reports a
-    /// generic rejection.
+    /// issue #5: `evaluate` now decides from the generation before looking at
+    /// `welcome.error`, so the rejection names the right side to update.
     @Test("generation, not the error code, says which side is older")
     func generationBeatsError() throws {
         let parsed = try welcome(compatibleJSON(
@@ -75,9 +75,8 @@ struct CompatibilityPortTests {
     /// "update Herdr", and `serverVersion` has to survive into the message so the
     /// user can see what they are running.
     ///
-    /// RED AS PORTED: the `.serverTooOld` case exists but `evaluate` never
-    /// produces it — a lower generation currently falls into `clientTooOld`,
-    /// which tells the user to update the wrong thing.
+    /// issue #5: a lower generation now maps to `.serverTooOld`, so the banner
+    /// no longer tells the user to update the wrong end.
     @Test("an older daemon is reported as too old")
     func olderDaemon() throws {
         let parsed = try welcome(compatibleJSON(generation: 0, version: "0.8.2"))
@@ -93,7 +92,9 @@ struct CompatibilityPortTests {
     /// right generation but is older than the client's minimum must be refused
     /// with advice, not accepted and then driven into a half-working state.
     ///
-    /// RED AS PORTED: nothing parses `server_version`, so `0.4.0` is accepted.
+    /// issue #5: `server_version` is parsed (`DaemonVersion`) and checked against
+    /// `EndpointProtocol.minimumDaemonVersion`; an unreadable string is refused
+    /// rather than trusted.
     @Test("a version below the client minimum is refused")
     func versionFloor() throws {
         for version in ["0.4.0", "0.8.9", "not-a-version"] {

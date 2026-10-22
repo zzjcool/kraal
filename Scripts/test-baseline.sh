@@ -63,9 +63,8 @@ REDS=(
     # trailingBytes / overlappingRows used to be here: issue #7 made the decoder
     # consume the payload exactly and made validatePatch reject row overlap.
     # Handshake — version_mismatch.rs / framing.rs / rootshell version floor
-    "KraalClientTests.CompatibilityPortTests/generationBeatsError()"
-    "KraalClientTests.CompatibilityPortTests/olderDaemon()"
-    "KraalClientTests.CompatibilityPortTests/versionFloor()"
+    # generationBeatsError / olderDaemon / versionFloor used to be here: issue #5
+    # put generation before error and added DaemonVersion.parse + the floor.
     # gridLimit used to be here: issue #8 added the per-axis and total-cell
     # ceiling to resizeSurface (SurfaceGeometry.isAcceptableGrid).
     # Snapshot fences — session_state.rs / rootshell snapshot validation
