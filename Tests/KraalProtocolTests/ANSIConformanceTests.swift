@@ -354,7 +354,11 @@ struct ANSICursorAndHyperlinkTests {
     @Test("a missing cursor hides the host cursor")
     func missingCursorHides() {
         let ansi = render(frame(cursor: nil))
-        #expect(ansi.contains("\u{1B}[?25l"), "got \(ansi)")
+        // Not `contains("?25l")`: every frame opens with an unconditional `?25l`
+        // before the cell writes (`SurfaceANSIRenderer.swift:87`), so that
+        // assertion holds for any input. What the upstream case pins is the state
+        // the frame leaves the terminal in, which is the last switch.
+        #expect(!ansi.contains("\u{1B}[?25h"), "the frame revealed the cursor: \(ansi)")
     }
 
     /// `render_ansi.rs:2218` — a hidden cursor is parked at its last visible
@@ -372,9 +376,11 @@ struct ANSICursorAndHyperlinkTests {
             )),
             encoding: .utf8
         ) ?? ""
-        #expect(hidden.contains("\u{1B}[?25l"))
-        // Parking means the CUP is still emitted; a bare `?25l` leaves the
-        // anchor wherever the application last moved it.
+        // `?25l` is asserted by every frame's opening sequence, so it proves
+        // nothing here; the claim under test is the CUP. Parking means the CUP is
+        // still emitted — a bare `?25l` leaves the anchor wherever the application
+        // last moved it. `SurfaceANSIRendererTests` asserts the *coordinate*,
+        // which this cannot: both frames put the cursor at (0,0).
         #expect(hidden.contains("H"), "no CUP before hiding: \(hidden)")
     }
 }

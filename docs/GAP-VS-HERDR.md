@@ -87,15 +87,39 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 
 | 项 | 上游 | 我方 | 判断 |
 | --- | --- | --- | --- |
-| OSC 8 超链接 | 每帧起始复位 + 按 cell 变更加 `]8;;`（`render_ansi.rs:934-955,616,699`） | `SurfaceANSIRenderer` 完全不发 OSC 8（`FrameData.hyperlinks` 传进来了但没用，`PaneTerminal.swift:407`） | ❌ 链接不能被 Cmd+click |
+| OSC 8 超链接 | 每帧起始复位 + 按 cell 变更加 `]8;;`（`render_ansi.rs:934-955,616,699`） | ✅ `SurfaceANSIRenderer` 发 `]8;;`，URI 先清洗（`2194312`） | ✅ |
 | 下划线样式 `4:2/4:3/4:4/4:5` | `render_ansi.rs:445-452` | 只发 `4`（`SurfaceANSIRenderer.swift:170-175`） | ⚠️ curly/dotted/dashed 丢失 |
 | `SLOW_BLINK`/`RAPID_BLINK` 位 | bit4 → `5`，bit5 → `6`（`render_ansi.rs:428-458`） | 把 bit4 当 blink(`5`)，bit5 当 reverse（`Wire.swift:189-192`） | 💥 见 §7-1 |
-| 光标形状 DECSCUSR | `CSI Ps SP q`（`render_ansi.rs:838-850`） | `CursorState.shape` 解出来了但渲染器不写（`SurfaceANSIRenderer.swift:67-79`） | ❌ 光标永远是默认方块 |
-| IME 光标锚点 | `experimental.reveal_hidden_cursor_for_cjk_ime`（`render_ansi.rs:852+`） | 无 | ❌ 中文输入法候选框不跟随 |
-| 同步输出 | `?2026h/l` 包帧 | ✅ `SurfaceANSIRenderer.swift:46-50,81-83` | ✅ |
+| 光标形状 DECSCUSR | `CSI Ps SP q`（`render_ansi.rs:838-850`） | ✅ `CSI <n> SP q`，仅在变化时发（`SurfaceANSIRenderer.swift:115-118`，`e7f6983`） | ✅ |
+| IME 光标锚点 | `experimental.reveal_hidden_cursor_for_cjk_ime`（`render_ansi.rs:852+`） | ✅ 语义等价，见下方说明 | ✅ **不需要上游那个开关** |
+| 同步输出 | `?2026h/l` 包帧 | ✅ `SurfaceANSIRenderer.swift:80,124` | ✅ |
 | Kitty graphics | 完整 `\x1b_G` 编码 + 文件直传（`kitty_graphics.rs`） | `graphics: Data()` 恒空（`PaneTerminal.swift:408`），`SurfaceGraphicsScene` 解了不用 | ❌ 图片/图表不显示 |
 | 滚动条 | `scrollbar_rect` + `ui.pane_scrollbars`（`ui/scrollbar.rs`） | `scrollbarRect` 解出来但**没有人画**（全仓 grep 只在 Decoder/Wire） | ❌ 见 §5 |
 | 滚动位置指示 | copy mode 底栏 `{cur}/{total}`（`render.rs:170-176`） | 无 | ❌ |
+
+### IME 光标锚点：为什么这里不需要上游那个开关
+
+上游的 `experimental.reveal_hidden_cursor_for_cjk_ime` 是**给宿主终端用的**：
+herdr 自己是个 TUI，`?25l` 之后宿主终端把硬件光标藏起来，它就没法告诉宿主
+「候选框该放哪」，只能反过来把光标「借」出来显示（代价是 vim 普通模式多一个
+方块光标，见上游 `model.rs:1093` 的 trade-off 说明）。
+
+Kraal 的链路不同，这条信息从来没丢：
+
+1. 渲染器每帧**无条件**发 CUP 把宿主光标定位到目标格（`SurfaceANSIRenderer.swift:114`），
+   只有 `?25h`/`?25l` 取决于 `visible`；
+2. Ghostty 的 `imePointScaled`（`Surface.zig:2222`）只读 `cursor.x/y`，**不看**
+   `cursor.visible` —— 所以隐藏光标时锚点照样跟着走；
+3. 帧里完全没有 cursor 时，渲染器停在上次**可见**位置（`resolveHostCursor:142-147`），
+   而不是角落；只有从未见过可见光标才退到底行末列。
+
+也就是说上游用「显示一个额外光标」绕过的问题，Kraal 在渲染层就没有。
+
+**未验证**：VM 里没装中文输入法（`AppleEnabledInputSources` 只有 U.S. + CharacterPalette），
+所以没有真机 IME 候选框位置的截图证据。上面三条是对着 Ghostty 源码
+（`Surface.zig:2222-2260`）和渲染器字节输出确认的；`SurfaceANSIRendererTests` 的 4 条 IME 用例：三条钉住「隐藏时仍定位坐标」
+「无 cursor 停在上一可见位置」「隐藏位置不更新停放点」，第四条钉住「从未见过
+可见光标时退到底行末列」的兜底。
 
 ---
 
