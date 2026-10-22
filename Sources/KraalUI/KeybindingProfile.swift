@@ -194,7 +194,11 @@ public enum KeybindingProfile {
                 result.append(character)
             }
         }
-        return result
+        // Trimmed on both exits: the `#` branch below returns a trimmed string,
+        // and having the fall-through not trim meant every caller had to remember
+        // to. There is one caller today; a second one would have inherited the
+        // inconsistency silently.
+        return result.trimmingCharacters(in: .whitespaces)
     }
 
     /// Net `[` minus `]` outside quoted strings.
