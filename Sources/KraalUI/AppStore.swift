@@ -103,7 +103,6 @@ public final class AppStore {
     /// knowing that connections are per-machine.
     var connection: EndpointConnection? { activeEndpoint?.connection }
     @ObservationIgnored private var healthTask: Task<Void, Never>?
-    @ObservationIgnored private var reconnectAttempt = 0
     @ObservationIgnored var inputDecoders: [String: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
     /// In-flight `client_shell_resize` sender, so a drag coalesces.
@@ -170,7 +169,6 @@ public final class AppStore {
             return
         }
         intentionalStop = false
-        reconnectAttempt = 0
         connectActiveEndpoint()
     }
 
@@ -218,13 +216,11 @@ public final class AppStore {
             endpoint.reconnectAttempt = 0
             disconnectEndpoint(endpoint)
         }
-        let attempt = max(endpoint.reconnectAttempt, 1)
-        let delay = min(pow(2.0, Double(attempt - 1)), 30)
-        phase = .reconnecting(
-            attempt: attempt,
-            retryAt: Date().addingTimeInterval(delay)
-        )
-        scheduleEndpointRetry(endpoint)
+        // `scheduleEndpointRetry` owns the counter and the delay. Deriving the
+        // phase countdown here as well meant two reads of one counter — this one
+        // before the increment, the sleep after it — so from the second retry on
+        // the banner counted down one step short of the real wait.
+        scheduleEndpointRetry(endpoint, report: true)
     }
 
     // MARK: - Events

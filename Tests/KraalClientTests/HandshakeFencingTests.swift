@@ -237,17 +237,13 @@ struct ConnectionLimitTests {
     ///
     /// Asserted through `phase`, because `retryAt` is what the UI counts down.
     ///
-    /// RED AS PORTED: the delay is computed twice from two different reads of the
-    /// same counter. `scheduleReconnect` derives `attempt`/`retryAt` from
-    /// `endpoint.reconnectAttempt` *before* `scheduleEndpointRetry` increments it,
-    /// so the countdown the user sees lags the timer that is actually running.
-    /// Measured on this build: reported delays are 1, 1, 2, 4, 8, 16, 30 while the
-    /// sleeps are 1, 2, 4, 8, 16, 30 — from the second retry on, the banner says
-    /// "1 s" for a 2 s wait. Not a reconnect storm, but every backoff after the
-    /// first shows the wrong number.
+    /// The backoff lives on the endpoint, not the store (every machine keeps its
+    /// own connection), so the store needs one before it can schedule a retry.
     ///
-    /// The backoff now lives on the endpoint, not the store (every machine keeps
-    /// its own connection), so the store needs one before it can schedule a retry.
+    /// This was red until #9: the delay was computed twice from two reads of one
+    /// counter — `scheduleReconnect` derived `attempt`/`retryAt` before
+    /// `scheduleEndpointRetry` incremented it, so the countdown lagged the real
+    /// sleep. `scheduleEndpointRetry` is now the single source of both.
     @Test("reconnect backoff doubles and is capped")
     @MainActor
     func backoffIsBounded() {

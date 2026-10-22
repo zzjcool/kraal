@@ -396,12 +396,10 @@ public extension AppStore {
                     surface = nil
                 }
                 lastError = reason
-                phase = .reconnecting(
-                    attempt: max(endpoint.reconnectAttempt, 1),
-                    retryAt: Date().addingTimeInterval(1)
-                )
             }
-            scheduleEndpointRetry(endpoint)
+            // Both `phase` and the sleep come from this one call; the attempt
+            // number it reports is the one it is actually waiting on.
+            scheduleEndpointRetry(endpoint, report: isActive)
         case let .error(message):
             endpoint.status = .attention("! error")
             kraalLog("endpoint \(endpoint.label): error \(message)")
@@ -409,7 +407,7 @@ public extension AppStore {
         case .serverShutdown:
             endpoint.status = .reconnecting
             endpoint.connectionTask = nil
-            scheduleEndpointRetry(endpoint)
+            scheduleEndpointRetry(endpoint, report: isActive)
         default:
             break
         }
@@ -417,10 +415,24 @@ public extension AppStore {
 
     /// Retries one machine's connection, with the same backoff the store used for
     /// its single connection.
-    func scheduleEndpointRetry(_ endpoint: EndpointState) {
-        guard endpoint.enabled else { return }
+    ///
+    /// The counter and the delay are computed in exactly one place — here. Callers
+    /// that want to show a countdown pass `report: true` and this sets `phase`
+    /// from the *same* numbers that the sleep uses. Computing the delay at the
+    /// call site as well is what produced the off-by-one-step countdown: it read
+    /// `reconnectAttempt` before this function incremented it.
+    @discardableResult
+    func scheduleEndpointRetry(_ endpoint: EndpointState, report: Bool = false) -> Double? {
+        guard endpoint.enabled else { return nil }
         endpoint.reconnectAttempt += 1
-        let delay = min(pow(2.0, Double(endpoint.reconnectAttempt - 1)), 30)
+        let attempt = endpoint.reconnectAttempt
+        let delay = min(pow(2.0, Double(attempt - 1)), 30)
+        if report, endpoint.id == activeEndpointID {
+            phase = .reconnecting(
+                attempt: attempt,
+                retryAt: Date().addingTimeInterval(delay)
+            )
+        }
         let epoch = endpoint.connectionEpoch
         endpoint.connectionTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -430,6 +442,7 @@ public extension AppStore {
             guard endpoint.enabled else { return }
             self.connectEndpoint(endpoint)
         }
+        return delay
     }
 
     /// Closes one machine's connection. Used when its profile is removed or
