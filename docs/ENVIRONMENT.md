@@ -341,7 +341,14 @@ kTCCServiceScreenCapture   auth_value=2   screencapture
 看起来像拖拽功能坏了。缺 `ScreenCapture` 时 `screencapture` 返回 0 却写出
 全黑 PNG（§8.4）。
 
-写入需要 guest 内 **SIP 关闭**（base 镜像默认关闭）。自动修复：
+写入需要两个条件，缺一不可：
+
+1. guest 内 **SIP 关闭**（base 镜像默认就是关的）
+2. **`sudo`** —— `TCC.db` 是 `root:wheel 0644`，普通用户 `sqlite3` 写入直接报
+   `attempt to write a readonly database`。根卷虽然 sealed 只读，但 `sudo` 下
+   sqlite3 能写（2026-10-22 实测 `rc=0`）。guest 的 `admin` 有免密 sudo。
+
+自动修复：
 
 ```bash
 ./Scripts/vm-bootstrap.sh --fix-tcc

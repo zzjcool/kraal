@@ -56,14 +56,17 @@ provision() {
             # "no reason given", which is what a manual entry gets. Writing TCC.db
             # directly only works with SIP off — that is why the base image ships
             # with it disabled.
+            # TCC.db is root:wheel 0644 — writing needs sudo even with SIP off.
+            # The guest's admin account has passwordless sudo, so nothing prompts.
             tart exec "$VM" /bin/bash -lc '
     DB="/Library/Application Support/com.apple.TCC/TCC.db"
     AGENT=$(ls -d /opt/homebrew/Cellar/tart-guest-agent/*/bin/tart-guest-agent 2>/dev/null | head -1)
     [ -n "$AGENT" ] || { echo "tart-guest-agent not found in the guest"; exit 1; }
     for svc in kTCCServiceAccessibility kTCCServicePostEvent kTCCServiceScreenCapture; do
-        sqlite3 "$DB" "insert or replace into access (service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags, last_modified) values ("$svc", "$AGENT", 1, 2, 0, 1, NULL, NULL, 0, "UNUSED", NULL, 0, strftime("%s","now"))" || echo "  $svc failed"
+        echo "insert or replace into access (service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier, indirect_object_code_identity, flags, last_modified) values ('"'"'$svc'"'"', '"'"'$AGENT'"'"', 1, 2, 0, 1, NULL, NULL, 0, '"'"'UNUSED'"'"', NULL, 0, strftime('"'"'%s'"'"','"'"'now'"'"'));" \
+            | sudo sqlite3 "$DB" || echo "  $svc failed"
     done
-    killall tccd 2>/dev/null || true
+    sudo killall tccd 2>/dev/null || true
     echo "granted; restarting the guest agent so it picks them up"
     launchctl kickstart -k system/com.apple.tart-guest-agent 2>/dev/null || true
     sleep 2
@@ -91,7 +94,7 @@ export | import)
     :  # handled below
     ;;
 *)
-    provision
+    provision "$@"
     say "next steps"
     echo "  ./Scripts/build-app.sh      # build the app on the host (VM has no Xcode)"
     echo "  ./Scripts/gui.sh probe      # deploy + verify"

@@ -197,36 +197,66 @@ $D window                                   # frame + windowNumber
 
 代码和脚本跟着 git clone 走。机器上要重建的是三样：工具链、VM 镜像、herdr。
 
-### 7.1 VM 镜像：`tart export` / `import`
+### 7.1 先分清两件事：自己搬家 vs 给别人
 
-VM 是 31GB 的本地磁盘镜像，**不在 git 里**，也是唯一不能靠 clone 得到的东西。
-`Scripts/vm-bootstrap.sh` 封装了两端：
+这两个场景的最优解**完全不同**，别混：
 
-```bash
-# 旧机器
-./Scripts/vm-bootstrap.sh export ~/kraal-agent.tvm
-# 实测 32 秒，22GB（tart 会先停 VM，运行中拒绝导出）
+| 场景 | 做法 | 代价 |
+| --- | --- | --- |
+| **自己换机器** | `tart export` → 搬文件 → `tart import` | 22GB 中转，导出 32s + 导入 17s |
+| **给别人用** | 让对方自己 `./Scripts/vm-bootstrap.sh` | 他拉 26.4GB，实测 **25 分钟** |
 
-# 通过移动硬盘 / rsync / 任何方式把 .tvm 传过去，然后
-./Scripts/vm-bootstrap.sh import ~/kraal-agent.tvm
-# 实测 17 秒
+**给别人时不要传 .tvm。** 实测确认：公开基础镜像
+`ghcr.nju.edu.cn/cirruslabs/macos-tahoe-base:latest` 已经自带全部前置条件——
+
+```text
+SIP          disabled     ← 写 TCC.db 所需，镜像默认就是关的
+autologin    admin
+session      Aqua         ← 合成事件需要，镜像默认就是 Aqua
+TCC 授权      Accessibility / Microphone / PostEvent / ScreenCapture 全部 auth_value=2
 ```
 
-导入后**不要新建**：TCC 授权、SIP 状态、autologin 都保存在镜像里，跟着走。
-实测验证过：导入的副本 `launchctl managername` 仍是 `Aqua`、SIP 仍关闭、
-4 条 TCC 授权完好，`gui.sh run split-right` 三条断言直接通过。
-
-`import` 拒绝覆盖同名 VM（否则 tart 只会说 "is running"，看起来像 tart 的 bug）。
-要换名字用 `KRAAL_GUI_VM=xxx`。
-
-### 7.2 三条只有全新 provision 才需要做的事
-
-只有在**没有 .tvm 可用**（比如换了架构、或镜像彻底坏了）时才需要：
+我用这个干净镜像拖了一个新 VM，**没做任何手工配置**，直接
+`gui.sh run split-right` → 三条断言全过。所以他只需要 clone 代码 + 跑脚本：
 
 ```bash
-./Scripts/vm-bootstrap.sh              # clone 基础镜像 → 启动 → 验证 Aqua + TCC
-./Scripts/vm-bootstrap.sh --fix-tcc    # 如果三条授权缺失（需 SIP 关闭）
+git clone https://github.com/zzjcool/kraal.git && cd kraal
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer   # Xcode 必需
+brew install cirruslabs/cli/tart                                  # 若未安装
+./Scripts/vm-bootstrap.sh        # 拉 26.4GB，实测 25 分钟
+/usr/bin/swift build --product KraalGUIDriver
+./Scripts/build-app.sh
+./Scripts/gui.sh run             # 5 用例 / 11 断言
 ```
+
+他要付的代价，逐项都有实测数字：
+
+| 项 | 代价 |
+| --- | --- |
+| 基础镜像下载 | 26.4GB，**25 分钟**（走 `ghcr.nju.edu.cn` 镜像源） |
+| 磁盘 | VM 50GB 稀疏，实占 **32GB**；tart 缓存再 **30GB** |
+| Xcode | **只有 `swift test` 需要**：`Testing.framework`/`XCTest.framework` 只随 Xcode 提供，CLT 里没有。`swift build`、`build-app.sh`、`gui.sh run` 用 CLT 也能跑 |
+| guest 内配置 | **零**——镜像已自带 Aqua、SIP off、四条 TCC 授权 |
+
+### 7.2 自己换机器：`tart export` / `import`
+
+只在**想省掉那 25 分钟重装**、或 VM 里攒了不想重做的状态时才值得：
+
+```bash
+./Scripts/vm-bootstrap.sh export ~/kraal-agent.tvm    # 实测 32s，22GB
+./Scripts/vm-bootstrap.sh import ~/kraal-agent.tvm    # 实测 17s
+```
+
+导入后**不要重新 provision**：TCC 授权、SIP、autologin 都在镜像里。实测验证过
+导入的副本 `launchctl managername` 仍是 `Aqua`、SIP 仍关闭、4 条授权完好、
+用例直接通过。
+
+`import` 拒绝覆盖同名 VM（否则 tart 只回 "is running"，像 tart 的 bug）。
+换名字用 `KRAAL_GUI_VM=xxx`。
+
+**给别人时想用 .tvm 也是错的选择**：22GB 文件传输本身就比他自己拉 26GB 快不了
+多少，还带来版本漂移——他的镜像会永久冻结在你的 macOS 补丁级别上，而他重新
+clone 会拿到最新的。
 
 ### 7.3 迁移时最容易静默失效的四个点
 
