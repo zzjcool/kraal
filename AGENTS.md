@@ -107,13 +107,15 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 /usr/bin/swift build                     # 全部 target
-/usr/bin/swift test                      # 全绿；汇总行说 180 tests / 29 suites（参数化用例会被并成一个）
+/usr/bin/swift test                      # 283 条；22 条已知红（见下），门禁用 test-baseline.sh
 export PATH="$HOME/.pi-lens/bin:$PATH"   # swiftlint 不在默认 PATH
 swiftlint --quiet Sources Tests          # 必须零违规
 for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 ./Scripts/build-app.sh                   # 打包 build/Kraal.app（ad-hoc 签名）
 
 ./Scripts/verify.sh                      # 六道门禁全跑（推荐）
+./Scripts/test-baseline.sh               # 跑全部 except 22 条已知红；verify.sh 用它
+./Scripts/test-baseline.sh --compare     # 哪些已知红已经修好了（该从名单里删掉）
 ./Scripts/gui.sh run split-right         # 单个 UI 用例（需已 build-app.sh）
 ./Scripts/gui.sh list                    # 现有用例
 
@@ -125,6 +127,15 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 
 `verify.sh` 六道门禁：`swift build` → `swift test` → `swiftlint` → `shellcheck`
 → `build-app.sh` → `gui.sh run`。`--fast` 跳过最后两道，`KRAAL_SKIP_GUI=1` 只跳 GUI。
+
+**`swift test` 现在会红，那是故意的。** 从上游三个参考项目移植的测试里有 22 条
+钉的是本客户端还没实现的行为（命名字色 SGR 偏一档、`u8` 写成 varint、OSC 8
+缺失……），逐条见 `docs/PORTED-TESTS.md`。所以测试门禁是
+`Scripts/test-baseline.sh`：**跳过那 22 条，其余必须全绿**，这样真回归仍会被拦住。
+
+修掉其中一条时，**必须从 `Scripts/test-baseline.sh` 的 `REDS` 名单里删掉它**，
+否则名单变陈、那条护栏白丢。`--compare` 就是干这个的：它列出「名单里但已经
+绿了」的条目，输出为空才说明名单是准的。合并 issue 分支后跑一次。
 
 **给别人的时候不要传 .tvm**：公开的基础镜像已自带 Aqua 会话、SIP 关闭、四条 TCC
 授权，他跑一次 `vm-bootstrap.sh` 就行（拉 26.4GB，实测 25 分钟）。传 .tvm 会让
@@ -317,7 +328,7 @@ docs(env): 记录 Tart VM 作为验证环境及其限制
 ```bash
 git diff --stat        # 行数变化是否符合预期（见 DEBUGGING.md §4）
 git status --short     # 别把无关的未跟踪文件带进来
-swift test             # 全绿
+swift test             # 全绿（22 条已知红除外，见 test-baseline.sh）
 swiftlint --quiet Sources Tests
 ```
 
