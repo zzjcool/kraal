@@ -25,7 +25,15 @@
 |---|---|---|---|
 | 「经 SSH 合成鼠标不可用，因为 VM 里没有 Aqua 会话」 | `docs/ENVIRONMENT.md:328-371` | **对 SSH 成立，对 Tart 不成立。** `tart exec` 落在 **Aqua** 会话：`launchctl managername` → `Aqua`，WindowServer(pid 194) + loginwindow(pid 193) 在跑，`autoLoginUser = admin` | `/tmp/kraal-vm-probe.log` E1 |
 | 「CGEvent.post 能移动光标但点击进不了任何 app」 | `docs/ENVIRONMENT.md:319` | **点击能进 app。** 测靶 app 收到 `mouseDown at (200.0, 166.0) hits=1`；对照组（点窗口外）`hits=0` | `/tmp/kraal-vm-probe5.log` E25/E26 |
-| 「pane 内容是 Metal 画的，AX 树几乎为空 ⇒ AX 路线不可行」 | `docs/ENVIRONMENT.md:161-162` | **终端内容确实为空，但 Chrome/菜单完全可用。** Kraal 在 VM 里：**193 个 AX 节点，105 个带 identifier，163 个可 press** | `/tmp/kraal-vm-probe8.log` E38 |
+| 「pane 内容是 Metal 画的，AX 树几乎为空 ⇒ AX 路线不可行」 | `docs/ENVIRONMENT.md:161-162` | **终端内容确实为空，但 Chrome/菜单完全可用。** Kraal 在 VM 里：**193 个 AX 节点，163 个可 press** | `/tmp/kraal-vm-probe8.log` E38 |
+
+> ⚠️ **一处必须自我修正的数字**：本文初稿写的是「105 个带 `AXIdentifier`」。
+> 这是计数陷阱——那 105 是**匹配正则的次数**，不是唯一个数。去重后只有 **27 个唯一值**，
+> 且几乎全是 **AppKit 自动合成的 selector 名**，不是手写的稳定标识：
+> `runCommand:` 出现 **5 次**（New Workspace / New Tab / Rename… 全共用一个），
+> `_recentItemRequested:` 出现 **7 次**。
+> `rg accessibilityIdentifier Sources/` 实测 **0 处**（全仓只有
+> `Theme.swift:128` 一个 `accessibilityLabel`）。
 
 ### 1.1 之前为什么判错（写进 DEBUGGING.md 用）
 
@@ -51,7 +59,7 @@
 | 启动 GUI app（AppKit / SwiftUI） | ✅ | Kraal 窗口正常，`window: number=131 pid=3406` |
 | 窗口级截图 | ✅ | `screencapture -x -o -l 131` → 1180×760 PNG |
 | 全屏截图 | ✅ | `screencapture -x` → 1920×1200 PNG |
-| AX 树读取 | ✅ | 193 节点 / 105 identifier / 163 pressable |
+| AX 树读取 | ✅ | 193 节点 / 27 唯一 identifier（均为 AppKit 合成）/ 163 pressable |
 | AX 语义化驱动 | ✅ | `AXUIElementPerformAction(kAXPressAction)` → `err=0` |
 | CGEvent 鼠标点击 | ✅ | 靶 app 收到 `mouseDown hits=1`；对照 0 hits |
 | CGEvent 键盘输入 | ✅ | `NSTextField` 收到 `abcd`（`KB_RESULT value=abcd`） |
@@ -144,16 +152,35 @@ EXC_BREAKPOINT (SIGTRAP)
 ### 4.1 选择器（全部可选，AND 组合）
 
 ```
---id    <AXIdentifier>     # 105 个节点有，优先级最高
+--id    <AXIdentifier>     # ⚠️ 见下方：Kraal 自己没有手写 identifier，别依赖这个
 --desc  <AXDescription>    # 工具栏按钮/单选按钮走这个（如 "Split View Horizontally"）
 --title <AXTitle>          # 菜单项走这个（如 "Split Right"）
 --role  <AXRole>
 --index <n>                # 第 n 个匹配
 ```
 
-**实证**：Kraal 的工具栏按钮只有 `AXDescription`（`desc=Refresh`），没有 title；
-菜单项只有 `AXTitle`（`title=Split Right`），identifier 是 `runCommand:`（不可区分）。
-所以 `--desc` 和 `--title` 都必须有，不能只留一个。
+**实证一：identifier 不可靠，必须用 desc/title。**
+
+`rg accessibilityIdentifier Sources/` = **0 处**。AX 里看到的那些 "identifier" 全是
+AppKit 自动合成的 selector 名，**不唯一**：
+
+| identifier | 出现次数 | 谁在用 |
+|---|---|---|
+| `runCommand:` | 5 | New Workspace / New Tab / Rename Workspace… / Rename Tab… / Settings… |
+| `_recentItemRequested:` | 7 | Apple 菜单「最近项目」下所有条目 |
+| `_aboutThisMacRequested:` 等 | 1 各 | 系统菜单项 |
+
+所以 `--id` 只能当辅助线索。真正能区分元素的是：
+- 工具栏按钮 → 只有 `AXDescription`（`desc=Refresh`），**无 title**
+- 菜单项 → 只有 `AXTitle`（`title=Split Right`），identifier 是共用的 `runCommand:`
+- 侧边栏行 → 两者都无时，只能退到 `--role` + `--index` 或坐标
+
+**实证二：目标不是"AX 全绿"，而是"关键路径可寻址"。**
+
+能稳定驱动的：菜单项 100%、工具栏按钮 100%、侧边栏单选钮/Add/Command 100%。
+**不能驱动的**：终端 pane 内部（Metal 自绘，零元素）、
+侧边栏 `AXUnknown` 行（`desc=unknown`，只有 `AXShowMenu`）。
+后者要断言只能走坐标 + 截图。
 
 ### 4.2 命令
 
