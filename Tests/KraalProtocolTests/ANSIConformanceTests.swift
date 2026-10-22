@@ -40,11 +40,10 @@ struct TerminalColorEncodingTests {
 
     /// `render_ansi.rs:1110` `color_to_sgr_fg_named_colors`.
     ///
-    /// The daemon maps the 16 named palette entries onto SGR 30–37 / 90–97.
-    /// RED AS PORTED: `StyleCode` emits `38;5;<n>` for every named colour, and
-    /// its index is the wire value, so `named(1)` (black) is drawn as 256-colour
-    /// entry 1, which is red. Every named colour is off by one against the
-    /// daemon and against what the desktop client shows.
+    /// The daemon maps the 16 named palette entries onto SGR 30–37 / 90–97 — an
+    /// explicit table, not the 256-colour index. issue #1 replaced the
+    /// `38;5;<n>` fallback: `named(1)` is black and must be `30`; as `38;5;1` it
+    /// was drawn as palette entry 1, which is red.
     @Test("named foreground colors use SGR 30-37 / 90-97")
     func namedForeground() {
         let cases: [(UInt32, String)] = [

@@ -208,12 +208,24 @@ enum StyleCode {
         let base = isBackground ? 48 : 38
         switch color {
         case let .named(index):
-            // Named colors are palette entries; 0...=16 map onto 0...=16 with
-            // the default foreground/background at index 0.
-            if index == 0 {
+            // The 16 named colours have their own SGR codes, and they are *not*
+            // the 256-colour palette indices: `named(1)` is black and must go
+            // out as `30`, not `38;5;1` — the latter is palette entry 1, which is
+            // red. Straight from `render_ansi.rs:347` (`color_to_sgr_fg`), which
+            // is an explicit table for exactly this reason.
+            //
+            // 0 is "default", 1...8 are 30...37, 9...16 are 90...97; anything
+            // else falls back to the default rather than emitting a wrong colour.
+            guard index != 0, index <= 16 else {
                 return isBackground ? "49" : "39"
             }
-            return "\(base);5;\(index)"
+            let code: UInt8
+            if index <= 8 {
+                code = 30 + (index - 1)
+            } else {
+                code = 90 + (index - 9)
+            }
+            return String(isBackground ? code + 10 : code)
         case let .indexed(index):
             return "\(base);5;\(index)"
         case let .rgb(red, green, blue):
