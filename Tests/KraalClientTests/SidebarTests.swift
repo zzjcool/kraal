@@ -133,10 +133,12 @@ struct SidebarConfigTests {
 
     @Test("styled tokens keep their base style and rules")
     func styledTokens() throws {
+        // The condition is an inline key, which is the only spelling the daemon
+        // accepts (`config/sidebar/rules.rs`).
         let layout = try SidebarConfigResolver.layout(fromTOML: """
         [ui.sidebar.agents]
         rows = [[{ token = "agent", bold = true, fg = "red",
-                   rules = [{ when = "contains", value = "claude", fg = "purple" }] }]]
+                   rules = [{ contains = "claude", fg = "purple" }] }]]
         """)
         let token = try #require(layout.agentsRows.first?.tokens.first)
         #expect(token.style.bold == true)
@@ -144,11 +146,100 @@ struct SidebarConfigTests {
         #expect(token.rules.count == 1)
 
         // A non-matching text keeps the base style.
-        #expect(token.resolvedStyle(for: "codex").foreground == "red")
+        #expect(token.resolvedStyle(for: "codex")?.foreground == "red")
         // A matching rule overrides only the fields it sets.
-        let matched = token.resolvedStyle(for: "claude-3")
+        let matched = try #require(token.resolvedStyle(for: "claude-3"))
         #expect(matched.foreground == "purple")
         #expect(matched.bold == true)
+    }
+
+    @Test("the old when/value spelling no longer matches, as upstream")
+    func legacyRuleSpellingIsIgnored() throws {
+        let layout = try SidebarConfigResolver.layout(fromTOML: """
+        [ui.sidebar.agents]
+        rows = [[{ token = "agent", fg = "red",
+                   rules = [{ when = "contains", value = "claude", fg = "purple" }] }]]
+        """)
+        let token = try #require(layout.agentsRows.first?.tokens.first)
+        #expect(token.rules.isEmpty)
+        #expect(token.resolvedStyle(for: "claude-3")?.foreground == "red")
+    }
+
+    @Test("a rule needs exactly one condition")
+    func exactlyOneCondition() throws {
+        let layout = try SidebarConfigResolver.layout(fromTOML: """
+        [ui.sidebar.agents]
+        rows = [[{ token = "agent", fg = "red", rules = [
+            { equals = "a", contains = "b", fg = "green" },
+            { fg = "blue" },
+            { equals = "codex", fg = "purple" },
+        ] }]]
+        """)
+        let token = try #require(layout.agentsRows.first?.tokens.first)
+        // Two conditions and zero conditions are both dropped; only the third
+        // rule survives.
+        #expect(token.rules.count == 1)
+        #expect(token.resolvedStyle(for: "codex")?.foreground == "purple")
+    }
+
+    @Test("numeric rules take a threshold and reject ignore_case")
+    func numericRules() throws {
+        let layout = try SidebarConfigResolver.layout(fromTOML: """
+        [ui.sidebar.agents]
+        rows = [[{ token = "agent", fg = "red", rules = [
+            { gt = 80, fg = "green", bold = true },
+            { lt = 50, ignore_case = true, fg = "blue" },
+        ] }]]
+        """)
+        let token = try #require(layout.agentsRows.first?.tokens.first)
+        // `ignore_case` is invalid on a numeric condition, so that rule is gone.
+        #expect(token.rules.count == 1)
+        let matched = try #require(token.resolvedStyle(for: "91"))
+        #expect(matched.foreground == "green")
+        #expect(matched.bold == true)
+        #expect(token.resolvedStyle(for: "80")?.foreground == "red")
+        // A token whose text is not a number never matches a numeric rule.
+        #expect(token.resolvedStyle(for: "claude")?.foreground == "red")
+    }
+
+    @Test("hide removes the token, and with it its separator")
+    func hideRule() throws {
+        let layout = try SidebarConfigResolver.layout(fromTOML: """
+        [ui.sidebar.agents]
+        rows = [[{ token = "machine", rules = [{ equals = "Local", hide = true }] },
+                 "agent"]]
+        """)
+        let row = layout.agentsRows[0]
+        // The token still exists in the spec; only its resolution is hidden.
+        #expect(row.tokens.count == 2)
+
+        let agent = try JSONDecoder().decode(ClientShellAgent.self, from: Data("""
+        {"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","agent":"claude"}
+        """.utf8))
+        let local = SidebarRowContext(agent: agent, machineName: "Local", showsMachineName: true)
+        let resolved = SidebarTokenResolver.resolve(row: row, context: local)
+        #expect(resolved.tokens.map(\.kind) == [.agent])
+
+        // Another machine keeps its name on the row.
+        let other = SidebarRowContext(agent: agent, machineName: "Fedora", showsMachineName: true)
+        let kept = SidebarTokenResolver.resolve(row: row, context: other)
+        #expect(kept.tokens.map(\.kind) == [.machine, .agent])
+    }
+
+    @Test("only the first matching rule applies")
+    func firstMatchWins() throws {
+        let layout = try SidebarConfigResolver.layout(fromTOML: """
+        [ui.sidebar.agents]
+        rows = [[{ token = "agent", rules = [
+            { contains = "claude", fg = "purple" },
+            { contains = "claude", fg = "green", bold = true },
+        ] }]]
+        """)
+        let token = try #require(layout.agentsRows.first?.tokens.first)
+        let matched = try #require(token.resolvedStyle(for: "claude-3"))
+        #expect(matched.foreground == "purple")
+        // Layering would have let the second rule win; upstream stops at the first.
+        #expect(matched.bold == nil)
     }
 
     @Test("unknown tokens are skipped instead of blanking the sidebar")
@@ -200,9 +291,12 @@ struct StyleRuleTests {
         #expect(!StyleRule(when: .equals, value: "codex", style: .none).matches("codex-cli"))
         #expect(StyleRule(when: .contains, value: "claude", style: .none).matches("my-claude-3"))
         #expect(StyleRule(when: .startsWith, value: "pi", style: .none).matches("pi-agent"))
-        #expect(StyleRule(when: .greaterThan, value: "5", style: .none).matches("6"))
-        #expect(!StyleRule(when: .greaterThan, value: "5", style: .none).matches("5"))
-        #expect(StyleRule(when: .lessThan, value: "5", style: .none).matches("4"))
+        #expect(StyleRule(when: .greaterThan, threshold: 5, style: .none).matches("6"))
+        #expect(!StyleRule(when: .greaterThan, threshold: 5, style: .none).matches("5"))
+        #expect(StyleRule(when: .lessThan, threshold: 5, style: .none).matches("4"))
+        // A non-numeric token never satisfies a numeric condition.
+        #expect(!StyleRule(when: .greaterThan, threshold: 5, style: .none).matches("n/a"))
+        #expect(!StyleRule(when: .lessThan, threshold: 5, style: .none).matches("nan"))
     }
 
     @Test("ignore_case is ASCII-only, matching the daemon")

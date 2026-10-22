@@ -137,9 +137,12 @@ public enum SidebarTokenResolver {
         for token in row.tokens {
             let text = text(for: token.kind, context: context)
             guard !text.isEmpty else { continue }
+            // `nil` means a rule matched with `hide = true`: the daemon drops the
+            // token and its separator, so the separator count follows too.
+            guard let style = token.resolvedStyle(for: text) else { continue }
             resolved.append(ResolvedToken(
                 text: text,
-                style: token.resolvedStyle(for: text),
+                style: style,
                 kind: token.kind,
                 segments: segments(for: token.kind, context: context)
             ))
