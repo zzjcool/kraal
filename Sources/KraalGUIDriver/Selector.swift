@@ -22,11 +22,24 @@ struct Selector {
     var title: String?
     var role: String?
     var index: Int = 0
+    /// Restricts the search to the subtree under the first element matching this
+    /// selector.
+    ///
+    /// Necessary because titles are not unique across the app: `Copy` exists in
+    /// both the Edit menu and the pane context menu, and `Split Right` exists in
+    /// both the View menu and the context menu. Without a scope, a press aimed at
+    /// one of them can silently hit the other — and the two do different things
+    /// (the menu-bar copy targets the focused pane; the context-menu copy targets
+    /// the pane the menu was raised on).
+    ///
+    /// Boxed because a struct cannot contain itself; the scope is only ever one
+    /// level deep, so a class box is enough.
+    var within: ScopeBox?
 
     /// True when nothing narrows the search; refusing is better than pressing a
     /// random element.
     var isEmpty: Bool {
-        id == nil && desc == nil && title == nil && role == nil
+        id == nil && desc == nil && title == nil && role == nil && within == nil
     }
 
     func matches(_ element: AXUIElement) -> Bool {
@@ -43,9 +56,16 @@ struct Selector {
         if let desc { parts.append("desc=\(desc)") }
         if let title { parts.append("title=\(title)") }
         if let role { parts.append("role=\(role)") }
+        if let within { parts.append("within[\(within.selector.humanReadable)]") }
         if index != 0 { parts.append("index=\(index)") }
         return parts.isEmpty ? "<empty selector>" : parts.joined(separator: " ")
     }
+}
+
+/// Boxes a nested `Selector` so `Selector` can stay a value type.
+final class ScopeBox {
+    let selector: Selector
+    init(_ selector: Selector) { self.selector = selector }
 }
 
 // MARK: - AX helpers
@@ -102,6 +122,55 @@ extension AXUIElement {
         }
         return value
     }
+    /// the context menu's `Copy`) resolves to whichever the DFS reaches first.
+    func find(_ selector: Selector, maxDepth: Int = 16) -> AXUIElement? {
+        let root: AXUIElement
+        if let scope = selector.within {
+            guard let scoped = find(scope.selector, maxDepth: maxDepth) else { return nil }
+            root = scoped
+        } else {
+            root = self
+        }
+        var seen = 0
+        var found: AXUIElement?
+        func walk(_ node: AXUIElement, _ depth: Int) {
+            guard found == nil, depth <= maxDepth else { return }
+            if selector.matches(node) {
+                if seen == selector.index { found = node; return }
+                seen += 1
+            }
+            for child in node.children {
+                walk(child, depth + 1)
+            }
+        }
+        walk(root, 0)
+        return found
+    }
+
+    /// Every element matching the selector, honouring `within`. `press` uses this
+    /// to report an ambiguous match instead of quietly picking the first one.
+    func findAll(_ selector: Selector, maxDepth: Int = 16) -> [AXUIElement] {
+        let root: AXUIElement
+        if let scope = selector.within {
+            guard let scoped = find(scope.selector, maxDepth: maxDepth) else { return [] }
+            root = scoped
+        } else {
+            root = self
+        }
+        var matches: [AXUIElement] = []
+        var visited = Set<CFHashCode>()
+        func walk(_ node: AXUIElement, _ depth: Int) {
+            guard depth <= maxDepth else { return }
+            guard visited.insert(CFHash(node)).inserted else { return }
+            if selector.matches(node) { matches.append(node) }
+            for child in node.children {
+                walk(child, depth + 1)
+            }
+        }
+        walk(root, 0)
+        return matches
+    }
+
 }
 
 // MARK: - App targeting
@@ -134,21 +203,17 @@ struct TargetApp {
         (element.copy(kAXWindowsAttribute) as? [AXUIElement]) ?? []
     }
 
-    /// Depth-first search for the `n`th element matching `selector`.
+    /// Search rooted at the application element.
     func find(_ selector: Selector, maxDepth: Int = 16) -> AXUIElement? {
-        var seen = 0
-        var found: AXUIElement?
-        func walk(_ node: AXUIElement, _ depth: Int) {
-            guard found == nil, depth <= maxDepth else { return }
-            if selector.matches(node) {
-                if seen == selector.index { found = node; return }
-                seen += 1
-            }
-            for child in node.children {
-                walk(child, depth + 1)
-            }
-        }
-        walk(element, 0)
-        return found
+        element.find(selector, maxDepth: maxDepth)
     }
+
+    func findAll(_ selector: Selector, maxDepth: Int = 16) -> [AXUIElement] {
+        element.findAll(selector, maxDepth: maxDepth)
+    }
+    /// Depth-first search for the `n`th element matching `selector`.
+    ///
+    /// `selector.within` narrows the search to one subtree; it is resolved first
+    /// and the outer selector is then matched only against that subtree's root and
+    /// descendants. Without that, a title that appears twice (Edit's `Copy` and
 }

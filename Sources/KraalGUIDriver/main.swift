@@ -40,17 +40,28 @@ func fail(_ code: Exit, _ message: String) -> Never {
 struct Arguments {
     private var values: [String: String] = [:]
 
+    /// Single-dash spellings people actually type. Without this, `shot -o FILE`
+    /// was parsed as nothing at all and the command failed saying it needed
+    /// `-o` — while `-o` was right there on the line.
+    private static let shortNames: [String: String] = [
+        "o": "out", "a": "app", "t": "title", "d": "desc", "i": "id",
+    ]
+
     init(_ raw: [String]) {
         var index = 0
         while index < raw.count {
             let token = raw[index]
-            guard token.hasPrefix("--") else {
+            let isLong = token.hasPrefix("--")
+            let isShort = !isLong && token.hasPrefix("-") && token.count == 2
+            guard isLong || isShort else {
                 index += 1
                 continue
             }
-            let key = String(token.dropFirst(2))
+            let bare = isLong ? String(token.dropFirst(2)) : String(token.dropFirst())
+            let key = isLong ? bare : (Arguments.shortNames[bare] ?? bare)
             let next = index + 1 < raw.count ? raw[index + 1] : nil
-            if let next, !next.hasPrefix("--") {
+            // A short flag always takes a value; a long one may be a switch.
+            if let next, isShort || !next.hasPrefix("--") {
                 values[key] = next
                 index += 2
             } else {
@@ -70,13 +81,30 @@ struct Arguments {
     func double(_ key: String) -> Double? { string(key).flatMap(Double.init) }
 
     func selector() -> Selector {
-        Selector(
+        var found = Selector(
             id: string("id"),
             desc: string("desc"),
             title: string("title"),
             role: string("role"),
             index: int("index") ?? 0
         )
+        // `--within-<attr> VALUE` scopes the search to the first element matching
+        // that attribute. Needed because titles repeat across menus and the two
+        // copies do different things.
+        for attr in ["title", "desc", "id", "role"] {
+            if let value = string("within-\(attr)") {
+                var scope = Selector()
+                switch attr {
+                case "title": scope.title = value
+                case "desc": scope.desc = value
+                case "id": scope.id = value
+                default: scope.role = value
+                }
+                found.within = ScopeBox(scope)
+                break
+            }
+        }
+        return found
     }
 }
 
@@ -160,6 +188,18 @@ func commandPress(_ args: Arguments) -> Never {
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
         fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
     }
+    // Report ambiguity rather than quietly pressing the first match. `Copy` is in
+    // both the Edit menu and the pane context menu; pressing the wrong one looks
+    // exactly like the feature being broken.
+    let matches = app.findAll(selector)
+    if matches.isEmpty {
+        fail(.harness, "no element matching \(selector.humanReadable)")
+    }
+    if matches.count > 1, selector.index == 0, !args.has("allow-ambiguous") {
+        fail(.harness, "\(selector.humanReadable) matches \(matches.count) elements — "
+            + "add --index N to choose one, --within-<kind> VALUE to narrow the subtree, "
+            + "or --allow-ambiguous to take the first")
+    }
     guard let element = app.find(selector) else {
         fail(.harness, "no element matching \(selector.humanReadable)")
     }
@@ -234,33 +274,110 @@ func commandWindow(_ args: Arguments) -> Never {
 /// `screencapture -l`. Window-by-window capture also means the shot is stable
 /// even if the app is behind other windows — which is the normal case for the
 /// `local` backend.
+/// Screenshots one window of the app under test.
+///
+/// `CGWindowListCreateImage` was removed in macOS 15, so this shells out to
+/// `screencapture`. On this host `-l <windowid>` fails with "could not create
+/// image from window" for *every* app, not just this one — Herdr's window fails
+/// too, while a plain full-screen capture succeeds. So the window-limited form
+/// cannot be assumed to work: fall back to capturing the screen and cropping to
+/// the window's own bounds. The crop is derived from the same `CGWindowList`
+/// geometry the rest of the driver trusts, so the fallback is not a guess.
 func commandShot(_ args: Arguments) -> Never {
     guard let out = args.string("out") else { fail(.harness, "shot needs -o/--out") }
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
         fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
     }
-    let number: Int
-    if args.has("full") {
-        number = 0
-    } else {
-        guard let found = primaryWindow(for: app.pid, title: args.string("title")) else {
-            fail(.harness, "app '\(app.name)' has no window to capture")
-        }
-        number = found.number
+    guard !args.has("full") else {
+        runCapture(["-x", out], label: "full", out: out)
     }
+    guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
+        fail(.harness, "app '\(app.name)' has no window to capture")
+    }
+    // Try the precise form first; it is the only one that is stable when the app
+    // is behind other windows.
+    if capture(["-x", "-o", "-l", String(window.number), out]) {
+        reportShot(out, window: window.number)
+    }
+    cropFromScreen(window: window, out: out)
+}
 
+/// True when every pixel of the PNG is identical to the top-left one.
+///
+/// `screencapture` exits 0 and writes a perfectly valid PNG when the calling
+/// process lacks the Screen Recording grant — the file is just uniformly black.
+/// Reporting that as success would let a screenshot assertion pass while proving
+/// nothing, so the driver checks and says so instead.
+private func isUniformlyBlank(_ path: String) -> Bool {
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let data = image.dataProvider?.data,
+          let bytes = CFDataGetBytePtr(data)
+    else { return false }
+    let count = CFDataGetLength(data)
+    let stride = image.bitsPerPixel / 8
+    guard stride > 0, count >= stride * 2 else { return false }
+    for offset in stride..<count where bytes[offset] != bytes[offset % stride] {
+        return false
+    }
+    return true
+}
+
+/// Prints the capture result, refusing to call a blank image a success.
+private func reportShot(_ out: String, window: Any, note: String = "") -> Never {
+    if isUniformlyBlank(out) {
+        fail(.harness, "captured \(out) is uniformly blank — the calling process "
+            + "lacks Screen Recording permission (screencapture still exits 0). "
+            + "Grant it in System Settings > Privacy & Security > Screen Recording.")
+    }
+    print("wrote \(out) window=\(window)\(note)")
+    exit(Exit.success.rawValue)
+}
+
+/// Runs `screencapture` and reports whether it produced the file.
+private func capture(_ arguments: [String]) -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-    process.arguments = number == 0
-        ? ["-x", out]
-        : ["-x", "-o", "-l", String(number), out]
+    process.arguments = arguments
+    process.standardError = FileHandle.nullDevice
     try? process.run()
     process.waitUntilExit()
-    guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: out) else {
-        fail(.harness, "screencapture failed (\(process.terminationStatus))")
+    let target = arguments.last ?? ""
+    return process.terminationStatus == 0
+        && (FileManager.default.fileExists(atPath: target)
+            && (try? FileManager.default.attributesOfItem(atPath: target)[.size] as? Int) ?? 0 > 0)
+}
+
+private func runCapture(_ arguments: [String], label: String, out: String) -> Never {
+    guard capture(arguments) else { fail(.harness, "screencapture failed for \(label)") }
+    reportShot(out, window: label)
+}
+
+/// Captures the whole screen and trims it to the window rectangle.
+private func cropFromScreen(window: WindowInfo, out: String) -> Never {
+    let scratch = out + ".screen.png"
+    guard capture(["-x", scratch]) else {
+        fail(.harness, "screencapture failed for both window and screen")
     }
-    print("wrote \(out) window=\(number == 0 ? "full" : String(number))")
-    exit(Exit.success.rawValue)
+    defer { try? FileManager.default.removeItem(atPath: scratch) }
+    // `sips` handles the crop with no extra dependency; the rectangle has to be
+    // integral or sips rejects it.
+    let crop = Process()
+    crop.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
+    crop.arguments = [
+        "--cropToHeightWidth", String(Int(window.frame.height)),
+        String(Int(window.frame.width)),
+        "--cropOffset", String(Int(window.frame.origin.y)),
+        String(Int(window.frame.origin.x)),
+        scratch, "--out", out,
+    ]
+    crop.standardError = FileHandle.nullDevice
+    try? crop.run()
+    crop.waitUntilExit()
+    guard crop.terminationStatus == 0, FileManager.default.fileExists(atPath: out) else {
+        fail(.harness, "could not crop screen capture to window")
+    }
+    reportShot(out, window: window.number, note: " (cropped from screen)")
 }
 
 /// A window as the window server describes it.
@@ -416,6 +533,227 @@ func commandQuit(_ args: Arguments) -> Never {
     exit(Exit.success.rawValue)
 }
 
+/// Explains why a synthetic event cannot be delivered, in terms of the actual
+/// cause rather than a guess.
+///
+/// Three quite different situations all surface as "the app is not frontmost",
+/// and only one of them is about the app at all:
+///
+/// * the screen is locked — `loginwindow` owns the front and nothing else can
+///   take it, so this is purely environmental;
+/// * the app runs with `KRAAL_DEV_BACKGROUND=1`, which makes it `.accessory` and
+///   therefore ineligible to become frontmost by request;
+/// * something else simply has focus.
+///
+/// Reporting the third when the first is true sends the reader hunting for a
+/// product bug. It happened during this work: the machine was locked and the
+/// driver blamed the app's activation policy.
+private func explanation(for app: TargetApp) -> String {
+    if isScreenLocked() {
+        return "the screen is locked (IOConsoleLocked), so no app can become "
+            + "frontmost and synthetic events go to loginwindow. Unlock the machine, "
+            + "or use AXPress (which needs no focus) for this step."
+    }
+    let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another app"
+    switch app.application.activationPolicy {
+    case .accessory, .prohibited:
+        return "'\(app.name)' runs as an .accessory app (KRAAL_DEV_BACKGROUND=1), which "
+            + "cannot become frontmost by request; synthetic events would land in "
+            + "\(front). Relaunch with KRAAL_DEV_BACKGROUND=0, or use AXPress instead."
+    default:
+        return "'\(app.name)' did not become frontmost (currently \(front)) within the "
+            + "timeout, so a synthetic event would land in the wrong app."
+    }
+}
+
+/// True when the login window owns the session.
+func isScreenLocked() -> Bool {
+    let front = NSWorkspace.shared.frontmostApplication
+    if front?.bundleIdentifier == "com.apple.loginwindow" { return true }
+    // The CGSession dictionary is readable without special privileges and is the
+    // same signal the screen saver uses.
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+    return session?["CGSSessionScreenIsLocked"] as? Bool == true
+}
+
+/// Brings the app to the front and *waits until that actually happened*.
+///
+/// `activate()` returns nothing and frequently does not promote the process:
+/// an `.accessory` app (what `KRAAL_DEV_BACKGROUND=1` produces) is not allowed to
+/// become frontmost by asking, and even for a `.regular` app the call can be
+/// silently refused while the window server still has another app active. The
+/// earlier version trusted the call, then posted events — which all landed in
+/// whatever was actually frontmost (Herdr), so the click "worked" and nothing in
+/// the app ever moved. Verifying frontmost-ness is the only thing that makes the
+/// next synthetic event meaningful.
+@discardableResult
+func activateAndConfirm(_ app: TargetApp, timeout: Double = 5) -> Bool {
+    let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    if frontmost == app.pid { return true }
+    app.application.activate(options: [.activateAllWindows])
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.pid { return true }
+        usleep(100_000)
+    }
+    return false
+}
+
+/// Opens an app menu and presses one of its items.
+///
+/// Two steps because they are two different things: `AXPress` on a menu *bar*
+/// item is what opens its menu (AX树 does not expose the contents of a closed
+/// menu), and only then does the item inside become addressable. `press
+/// --title "Split Right"` worked by accident — "Split Right" lives in the View
+/// menu, which macOS had already populated. Any item in a menu that has never
+/// been opened is invisible to AX.
+///
+/// The scope argument is the menu bar item's title (e.g. `View`); without it a
+/// title like `Copy` resolves to whichever of the two copies the DFS reaches
+/// first.
+func commandMenu(_ args: Arguments) -> Never {
+    guard let menuName = args.string("menu") else {
+        fail(.harness, "menu needs --menu <title> and --item <title>")
+    }
+    guard let itemName = args.string("item") else {
+        fail(.harness, "menu needs --item <title>")
+    }
+    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
+        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
+    }
+
+    var barItem = Selector(title: menuName, role: kAXMenuBarItemRole as String)
+    barItem.within = ScopeBox(Selector(role: kAXMenuBarRole as String))
+    guard let opener = app.find(barItem) else {
+        let known = app.findAll(Selector(role: kAXMenuBarItemRole as String))
+            .compactMap { $0.string(kAXTitleAttribute) }
+        fail(.harness, "no menu bar item '\(menuName)'; available: \(known)")
+    }
+    guard opener.actionNames.contains(kAXPressAction) else {
+        fail(.harness, "menu bar item '\(menuName)' cannot be pressed")
+    }
+    let openError = AXUIElementPerformAction(opener, kAXPressAction as CFString)
+    if openError != .success {
+        fail(.harness, "opening menu '\(menuName)' failed with AXError \(openError.rawValue)")
+    }
+
+    // The menu's contents appear asynchronously once tracking starts.
+    var item: AXUIElement?
+    let deadline = Date().addingTimeInterval(args.double("timeout") ?? 5)
+    while Date() < deadline {
+        var candidate = Selector(title: itemName, index: args.int("index") ?? 0)
+        candidate.within = ScopeBox(Selector(title: menuName))
+        if let found = app.find(candidate) { item = found; break }
+        usleep(120_000)
+    }
+    guard let target = item else {
+        // Leave no menu tracking behind on failure: a stuck open menu makes the
+        // next command's synthetic events go nowhere.
+        AXUIElementPerformAction(opener, kAXCancelAction as CFString)
+        fail(.harness, "menu '\(menuName)' has no item '\(itemName)'")
+    }
+    guard target.actionNames.contains(kAXPressAction) else {
+        fail(.harness, "item '\(itemName)' has no AXPress")
+    }
+    let pressError = AXUIElementPerformAction(target, kAXPressAction as CFString)
+    if pressError != .success {
+        fail(.harness, "pressing '\(itemName)' failed with AXError \(pressError.rawValue)")
+    }
+    print("menu \(menuName) -> \(itemName)")
+    requireAlive(app, context: "menu \(menuName)/\(itemName)")
+    exit(Exit.success.rawValue)
+}
+
+// MARK: - P1: synthetic event commands
+
+/// Clicks at a point given relative to the app's window.
+///
+/// Window-relative is the only form worth exposing: absolute screen coordinates
+/// break the moment the window moves, and every coordinate bug so far came from
+/// hard-coding a position instead of deriving it from the window.
+///
+/// Activates the app first. Unlike `AXPress`, a synthetic click goes wherever the
+/// pointer is, so without activation it lands on whatever is frontmost — that is
+/// the failure mode that made a VM probe click TextEdit instead of the target.
+func commandClick(_ args: Arguments) -> Never {
+    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
+        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
+    }
+    let (offsetX, offsetY) = requirePoint(args)
+    guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
+        fail(.harness, "app '\(app.name)' has no window")
+    }
+    let clamped = CGPoint(
+        x: window.frame.origin.x + min(max(offsetX, 0), window.frame.width - 1),
+        y: window.frame.origin.y + min(max(offsetY, 0), window.frame.height - 1)
+    )
+
+    let stealsFocus = !args.has("no-activate")
+    if stealsFocus && !activateAndConfirm(app) {
+        fail(.harness, explanation(for: app))
+    }
+    let button: CGMouseButton = args.has("right") ? .right : .left
+    SyntheticInput.click(at: clamped, clicks: args.int("clicks") ?? 1, button: button)
+    print("clicked window+(\(Int(offsetX)),\(Int(offsetY))) -> screen(\(Int(clamped.x)),\(Int(clamped.y))) "
+        + "button=\(button == .right ? "right" : "left") activated=\(stealsFocus)")
+    requireAlive(app, context: "click")
+    exit(Exit.success.rawValue)
+}
+
+func commandDrag(_ args: Arguments) -> Never {
+    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
+        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
+    }
+    let (fromX, fromY) = requirePoint(args, prefix: "from")
+    let (toX, toY) = requirePoint(args, prefix: "to")
+    guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
+        fail(.harness, "app '\(app.name)' has no window")
+    }
+    let start = CGPoint(x: window.frame.origin.x + fromX, y: window.frame.origin.y + fromY)
+    let end = CGPoint(x: window.frame.origin.x + toX, y: window.frame.origin.y + toY)
+
+    guard activateAndConfirm(app) else {
+        fail(.harness, "could not bring '\(app.name)' to the front for a drag")
+    }
+    SyntheticInput.drag(from: start, to: end, steps: args.int("steps") ?? 12)
+    print("dragged window+(\(Int(fromX)),\(Int(fromY))) -> (\(Int(toX)),\(Int(toY)))")
+    requireAlive(app, context: "drag")
+    exit(Exit.success.rawValue)
+}
+
+/// Sends a key chord to the app, e.g. `--mod cmd --char w` for ⌘W.
+func commandKey(_ args: Arguments) -> Never {
+    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
+        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
+    }
+    guard let char = args.string("char") else { fail(.harness, "key needs --char") }
+    let modifiers = CGEventFlags.parse(args.string("mod"))
+    guard activateAndConfirm(app) else {
+        fail(.harness, "could not bring '\(app.name)' to the front for a key event")
+    }
+    guard SyntheticInput.key(char: char, modifiers: modifiers) else {
+        fail(.harness, "no virtual key code for '\(char)' on a US layout")
+    }
+    print("sent key '\(char)' mods=\(modifiers.rawValue)")
+    requireAlive(app, context: "key")
+    exit(Exit.success.rawValue)
+}
+
+private func requirePoint(_ args: Arguments, prefix: String = "at") -> (Double, Double) {
+    let raw: String?
+    if prefix == "at" {
+        raw = args.string("at")
+    } else {
+        raw = args.string(prefix)
+    }
+    guard let raw else { fail(.harness, "missing --\(prefix) X,Y") }
+    let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard parts.count == 2, let pointX = Double(parts[0]), let pointY = Double(parts[1]) else {
+        fail(.harness, "--\(prefix) must be X,Y — got '\(raw)'")
+    }
+    return (pointX, pointY)
+}
+
 // MARK: - Entry point
 
 let argv = Array(CommandLine.arguments.dropFirst())
@@ -450,6 +788,10 @@ case "shot": commandShot(args)
 case "type": commandType(args)
 case "launch": commandLaunch(args)
 case "quit": commandQuit(args)
+case "click": commandClick(args)
+case "drag": commandDrag(args)
+case "key": commandKey(args)
+case "menu": commandMenu(args)
 default:
     fail(.harness, "unknown command '\(command)'")
 }

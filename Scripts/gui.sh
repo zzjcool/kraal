@@ -43,6 +43,24 @@ HERDR_HOME="$SCRATCH/herdr-home"
 DRIVER="$ROOT/.build/out/Products/Debug/KraalGUIDriver"
 ARTIFACTS="$ROOT/artifacts"
 
+# Derived from the socket path so two concurrent runs cannot collide on a log
+# file, and so the name here matches what KraalLog picks.
+SESSION="${KRAAL_DEV_SESSION:-gui-$$}"
+
+# True when the login window owns the session. Synthetic events are posted to
+# whatever is frontmost; while locked that is loginwindow, so they silently do
+# nothing useful.
+screen_locked() {
+    local front
+    front=$(python3 -c '
+import subprocess, json
+out = subprocess.run(["ioreg", "-n", "Root", "-d1"], capture_output=True, text=True).stdout
+print("locked" if "<key>IOConsoleLocked</key>" in out and
+      "<true/>" in out.split("<key>IOConsoleLocked</key>")[1][:40] else "unlocked")
+' 2>/dev/null)
+    [ "$front" = "locked" ]
+}
+
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 2; }
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok() { printf '\033[32mok:\033[0m %s\n' "$*"; }
@@ -192,7 +210,7 @@ launch_app() {
     KRAAL_HERDR_SOCKET="$CLIENT_SOCKET" \
     KRAAL_HERDR_HOME="$HERDR_HOME" \
     KRAAL_DEV_BACKGROUND=1 \
-    KRAAL_DEV_SESSION="gui-$$" \
+    KRAAL_DEV_SESSION="$SESSION" \
     nohup "$ROOT/build/Kraal.app/Contents/MacOS/KraalMac" \
         >"$SCRATCH/app.out" 2>&1 &
 
@@ -223,19 +241,74 @@ stop_app() {
     return 0
 }
 
+
+# ---------------------------------------------------------------- assertions
+#
+# Three tiers, strongest first (docs/AUTOMATION.md §4):
+#
+#   1. daemon state       survives renderer bugs, so a pass here means the command
+#                         reached the daemon and was applied
+#   2. AX tree            proves the UI exists and is reachable
+#   3. screenshot         weakest; says nothing about correctness
+#
+# Every assertion prints what it checked. A gate that cannot explain itself is
+# indistinguishable from a gate that always passes.
+
+ASSERTIONS=()
+ASSERTION_FAILURES=0
+
+# Record one assertion. `detail` is printed either way so a passing run still
+# shows what was actually verified.
+check() {
+    local what="$1" result="$2" detail="${3:-}"
+    if [ "$result" -eq 0 ]; then
+        ASSERTIONS+=("pass|$what|$detail")
+        printf '  \033[32m✓\033[0m %s%s\n' "$what" "${detail:+ ($detail)}"
+    else
+        ASSERTIONS+=("FAIL|$what|$detail")
+        ASSERTION_FAILURES=$((ASSERTION_FAILURES + 1))
+        printf '  \033[31m✗\033[0m %s%s\n' "$what" "${detail:+ ($detail)}"
+    fi
+    return "$result"
+}
+
+# `herdr pane layout` is the geometry oracle. `pane list` has no sizes at all,
+# which is why the first version of this script could not tell a correct split
+# from one that produced two panes with the wrong ratio.
+# First pane id, sorted so it does not depend on the daemon's map order (which
+# is neither insertion nor lexical — verified with three samples).
+first_pane_id() {
+    herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+print(sorted(p["pane_id"] for p in json.load(sys.stdin)["result"]["panes"])[0])
+'
+}
+
+pane_layout() {
+    herdr pane layout 2>/dev/null
+}
+
+# Runs a python snippet against the layout JSON on stdin. Keeps the geometry
+# checks readable and keeps `jq` out of the dependency list.
+layout_check() {
+    python3 -c "$1"
+}
+
 # ---------------------------------------------------------------- cases
 #
-# A case is three shell functions. Fixture and assertion both go through the
-# scratch daemon, so they never depend on how Kraal renders anything.
+# A case is up to four shell functions:
+#
+#   fixture   create the starting state (returns 1 if it cannot)
+#   action    perform the UI interaction
+#   assert    verify, using check(); returns 1 on any failure
+#   requires  optional; "focus" means the case cannot run while the screen is
+#             locked (synthetic events need a frontmost app), "ax" means it can
 
+# split_right through the menu bar. The baseline case: if this fails, nothing
+# else is meaningful.
 case_split_right() {
-    # A fresh daemon has no panes at all, so the fixture has to create the
-    # starting state instead of asserting it already exists. `workspace create`
-    # also creates the root pane (w1:p1) — that is the thing to split.
+    requires() { echo ax; }
     fixture() {
-        # A fresh daemon reports zero panes, but a daemon left over from an
-        # earlier run may already have some. Create a workspace only when the
-        # roster is empty, so the fixture is idempotent against both.
         if [ "$(pane_count)" = "0" ]; then
             herdr workspace create >/dev/null 2>&1 || return 1
         fi
@@ -247,25 +320,183 @@ case_split_right() {
     assert() {
         local before="$1" after
         after=$(pane_count)
-        [ "$after" = "$((before + 1))" ] || {
-            echo "pane count did not grow: $before -> $after"
-            return 1
-        }
-        # Same tab, distinct ids: a split must not create a new tab, and it must
-        # not silently reuse the source pane.
-        herdr pane list | python3 -c '
+        check "pane count grows by one" \
+            "$([ "$after" = "$((before + 1))" ] && echo 0 || echo 1)" "$before -> $after" || return 1
+        # Geometry is what the count cannot see: a split that produces two panes
+        # at a 0.9 ratio is broken and would pass a count-only assertion.
+        local geometry
+        geometry=$(pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+panes = layout["panes"]
+splits = layout["splits"]
+problems = []
+if len(splits) != 1:
+    problems.append(f"expected 1 split, got {len(splits)}")
+else:
+    ratio = splits[0]["ratio"]
+    if abs(ratio - 0.5) > 0.05:
+        problems.append(f"split ratio is {ratio}, expected ~0.5")
+    if splits[0]["direction"] != "right":
+        problems.append("split direction is " + splits[0]["direction"] + ", expected right")
+widths = sorted(p["rect"]["width"] for p in panes)
+if len(widths) == 2 and widths[1] - widths[0] > 2:
+    problems.append(f"pane widths are lopsided: {widths}")
+focused = layout["focused_pane_id"]
+if focused not in [p["pane_id"] for p in panes]:
+    problems.append(f"focused pane {focused} is not in the layout")
+if problems:
+    print("; ".join(problems)); sys.exit(1)
+print(f"ratio=0.5 widths={widths} focused={focused}")
+')
+        check "split geometry is two equal halves" "$?" "$geometry" || return 1
+        local tabs
+        tabs=$(herdr pane list | layout_check '
 import json, sys
 panes = json.load(sys.stdin)["result"]["panes"]
 tabs = {p["tab_id"] for p in panes}
 ids = [p["pane_id"] for p in panes]
-assert len(tabs) == 1, f"expected 1 tab, got {tabs}"
-assert len(set(ids)) == len(ids), f"duplicate pane ids: {ids}"
-print("tabs=1 panes=" + ",".join(ids))
-'
+if len(tabs) != 1:
+    print(f"expected 1 tab, got {sorted(tabs)}"); sys.exit(1)
+if len(set(ids)) != len(ids):
+    print(f"duplicate pane ids: {ids}"); sys.exit(1)
+print(f"tabs=1 panes={ids}")
+')
+        check "split stays inside one tab, ids distinct" "$?" "$tabs"
+    }
+}
+
+# Same command, reached through the app menu instead of a bare AXPress.
+#
+# A separate case on purpose: `press --title` only finds items in menus macOS has
+# already populated, and it cannot tell the View menu's `Split Right` from the
+# context menu's. `menu` opens the named menu first and scopes the search to it,
+# which is the path a user actually takes.
+case_menu_split() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ]
+    }
+    action() {
+        driver menu --menu View --item "Split Right"
+    }
+    assert() {
+        local before="$1" after
+        after=$(pane_count)
+        check "menu item splits the pane" \
+            "$([ "$after" = "$((before + 1))" ] && echo 0 || echo 1)" "$before -> $after" || return 1
+        local direction
+        direction=$(pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+splits = layout["splits"]
+if len(splits) != 1:
+    print(f"expected 1 split, got {len(splits)}"); sys.exit(1)
+print(splits[0]["direction"])
+')
+        check "menu split produced a right split" \
+            "$([ "$direction" = "right" ] && echo 0 || echo 1)" "direction=$direction"
+    }
+}
+
+# Split Down: proves the direction is honoured rather than hard-coded.
+case_split_down() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ]
+    }
+    action() {
+        driver press --title "Split Down"
+    }
+    assert() {
+        local before="$1" after
+        after=$(pane_count)
+        check "pane count grows by one" \
+            "$([ "$after" = "$((before + 1))" ] && echo 0 || echo 1)" "$before -> $after" || return 1
+        local geometry
+        geometry=$(pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+splits = layout["splits"]
+panes = layout["panes"]
+problems = []
+if len(splits) != 1:
+    problems.append(f"expected 1 split, got {len(splits)}")
+elif splits[0]["direction"] != "down":
+    problems.append("direction is " + splits[0]["direction"] + ", expected down")
+heights = sorted(p["rect"]["height"] for p in panes)
+if len(heights) == 2 and heights[1] - heights[0] > 2:
+    problems.append(f"pane heights are lopsided: {heights}")
+if problems:
+    print("; ".join(problems)); sys.exit(1)
+print(f"direction=down heights={heights}")
+')
+        check "split-down stacks two equal rows" "$?" "$geometry"
+    }
+}
+
+# Close Pane via the menu bar: the inverse of split, and the first case that has
+# to prove a pane *disappeared*.
+case_close_pane() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        if [ "$(pane_count)" = "1" ]; then
+            herdr pane split --pane "$(first_pane_id)" --direction right >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "2" ]
+    }
+    action() {
+        driver press --title "Close Pane"
+    }
+    assert() {
+        local before="$1" after
+        after=$(pane_count)
+        check "pane count shrinks by one" \
+            "$([ "$after" = "$((before - 1))" ] && echo 0 || echo 1)" "$before -> $after" || return 1
+        local remaining
+        remaining=$(pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+panes = layout["panes"]
+splits = layout["splits"]
+problems = []
+if len(panes) != 1:
+    problems.append(f"expected 1 pane left, got {len(panes)}")
+if splits:
+    problems.append(f"a lone pane must have no splits, got {len(splits)}")
+if problems:
+    print("; ".join(problems)); sys.exit(1)
+print("1 pane, 0 splits")
+')
+        check "layout collapses to a single unsplit pane" "$?" "$remaining"
     }
 }
 
 # ---------------------------------------------------------------- runner
+
+# Reads a case's declared requirement without executing the case.
+#
+# The first version ran the case function and then called `requires`, which
+# executed `fixture`/`action`/`assert` definitions with no arguments and, when the
+# case did not exist, reported "no such case" for a case that was right there.
+case_needs() {
+    local name="$1"
+    local text
+    text=$(declare -f "case_${name//-/_}" 2>/dev/null) || { echo ""; return; }
+    case "$text" in
+    *"requires() { echo focus"*) echo focus ;;
+    *) echo ax ;;
+    esac
+}
 
 run_case() {
     local name="$1"
@@ -280,6 +511,21 @@ run_case() {
     mkdir -p "$dir"
 
     say "case $name  ($run_id)"
+    ASSERTIONS=()
+    ASSERTION_FAILURES=0
+
+    # A case may declare that it needs a frontmost app. Synthetic events go to
+    # whoever is frontmost, so running those while the screen is locked posts them
+    # at loginwindow — which looks exactly like a broken feature. Refuse early with
+    # an environment error (exit 2) instead of a product failure (exit 1).
+    local needs
+    needs=$(case_needs "$name")
+    if [ "$needs" = "focus" ] && screen_locked; then
+        bad "$name needs an unlocked screen (synthetic events go to loginwindow)"
+        printf '    skip: unlock the machine, or run an ax-only case\n'
+        return 2
+    fi
+
     stop_app
     stop_daemon
     start_daemon
@@ -306,11 +552,18 @@ run_case() {
         elif ! action; then
             failure="action"
         else
-            local detail
-            if ! detail=$(assert "$before" 2>&1); then
+            # Run `assert` in *this* shell, not in a command substitution. Inside
+            # `$(assert ...)` every `check` call appends to a copy of ASSERTIONS
+            # that dies with the subshell, so summary.json recorded "passed" with
+            # an empty assertion list — a gate that cannot say what it checked.
+            # The log is captured with a redirect instead.
+            local assert_log="$dir/assert.log"
+            if ! assert "$before" >"$assert_log" 2>&1; then
                 failure="assert"
-                echo "$detail" >&2
             fi
+            # Always surface the assertions, pass or fail: a passing run should
+            # still show what was verified.
+            cat "$assert_log"
         fi
     fi
 
@@ -319,13 +572,35 @@ run_case() {
     driver shot -o "$dir/shot-after.png" >/dev/null 2>&1
     cp "$SCRATCH/app.out" "$dir/app.out" 2>/dev/null
     cp "$SCRATCH/herdr-server.log" "$dir/herdr-server.log" 2>/dev/null
+    # Kraal writes to ~/Library/Logs/Kraal-<session>.log, not to stderr, and the
+    # session name is derived from KRAAL_DEV_SESSION. Without this copy the log
+    # never reached the artifacts, even though docs/AUTOMATION.md promised it.
+    cp "$HOME/Library/Logs/Kraal-$SESSION.log" "$dir/kraal.log" 2>/dev/null
 
     local after
     after=$(pane_count)
     local status="passed"
     local code=0
-    [ -n "$failure" ] && { status="failed"; code=1; }
+    if [ -n "$failure" ]; then
+        status="failed"; code=1
+        # Only on failure: a screenshot costs a second and proves least.
+        driver shot -o "$dir/shot-failure.png" >>"$dir/app.out" 2>&1
+    fi
 
+    local assertions_json="[]"
+    if [ ${#ASSERTIONS[@]} -gt 0 ]; then
+        assertions_json=$(printf '%s\n' "${ASSERTIONS[@]}" | layout_check '
+import json, sys
+rows = []
+for line in sys.stdin.read().splitlines():
+    if not line.strip():
+        continue
+    status, what, detail = (line.split("|", 2) + ["", ""])[:3]
+    rows.append({"status": "pass" if status == "pass" else "FAIL",
+                 "what": what, "detail": detail})
+print(json.dumps(rows, indent=2))
+')
+    fi
     cat >"$dir/summary.json" <<JSON
 {
   "case": "$name",
@@ -334,7 +609,8 @@ run_case() {
   "exitCode": $code,
   "failureType": "${failure:-none}",
   "panesBefore": "$before",
-  "panesAfter": "$after"
+  "panesAfter": "$after",
+  "assertions": $assertions_json
 }
 JSON
 
@@ -350,7 +626,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right"; }
+all_cases() { echo "split-right menu-split split-down close-pane"; }
 
 # ---------------------------------------------------------------- entrypoint
 
