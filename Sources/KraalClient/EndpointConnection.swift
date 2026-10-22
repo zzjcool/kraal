@@ -210,6 +210,17 @@ public actor EndpointConnection {
         try send(.clientShellPaneInput(paneId: paneId, events: events))
     }
 
+    /// Semantic input events for a popup's own terminal.
+    ///
+    /// A separate message from the pane path (`tag 14` vs `paneInput`) because a
+    /// popup is a *different terminal*: its keystrokes must not be delivered to the
+    /// pane underneath it. The encoder has carried this tag all along; nothing ever
+    /// sent it.
+    public func sendPopupInput(_ terminalId: String, events: [ClientPaneInputEvent]) throws {
+        guard !events.isEmpty else { return }
+        try send(.clientShellPopupInput(terminalId: terminalId, events: events))
+    }
+
     /// Tells the daemon that this client's surface needs a different grid.
     ///
     /// `client_shell_resize` re-renders the current projection at the new size on

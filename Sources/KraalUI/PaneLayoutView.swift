@@ -58,6 +58,11 @@ struct PaneLayoutView: View {
     /// Ghostty dependency and can be previewed with a stub.
     let paneContent: (String, PaneSurfacePane) -> AnyView
 
+    /// Builds the popup's terminal view, injected for the same reason as
+    /// `paneContent`. A popup is a whole separate terminal on the daemon, so this
+    /// builds a second `PaneTerminalModel` rather than reusing a pane's.
+    let popupContent: (ClientShellPopupSurface, PopupGeometry) -> AnyView
+
     var body: some View {
         GeometryReader { proxy in
             let surface = store.surface
@@ -165,6 +170,61 @@ struct PaneLayoutView: View {
                             size: proxy.size,
                             cellSize: pointsPerCell
                         )
+                    }
+
+                    // The popup goes last, and that is the whole of "it is on top":
+                    // in a `ZStack` the later child draws over the earlier ones, so
+                    // panes and split handles are both underneath it.
+                    //
+                    // Its geometry is in surface cells and has to be scaled like the
+                    // panes are — `rect(for:)` converts both the box and its
+                    // interior, and the border is drawn in the cell grid so it lines
+                    // up with the terminal's own cells rather than in points.
+                    if let popup = store.activePopup,
+                       let popupGeometry = store.popupGeometry {
+                        // Computed once: `rect(for:)` does a centring calculation, and
+                        // calling it four times for the same box is both slow and a
+                        // place for the four results to disagree.
+                        let popupBox = rect(
+                            for: popupGeometry.outer,
+                            grid: grid,
+                            in: proxy.size,
+                            cellSize: pointsPerCell
+                        )
+                        popupContent(popup, popupGeometry)
+                            .frame(width: popupBox.width, height: popupBox.height)
+                            // The only evidence a GUI case can assert on: SwiftUI's
+                            // `body` produces no inspectable output, so "the popup
+                            // was laid out, at this box, with this interior" has to
+                            // be logged. Same reasoning as the pane `layout:` line.
+                            .background {
+                                Color.clear
+                                    .task(id: popup.terminalId) {
+                                        kraalLog("popup: \(popup.terminalId) "
+                                            + "outer=\(Int(popupBox.minX)),\(Int(popupBox.minY)) "
+                                            + "\(Int(popupBox.width))x\(Int(popupBox.height)) "
+                                            + "inner=\(popupGeometry.inner.width)"
+                                            + "x\(popupGeometry.inner.height) "
+                                            + "title=\(popup.title)")
+                                    }
+                            }
+                            .position(x: popupBox.midX, y: popupBox.midY)
+                            // The border and title, in the box the daemon reserved:
+                            // one cell of padding all round, which is exactly what
+                            // `PopupGeometry` subtracted from the interior.
+                            .background {
+                                PopupChrome(
+                                    popup: popup,
+                                    geometry: popupGeometry,
+                                    cellSize: pointsPerCell
+                                )
+                            }
+                            .overlay {
+                                PaneFrameReporter(
+                                    paneId: popup.terminalId,
+                                    paneFrame: popupBox
+                                )
+                            }
                     }
                 } else {
                     placeholder

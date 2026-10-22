@@ -90,16 +90,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
 
-        let pool = PaneTerminalPool { [weak self] paneId, data in
-            // Ghostty produced bytes for this pane (keys, paste, query replies).
-            // They go back as semantic input on the same connection.
-            kraalLog("input: pane=\(paneId) bytes=\(data.count) "
-                + "raw=\(data.map { String(format: "%02x", $0) }.joined(separator: " "))")
-            Task { @MainActor in
-                guard let self else { return }
-                self.store.sendInput(data, to: paneId)
-                self.store.focus(paneId: paneId)
-            }
+        let pool = PaneTerminalPool { [weak self] target, data in
+            self?.routeInput(target: target, data: data)
         }
 
         let copyController = makeCopyModeController(store: store)
@@ -132,6 +124,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                     onFocus: { store.focus(paneId: paneId) }
                 )
             )
+        } popupPaneContent: { store, popup, _ in
+            self.popupView(store: store, popup: popup, pool: pool)
         }
 
         let window = makeWindow(root: root)
@@ -190,6 +184,58 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
         store.loadDefaultSidebarConfig()
         store.connect()
+    }
+
+    /// Sends Ghostty's encoded bytes to whichever daemon-side terminal produced
+    /// them.
+    ///
+    /// A popup's terminal id is not a pane id, and the two paths are not
+    /// interchangeable: sending a popup's keys down the pane path types them into
+    /// whatever is focused underneath, and focusing "pane \(terminalId)" would fail
+    /// and drop the focus the popup was opened over.
+    private func routeInput(target: String, data: Data) {
+        kraalLog("input: target=\(target) bytes=\(data.count) "
+            + "raw=\(data.map { String(format: "%02x", $0) }.joined(separator: " "))")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.store.hasPopup, self.store.activePopup?.terminalId == target {
+                self.store.sendPopupInput(data, terminalId: target)
+            } else {
+                self.store.sendInput(data, to: target)
+                self.store.focus(paneId: target)
+            }
+        }
+    }
+
+    /// Builds the popup's terminal view.
+    ///
+    /// A popup is its own terminal on the daemon, so it gets its own model: reusing
+    /// a pane's would merge two independent cell streams into one screen. The pool is
+    /// keyed by `(machine, id)` and popup terminal ids live in a different namespace
+    /// from pane ids, so one pool holds both safely.
+    private func popupView(
+        store: AppStore,
+        popup: ClientShellPopupSurface,
+        pool: PaneTerminalPool
+    ) -> AnyView {
+        guard let surface = store.surface else {
+            return AnyView(Color(nsColor: .textBackgroundColor))
+        }
+        pool.selectMachine(surface.bootId)
+        let model = pool.model(for: popup.terminalId)
+        model.onCellMetrics = { [weak store] cellSize in
+            guard let store else { return }
+            Task { @MainActor in store.updateCellMetrics(cellSize) }
+        }
+        // The daemon sends the popup's grid already cropped to its own frame, so it
+        // is painted straight in — no surface cropping, no diffing against the panes'
+        // stream.
+        //
+        // A popup has no revision of its own on the wire, so the parent surface's is
+        // used: the popup's grid only changes when the surface is re-projected, and
+        // repainting identical cells every frame would be wasteful at 60 Hz.
+        model.applyPopup(frame: popup.frame, revision: surface.surfaceRevision)
+        return AnyView(GhosttyPopupView(model: model, terminalId: popup.terminalId))
     }
 
     /// Creates this window's copy-mode controller.

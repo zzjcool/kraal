@@ -122,6 +122,32 @@ extension AppStore {
     /// one unit, which is what lets a shell offer "paste N lines?" instead of
     /// executing them.
     ///
+    /// Encodes keystroke bytes for a popup and sends them to that terminal.
+    ///
+    /// The decoder table is shared with the panes, keyed by terminal id. Pane ids and
+    /// popup terminal ids are different namespaces (`w1:p1` vs a terminal id), so one
+    /// dictionary is enough — and it has to be one, because the decoder holds
+    /// half-parsed escape sequences between calls and a popup that typed part of an
+    /// escape sequence must not have it completed against a pane's state.
+    public func sendPopupInput(_ data: Data, terminalId: String) {
+        var decoder = inputDecoders[terminalId] ?? TerminalInputDecoder()
+        decoder.reportsAllKeys = keyboardReportAll
+        var events = decoder.decode(data)
+        if events.isEmpty, let escape = decoder.flushEscape() {
+            events.append(escape)
+        }
+        inputDecoders[terminalId] = decoder
+        guard !events.isEmpty else { return }
+
+        Task {
+            do {
+                try await connection?.sendPopupInput(terminalId, events: events)
+            } catch {
+                lastError = "\(error)"
+            }
+        }
+    }
+
     /// No `TerminalInputDecoder` on this path: the text is not a key sequence, and
     /// decoding it would turn a literal `ESC` in the pasted text into an arrow key.
     public func sendPaste(_ text: String, to paneId: String?) {

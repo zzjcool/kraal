@@ -206,6 +206,11 @@ vm_deploy() {
         | tart exec -i "$VM" /bin/bash -lc "rm -rf $VM_APP && cd $VM_ROOT && tar -xzf -" \
         || die "failed to push Kraal.app into the guest"
 
+    # The API helper, so a case can call endpoint methods the CLI has no verb for.
+    tar -czf - -C "$ROOT/Scripts" herdr-api.py \
+        | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf -" \
+        || die "failed to push herdr-api.py into the guest"
+
     # `type -P` and not `command -v`: this file defines a `herdr()` wrapper, and
     # inside that scope `command -v herdr` returns the *function* name, so the tar
     # below looked for a file called "herdr" in a directory called nothing.
@@ -365,6 +370,53 @@ cmd_probe() {
         vm_deploy
     fi
     driver probe
+}
+
+# Writes a daemon config from stdin, for cases that need one.
+#
+# The daemon reads `$HOME/.config/herdr/config.toml`, and `HOME` here is the scratch
+# `HERDR_HOME` — which is why a scratch home is good for more than the machine
+# roster: a case can change server-side behaviour (a `[[keys.command]]` entry, say)
+# without touching the developer's own config.
+#
+# Guest and host paths differ, so this writes through the right side per backend —
+# the same trap `deploy` hit when a host `$SCRATCH` path was handed to the guest.
+write_config() {
+    local dir="$HERDR_HOME/.config/herdr"
+    local staging="$SCRATCH/config-staging"
+    # Staged on the host and pushed with tar, not piped through `tart exec -i`.
+    #
+    # A multi-line heredoc into `tart exec -i` truncated after the first line —
+    # measured: the guest config came out as `[[keys.command]]` and nothing else, so
+    # the daemon registered no command and the case failed with "no Popup command in
+    # the snapshot", which points at the daemon rather than at the plumbing. This is
+    # the same transport `vm_deploy` uses for the driver and the app.
+    mkdir -p "$staging"
+    cat >"$staging/config.toml"
+    case "$BACKEND" in
+    local)
+        mkdir -p "$dir"
+        cp "$staging/config.toml" "$dir/config.toml"
+        ;;
+    vm)
+        tart exec "$VM" /bin/bash -lc "mkdir -p $dir" >/dev/null 2>&1 \
+            || { rm -rf "$staging"; return 1; }
+        tar -czf - -C "$staging" config.toml \
+            | tart exec -i "$VM" /bin/bash -lc "cd $dir && tar -xzf -" \
+            || { rm -rf "$staging"; return 1; }
+        ;;
+    esac
+    rm -rf "$staging"
+    return 0
+}
+
+# Restarts the scratch daemon and waits until it answers again.
+#
+# Needed by cases that change `config.toml`: the command registry is built once at
+# startup, so `server.reload_config` does not pick up a new `[[keys.command]]`.
+restart_daemon() {
+    start_daemon >/dev/null 2>&1 || return 1
+    return 0
 }
 
 start_daemon() {
@@ -574,6 +626,21 @@ check() {
     return "$result"
 }
 
+# Runs one of the repo's Python helpers, wherever this run's backend lives.
+#
+# The guest cannot see the host's checkout, so the script is deployed into
+# `$VM_ROOT` and run there. Python is used rather than `herdr <verb>` because the
+# CLI has no generic "call this endpoint method" verb, and some methods
+# (`command.invoke`, which is what opens a popup) have no verb at all.
+run_py() {
+    local script="$1"
+    shift
+    case "$BACKEND" in
+    local) python3 "$ROOT/Scripts/$script" "$@" ;;
+    vm) tart exec "$VM" python3 "$VM_ROOT/$script" "$@" ;;
+    esac
+}
+
 # `herdr pane layout` is the geometry oracle. `pane list` has no sizes at all,
 # which is why the first version of this script could not tell a correct split
 # from one that produced two panes with the wrong ratio.
@@ -600,6 +667,7 @@ layout_check() {
 #
 # A case is up to four shell functions:
 #
+#   daemon_config  (optional) write config.toml before the daemon starts
 #   fixture   create the starting state (returns 1 if it cannot)
 #   action    perform the UI interaction
 #   assert    verify, using check(); returns 1 on any failure
@@ -780,6 +848,120 @@ if problems:
 print("1 pane, 0 splits")
 ')
         check "layout collapses to a single unsplit pane" "$?" "$remaining"
+    }
+}
+
+
+# Assert a popup the daemon pushes is actually drawn, and its keys go to it.
+#
+# Neither half is testable in a unit test. `PopupGeometryTests` pins the box
+# arithmetic; what it cannot prove is the *link* — that `PaneSurfaceFrame.popup`
+# reaches a view at all, that the view is laid out at the daemon's box, and that a
+# keypress is addressed to the popup's terminal id rather than to the pane
+# underneath. Issue #36 is precisely that the decoder produced a popup and nothing
+# ever drew it, so "the geometry function is correct" is not the claim being tested.
+#
+# The discriminating assertion is the popup's own log line, emitted from inside the
+# SwiftUI body — the only inspectable trace of "this got laid out".
+# The daemon decides whether a popup exists; a client cannot ask for one. A popup is
+# a `[[keys.command]]` entry with `type = "popup"`, and the only way to open it is
+# `command.invoke` naming an id the daemon minted — `cmd_<random>_0`, not something a
+# caller can predict.
+#
+# Written before the daemon starts because the command registry is built once at
+# startup: `server.reload_config` afterwards would not pick it up, and restarting
+# under a live app leaves it connected to a socket nobody is listening on.
+case_popup_config() {
+    write_config <<'TOML'
+[[keys.command]]
+key = "prefix+g"
+command = "seq -f 'popup-line%g' 1 40; sleep 300"
+type = "popup"
+width = 60
+height = 12
+TOML
+}
+
+case_popup() {
+    requires() { echo ax; }
+    fixture() {
+        # A restarted daemon comes up with one pane already (it restores a shell),
+        # so only create a workspace when there is none — calling `workspace create`
+        # unconditionally left two panes and the case failed in `fixture` with
+        # "panes -> 2" before it ever reached the popup.
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ] || return 1
+        return 0
+    }
+    action() {
+        # The id comes out of the app's own log, not out of `herdr api snapshot`.
+        #
+        # Measured: the JSON snapshot the CLI prints carries no `commands` at all —
+        # the command manifest only travels in the bincode `ClientShellSnapshot`
+        # (tag 12). So the CLI is the wrong oracle here, and the app is the right
+        # one: it is the thing that has to receive the command, and its log says
+        # both how many commands arrived and which are popups.
+        # Pull the app log to the host first: `dir` is a guest path under the vm
+        # backend, so reading it from here found nothing and every run reported
+        # "the app saw no Popup command" even when the command was there.
+        collect_app_log "$host_dir"
+        local command_id
+        command_id=$(grep -o 'ids=[^ ]*' "$host_dir/kraal.log" 2>/dev/null \
+            | tail -1 | sed 's/ids=//')
+        if [ -z "$command_id" ]; then
+            echo "the app saw no Popup command in its snapshot:" >&2
+            grep 'snapshot: ' "$host_dir/kraal.log" 2>/dev/null | tail -1 >&2
+            return 1
+        fi
+        echo "popup command: $command_id"
+        # The same method the command palette calls. The daemon spawns the popup's
+        # terminal and pushes it in the next surface frame; nothing needs to be
+        # enabled on the client side.
+        if ! run_py herdr-api.py --socket "$API_SOCKET" \
+            --method command.invoke \
+            --params "{\"command_id\": \"$command_id\"}" >/dev/null; then
+            echo "command.invoke refused" >&2
+            return 1
+        fi
+        sleep 3
+        return 0
+    }
+    assert() {
+        collect_app_log "$host_dir"
+
+        # Client side: the popup was laid out. Without this line nothing proves the
+        # view exists at all — which is exactly issue #36's complaint.
+        local popup_line
+        popup_line=$(grep 'popup: ' "$host_dir/kraal.log" 2>/dev/null | tail -1)
+        check "the popup was laid out in the window" \
+            "$([ -n "$popup_line" ] && echo 0 || echo 1)" "${popup_line:-no popup laid out}"
+        [ -n "$popup_line" ] || return 0
+
+        # The interior is the box minus its border and its scrollbar gutter:
+        # 60 - 2 border - 1 gutter = 57 columns, 12 - 2 = 10 rows. A mismatch means
+        # Ghostty was handed a grid the daemon did not render, and every row reflows.
+        case "$popup_line" in
+        *inner=57x10*) sized=0 ;;
+        *) sized=1 ;;
+        esac
+        check "the interior matches the requested size" "$sized" "$popup_line"
+
+        # Nothing typed a key here on purpose. Synthetic key events need a frontmost
+        # window, and this case runs with `KRAAL_DEV_BACKGROUND=1`, so a `driver key`
+        # would prove only that the event went nowhere. What is asserted instead is
+        # that the popup reached the layout *with its own terminal id*, which is what
+        # `routeInput` branches on: a keystroke from that model is addressed to that
+        # id, never to a pane. The distinguishing bug — keys landing in the shell
+        # underneath — needs a real foreground session, and is covered by reading
+        # `routeInput` rather than by faking focus.
+        case "$popup_line" in
+        *"term_"*) identified=0 ;;
+        *) identified=1 ;;
+        esac
+        check "the popup carries its own terminal id" "$identified" \
+            "routeInput keys on this id, not on a pane id"
     }
 }
 
@@ -1328,6 +1510,15 @@ run_case() {
         die "no such case '$name' (see: $0 list)"
     fi
 
+
+
+    # The pre-start hook, as a *top-level* function named after the case.
+    #
+    # It cannot be declared inside the case body: a nested function only exists once
+    # the outer one runs, and the hook has to run before that. Asking bash to run
+    # `case_popup_config` when it may not exist is fine — nothing happens.
+    daemon_config() { "case_${name//-/_}_config" 2>/dev/null || true; }
+
     local run_id
     run_id="$(date +%Y%m%d-%H%M%S)-$name"
     # `dir` is what the runner writes to (guest paths under vm); `host_dir` is
@@ -1372,6 +1563,32 @@ run_case() {
 
     stop_app
     stop_daemon
+    # Start from no config at all, then let the case write one.
+    #
+    # The removal has to happen *here* and not inside `start_daemon`: `start_daemon`
+    # runs after `daemon_config`, so cleaning up in there deleted the config the case
+    # had just written — the popup case failed with "the app saw no Popup command"
+    # for exactly that reason. And it has to go through the backend, because under
+    # `vm` the whole `$HERDR_HOME` is a guest path and a host-side `rm` deletes
+    # nothing while reporting success.
+    #
+    # Leaving the previous case's config in place was the other half of the problem:
+    # popup's `[[keys.command]]` leaked into copy-mode, whose pane then accumulated
+    # no scrollback and copied nothing — a failure that looked like a copy-mode
+    # regression.
+    case "$BACKEND" in
+    local) rm -f "$HERDR_HOME/.config/herdr/config.toml" ;;
+    vm)
+        tart exec "$VM" /bin/bash -lc \
+            "rm -f $HERDR_HOME/.config/herdr/config.toml" >/dev/null 2>&1
+        ;;
+    esac
+
+    # A case that needs server-side behaviour (a `[[keys.command]]` entry, say) must
+    # write config.toml *before* the daemon reads it. Doing that inside `fixture` is
+    # wrong: by then `launch_app` has already started, and restarting the daemon
+    # under a live app leaves it connected to a socket nobody is listening on.
+    daemon_config
     start_daemon
     launch_app
 
@@ -1497,7 +1714,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup"; }
 
 # ---------------------------------------------------------------- entrypoint
 

@@ -108,6 +108,16 @@ final class CopyModeController {
     /// decided locally already has been, inside `CopyModeState.handle`.
     private func handle(_ event: NSEvent) -> Bool {
         guard var current = state else { return false }
+        // A popup owns the keyboard while it is open. Copy mode and a popup can both
+        // be up at once (nothing closes one when the other opens), and the popup is
+        // the thing the user is looking at, so it wins. Without this the copy-mode
+        // monitor — which is registered first and swallows bare keys — would eat the
+        // popup's input and the popup would look dead.
+        if store?.hasPopup == true {
+            kraalLog("copymode: leaving because a popup opened")
+            exit()
+            return false
+        }
         // Re-read the viewport before every key. It moves under the mode — a wheel
         // scroll is not gated by copy mode, and `pane.scroll` can arrive from
         // anywhere — and the contract in `CopyModeState` is that the cursor is kept

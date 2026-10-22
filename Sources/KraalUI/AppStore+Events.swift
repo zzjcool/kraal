@@ -67,8 +67,15 @@ extension AppStore {
             lastError = message
             return
         }
+        // `commands` is logged with its popup ids because a popup can only be opened
+        // by invoking one, and "the daemon registered no such command" is otherwise
+        // indistinguishable from "the client cannot draw a popup". Both were true at
+        // different points while this was built; this line tells them apart.
+        let popupCommands = snapshot.commands.filter { $0.action == .popup }
         kraalLog("snapshot: ws=\(snapshot.workspaces.count) tabs=\(snapshot.tabs.count) "
-            + "panes=\(snapshot.panes.count) agents=\(snapshot.agents.count)")
+            + "panes=\(snapshot.panes.count) agents=\(snapshot.agents.count) "
+            + "commands=\(snapshot.commands.count) popup=\(popupCommands.count)"
+            + (popupCommands.isEmpty ? "" : " ids=\(popupCommands.map(\.commandId).joined(separator: ","))"))
         // A newer boot id invalidates every surface we hold.
         let bootChanged = self.snapshot?.bootId != snapshot.bootId
         let focusedTabChanged = self.snapshot?.focusedTabId != snapshot.focusedTabId
