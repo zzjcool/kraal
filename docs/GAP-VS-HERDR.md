@@ -16,20 +16,34 @@ SPDX-FileCopyrightText: 2026 zzjcool
 ## 0. 一句话结论
 
 协议层和渲染层已经对得上，**差的几乎全是"客户端自己该实现的东西"**：
-copy mode、滚动条、popup 浮层、通知/声音、鼠标增强手势、侧边栏 `hide` 规则、
-错误码消费。另外查出 **6 个我们已有代码里的真实 bug**（§7）。
+copy mode、滚动条、popup 浮层、通知/声音、OSC 8 链接、光标形状、鼠标增强手势。
 
-最要紧的是 **§7-9：endpoint 命令通道上游是单条串行，我方并发发送** ——
-打字时每按一键都发一次 `pane.focus`，互相撞成 `endpoint_busy` 被静默丢弃，
-表现为「点了没反应 / 焦点跳错」，同时让 `pane.split` 传错参数（§7-2）更容易
-拆错 pane。修它之前其它动作都会「偶尔失败」。
+§7 列了 9 个当时定位到的错误。**其中 4 个已修**（下表），其余仍在。复核时间
+2026-10-22，对照 `origin/main`。
+
+### §7 现状
+
+| # | 问题 | 状态 |
+| --- | --- | --- |
+| 7-1 | `CellModifier` 位定义与 ratatui 0.30 不一致 | ❗ 仍在（`Wire.swift:189-191`，并入 #3 一起修） |
+| 7-2 | `pane.split` 传 `pane_id` | ✅ 已修（`AppStore.swift:368-396` 改用 `target_pane_id`） |
+| 7-3 | `workspace.close` 漏 `close_group` | ❗ 仍在（`AppStore.swift` 只发 `workspace_id`） |
+| 7-4 | 端点请求不解析 `ErrorBody` | ✅ 已修（`EndpointConnection.throwIfErrorEnvelope`） |
+| 7-5 | SS3 修饰符写死 0 | ❗ 仍在（`TerminalInputDecoder.swift:177`） |
+| 7-6 | 粘贴没走 `paste` 语义 | ❗ 仍在（`MacMenuBar.swift:459-463`） |
+| 7-7 | `clientShellKeyboardReportAll` 被丢弃 | ❗ 仍在（`EndpointConnection.swift:474`） |
+| 7-8 | 侧边栏 rules 用了 `when`/`value` | ✅ **已修 → PR #17** |
+| 7-9 | endpoint 命令通道并发撞 `endpoint_busy` | ✅ 已修（`EndpointConnection.isBusyRefusal` + 4 次退避重试） |
+
+下面 §7 各节保留当时的分析与取证，**已修的条目在标题上标了「已修」**，读的时候
+以这张表为准。
 
 ---
 
 ## 1. 协议 / 能力协商
 
 | 能力 | 上游 | 我方 | 判断 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | endpoint gen 1 + 4 codec | `src/protocol/endpoint.rs:15-22` | `Endpoint.swift:18-26,221-241` | ✅ |
 | `surface_interest` | 硬性要求 `src/client/endpoint/supervisor.rs:520-527` | `AppStore+Requests.swift:22-74`（用 method 探测，不用 capability） | ⚠️ 有意放宽；0.9.1 兼容代价是多一次握手 |
 | `health_check` ping/pong | `src/client/endpoint/health.rs:3-70` | `EndpointConnection.swift` 健康循环 | ✅ |
@@ -72,7 +86,7 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 ## 3. 终端渲染细节
 
 | 项 | 上游 | 我方 | 判断 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | OSC 8 超链接 | 每帧起始复位 + 按 cell 变更加 `]8;;`（`render_ansi.rs:934-955,616,699`） | `SurfaceANSIRenderer` 完全不发 OSC 8（`FrameData.hyperlinks` 传进来了但没用，`PaneTerminal.swift:407`） | ❌ 链接不能被 Cmd+click |
 | 下划线样式 `4:2/4:3/4:4/4:5` | `render_ansi.rs:445-452` | 只发 `4`（`SurfaceANSIRenderer.swift:170-175`） | ⚠️ curly/dotted/dashed 丢失 |
 | `SLOW_BLINK`/`RAPID_BLINK` 位 | bit4 → `5`，bit5 → `6`（`render_ansi.rs:428-458`） | 把 bit4 当 blink(`5`)，bit5 当 reverse（`Wire.swift:189-192`） | 💥 见 §7-1 |
@@ -90,7 +104,7 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 这些字段全部在 `Snapshot.swift` 里解码，但 UI 侧零引用（`grep -c` 结果均为 0）：
 
 | 字段 | 上游用途 | 现状 |
-|---|---|---|
+| --- | --- | --- |
 | `configDiagnostic` | 配置错误显示在模式栏（`render.rs:75-78`） | 解了不显示 |
 | `updateAvailable` / `updateInstallCommand` / `latestReleaseNotesAvailable` / `releaseNotes` | "What's New" 浮层 + 更新提示（`overlays.rs:308,424`） | 全丢 |
 | `productAnnouncement` | 首次启动公告浮层（`overlays.rs:424`） | 全丢 |
@@ -108,7 +122,7 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 ### 5.1 Copy mode（上游 ~856 行，`src/client/shell/copy_mode.rs`）
 
 | 子功能 | 证据 | 我方 |
-|---|---|---|
+| --- | --- | --- |
 | `prefix+[` 进入 copy mode | `copy_mode.rs:12` | ❌ |
 | h/j/k/l、w/b/e/W/B/E、{/}、PgUp/PgDn、^/0/$/g/G | `copy_mode.rs:139-247` | ❌ |
 | `/` `?` 搜索 + `n`/`N` + `1/12` 计数 | `copy_mode.rs:326,388,346-375` | ❌（协议 `pane.copy_search` 已实现编码，从未发送） |
@@ -123,7 +137,7 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 ### 5.2 其它交互缺口
 
 | 功能 | 上游证据 | 我方 |
-|---|---|---|
+| --- | --- | --- |
 | Go To / session navigator（`prefix+g`） | `overlay_input.rs:194-281`, `aggregate_navigation.rs:281-300` | ❌ 侧栏只能点，不能按名/状态跨机器跳 |
 | 快捷键帮助面板（`prefix+?`），带 `/` 过滤 | `keybind_help.rs:75-231` | ⚠️ `ShortcutsView` 是硬编码表格，读不到 config 的 keybinds |
 | 设置面板（theme/indicators/sound/toast/integrations） | `settings.rs:35-229` | ❌ 我方设置只有 Machines + Terminal 两页 |
@@ -145,7 +159,7 @@ mouse/sgr/keyboard 的去重状态也不会重置（`activation.rs:1035-1060`）
 ## 6. 通知 / 声音 / 剪贴板
 
 | 功能 | 上游 | 我方 | 判断 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `SemanticNotification` → 应用内 toast | `notification_policy.rs` | 事件解码了（`EndpointConnection.swift:417-424`），UI 无消费者 | ❌ |
 | toast 位置 / delay / active-tab 抑制 | `config/model.rs:63`, `notification_policy.rs:15-63` | 无 | ❌ |
 | 点击 toast / `prefix+o` 跳到来源 pane | `mouse.rs:1002-1018` | 无 | ❌ |
@@ -173,7 +187,7 @@ bit4=SLOW_BLINK、**bit5=RAPID_BLINK**、**bit6=REVERSED**。
 - RAPID_BLINK（bit5）被我方当反色 → 闪的东西大面积反色；
 - 我方 `blink`(bit4) 发 `5` 恰好对，但 `rapid` 完全没发 `6`。
 
-### 💥 7-2 `pane.split` 传 `pane_id`，上游字段是 `target_pane_id`
+### ✅ 7-2（已修）`pane.split` 传 `pane_id`，上游字段是 `target_pane_id`
 `AppStore.swift:303,364-368` 与 `AppStore+Derived.swift` 发的都是 `"pane_id"`。
 上游 `PaneSplitParams.target_pane_id`（`api/schema/panes.rs:27`），无 `alias`、无
 `deny_unknown_fields`，因此 `pane_id` 被**静默丢弃** → 服务端回退到
@@ -181,12 +195,15 @@ bit4=SLOW_BLINK、**bit5=RAPID_BLINK**、**bit6=REVERSED**。
 → 在非聚焦 pane 上右键 Split 会拆错 pane；`store.focus(paneId:)` 是异步的，
    所以「先 focus 再 split」也靠不住。
 
+**已修**：`AppStore.swift:396` 发 `target_pane_id`，并带注释记下这次的取证
+（`target_pane_id: wS:p1` 才会在 `wS:t1` 里建 pane）。
+
 ### 💥 7-3 `workspace.close` 漏发 `close_group`，worktree 组关不掉
 `AppStore.swift:345` 只发 `workspace_id`。上游在组内 ≥2 个 workspace 且
 `close_group=false` 时直接返回 `workspace_group_close_required`
 （`app/api/workspaces.rs:330-336`），错误又被 §7-4 吞成一行字符串。
 
-### 💥 7-4 端点请求不解析 `ErrorBody` / `ResponseResult`
+### ✅ 7-4（已修）端点请求不解析 `ErrorBody` / `ResponseResult`
 `AppStore+Requests.swift:67-74` 把响应 body 当透明数据丢掉，所有失败都变成
 `"<method>: <raw>"`。后果：
 - 无法区分 `workspace_group_close_required` / `confirmation_required`
@@ -194,6 +211,10 @@ bit4=SLOW_BLINK、**bit5=RAPID_BLINK**、**bit6=REVERSED**。
 - `pane.split` / `tab.create` 的成功响应里带着新的 `pane_id` / `tab_id`
   （`api/schema/response.rs:59-`），我方拿不到，只能等快照 —— 新建后立刻要
   对它做操作（聚焦、设置 ratio）时会有竞态。
+
+**已修**：`EndpointConnection.throwIfErrorEnvelope` 把 `{"error":{code,message}}`
+转成 `BridgeError.daemon(method:code:message)`，`AppStore.call` 会记日志并
+把 code 露出来。
 
 ### ⚠️ 7-5 `parseCSI` 把修饰符写死为 0（SS3 分支）
 `TerminalInputDecoder.swift:177` `let modifiers: UInt8 = 0`，`ss3Event` 全部收到 0。
@@ -214,14 +235,19 @@ xterm 的 SS3 形如 `ESC O 1;5 P`（F1+Ctrl），我方只解析 3 字节 `ESC 
 我方不需要 prefix 模式，但 **Kitty keyboard 模式的 pane 是否拿到 key release
 完全取决于这个开关**；丢掉的直接后果是需要 release 的 TUI 收到不完整事件。
 
-### ⚠️ 7-8 侧边栏 rules 用了不存在的 `when`/`value` 键
+### ✅ 7-8（已修 · PR #17）侧边栏 rules 用了不存在的 `when`/`value` 键
 `SidebarConfig.swift:160` 读 `ruleTable["when"]` + `["value"]`；
 上游是内联条件键 `equals` / `contains` / `starts_with` / `gt` / `lt`
 （`config/sidebar/rules.rs:26-47`，`deny_unknown_fields`）。
 → **任何用官方文档写法写的 config.toml，其 rules 全被静默忽略**（我方 `continue`
   跳过），且 `DESIGN.md:611-613` 记的正是那个错误格式。
 
-### 💥 7-9 endpoint 命令通道是「单条串行」，我方并发发送 → 大量请求被 `endpoint_busy` 丢弃
+**已修（PR #17）**：改为读内联键，并补齐上游的校验 —— 每条规则恰好一个条件、
+数值阈值收 `Double` 且拒非有限值、数值条件拒 `ignore_case`、支持 `hide`
+（token 连分隔符一起消失）、只应用第一条命中（不再逐条叠加）。
+`ignore_case` 保持 ASCII-only，与上游 `eq_ignore_ascii_case` 一致。
+
+### ✅ 7-9（已修）endpoint 命令通道是「单条串行」，我方并发发送 → 大量请求被 `endpoint_busy` 丢弃
 
 上游服务端每个连接同一时刻只允许**一条** endpoint 命令在飞
 （`src/server/headless/endpoint_requests.rs:59-66`），第二条直接回
@@ -247,6 +273,10 @@ self.store.focus(paneId: paneId)     // → pane.focus 端点请求
 那个**，这会让 §7-2 的「拆错 pane」在真实使用中更容易命中。
 
 错误本身也被 §7-4 吞掉了，所以现场表现是「偶尔点了没反应 / 焦点跳错」，无声无息。
+
+**已修**：`EndpointConnection.isBusyRefusal` 识别 `endpoint_busy`，`AppStore.call`
+带 4 次递增退避重试（`20/40/60 ms`），并给每次调用记 `call: ok / BUSY / FAILED`
+日志。重试是安全的：拒意味着什么都没做。
 
 修法（两件事都要）：
 1. `EndpointConnection` 里加一条 lane：`request()` 排队，一条在飞，完成后放行下一条
