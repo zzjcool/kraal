@@ -443,8 +443,44 @@ SSH 只用于**宿主**；进 VM 一律 `tart exec`。
 | 8 | `AGENTS.md:85` | 「173 个测试，28 个套件」→ 实际 228 `@Test` / 38 `@Suite` / 26 XCTest |
 | 9 | `Scripts/agent-vm.sh:64` | `die` 在 `case` 之前，VM 不存在时连 `destroy` 都执行不了 |
 | 10 | `Scripts/agent-vm.sh:187` | `"$*"` 拼接丢失引号语义 |
-| 11 | `Scripts/verify.sh` | 未导出 `DEVELOPER_DIR`；swiftlint 缺失时静默跳过门禁 |
-| 12 | — | 新 bug：AX press 工具栏 Refresh → `EXC_BREAKPOINT`（§2） |
+| 11 | `Scripts/verify.sh:11` | **门禁漏洞**：未导出 `DEVELOPER_DIR`——新机器/CLT 环境下 `import Testing` 会 `no such module`，而 `swift test` 是该脚本的核心门禁 |
+| 12 | `Scripts/verify.sh:64-66` | **门禁漏洞**：`swiftlint` 缺失时只打印 `swiftlint not installed; skipping`，**不算失败**。CI/新环境下会静默少一道门禁，本地却一直是绿的 |
+| 13 | `Scripts/build-app.sh:96` | launcher heredoc 里未转义的反引号在生成时被求值，产物注释里 `` `herdr` `` 变成空串（`build/Kraal.app/Contents/MacOS/KraalMac:20` 实测为 `#  honours $HOME…`）。**仅影响注释，功能无损**，但下次有人读产物会被弄糊涂 |
+| 14 | `AGENTS.md:91-96` | 「`nested herdr is disabled` 是噪音」——但当前源码与产物里**已无 `$(herdr)` 命令替换**，该条目已失效，会误导人去找不存在的输出 |
+| 15 | — | 新 bug：AX press 工具栏 Refresh → `EXC_BREAKPOINT`（§2） |
+
+### 12.1 为什么第 11/12 条要和本次重构一起修
+
+这两条不是文档漂移，是**验收链路本身的缺陷**。新的 `gui.sh verify` 会复用
+“全部门禁通过才算绿”这个语义：
+
+- 缺 `DEVELOPER_DIR` → 在 CI 上 `swift test` 直接挂，但本地永远绿 →
+  “本地跑通”不再是一个可信信号。
+- 缺 `swiftlint` 只跳过 → 与新加的 GUI 门禁叠加后，**两道门都可能静默消失**，
+  而 `verify` 依旧退出 0。
+
+这正是 `AGENTS.md` §0.2 反复警告的模式（“测试通过和修好没有关系”），
+只不过程度更轻：**门禁绿和代码合格没有关系**。
+
+修法（两条都是一行）：
+
+```bash
+# verify.sh 顶部
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+
+# verify.sh 的 lint 分支：缺失即失败，除非显式 KRAAL_SKIP_LINT=1
+else
+    if [ "${KRAAL_SKIP_LINT:-0}" = "1" ]; then
+        printf 'swiftlint not installed; skipped by KRAAL_SKIP_LINT=1\n'
+    else
+        printf 'FAILED: swiftlint not installed (set KRAAL_SKIP_LINT=1 to override)\n'
+        FAILED=$((FAILED + 1))
+    fi
+fi
+```
+
+**但先别急着手改**：这两条会改变 `verify.sh` 的退出码语义，
+应该在 P0 建 `gui.sh` 时一并处理，避免“先改门禁、再加门禁”两次改同一处。
 
 ---
 

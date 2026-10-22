@@ -55,8 +55,21 @@ herdr pane list | ...
 
 ### 工具链：必须用 Xcode，不能用 CLT
 
-`swift test` 需要 `Testing.framework`，它**只随 Xcode 提供**。用
-`/usr/bin/swift`（CommandLineTools 工具链）会得到：
+`swift test` 需要 Xcode 平台框架。用 `/usr/bin/swift`（CommandLineTools
+工具链）会失败。
+
+> **更正（2026-10-22 实测）**：原文写「需要 `Testing.framework`，它只随 Xcode
+> 提供」——现在 CLT 也带了 `Testing.framework`：
+> `/Library/Developer/CommandLineTools/Library/Developer/Frameworks/Testing.framework`
+> 确实存在。真正缺的是 **`XCTest.framework`**（CLT 目录里没有），
+> 而 `Tests/KraalTransportTests/` 有 3 个文件 `import XCTest`。
+>
+> 实测错误是：
+> ```
+> HerdrMachineClientTests.swift:13:8 unable to resolve module dependency: 'XCTest'
+> ```
+> 结论不变（仍然必须 `DEVELOPER_DIR` 指向 Xcode），**但看错误信息时不要再去找
+> `Testing`**——它会先把人往错方向引。
 
 ```
 error: no such module 'Testing'
