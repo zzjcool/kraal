@@ -4,8 +4,10 @@
 // Bincode 2 "standard" primitive decoding.
 //
 // bincode uses positional encoding: enum variants are written as their
-// declaration index as a varint, and integers use a variable-length scheme.
-// Field order is a wire contract — see `Wire.swift`.
+// declaration index as a varint, and integers **wider than 8 bits** use a
+// variable-length scheme. A `u8` is always one raw byte — see `writeU8` /
+// `readU8`. Getting that backwards is silent for 0...250 and shifts every
+// following field above it. Field order is a wire contract — see `Wire.swift`.
 //
 // Reference: `herdr-gpui/crates/herdr-protocol/src/codec.rs` and bincode's
 // `config::standard()` (little-endian, varint encoding, varint length prefix).
@@ -113,7 +115,7 @@ public struct BincodeReader {
         }
     }
 
-    /// Varints are used for every integer on the wire; this narrows with a
+    /// Varints are used for integers wider than 8 bits; this narrows with a
     /// bounds check so a corrupt frame cannot silently truncate a coordinate.
     public mutating func readU16Varint() throws -> UInt16 {
         let value = try readVarint()
@@ -262,6 +264,19 @@ public struct BincodeWriter {
 
     public mutating func writeBool(_ value: Bool) {
         bytes.append(value ? 1 : 0)
+    }
+
+    /// A `u8` field is one raw byte, not a varint.
+    ///
+    /// bincode only uses the variable-length scheme for integers wider than 8
+    /// bits; `u8` is positional-packing's one-byte case. Writing it through
+    /// `writeVarint` happens to produce the same byte for every value up to 250,
+    /// which is why this was invisible for so long — but 251...255 grow to three
+    /// bytes and every field after them shifts.
+    ///
+    /// This is the writer-side mirror of `BincodeReader.readU8()`.
+    public mutating func writeU8(_ value: UInt8) {
+        bytes.append(value)
     }
 
     public mutating func writeString(_ value: String) {

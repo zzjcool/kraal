@@ -196,16 +196,16 @@ public enum ClientMessageEncoder {
         case let .defaultColor(kind, color):
             writer.writeVarint(0)
             writer.writeVarint(kind == .foreground ? 0 : 1)
-            writer.writeVarint(UInt64(color.red))
-            writer.writeVarint(UInt64(color.green))
-            writer.writeVarint(UInt64(color.blue))
+            writer.writeU8(color.red)
+            writer.writeU8(color.green)
+            writer.writeU8(color.blue)
         case let .paletteColors(colors):
             writer.writeVarint(1)
             writer.writeArray(colors) { writer, entry in
-                writer.writeVarint(UInt64(entry.index))
-                writer.writeVarint(UInt64(entry.color.red))
-                writer.writeVarint(UInt64(entry.color.green))
-                writer.writeVarint(UInt64(entry.color.blue))
+                writer.writeU8(entry.index)
+                writer.writeU8(entry.color.red)
+                writer.writeU8(entry.color.green)
+                writer.writeU8(entry.color.blue)
             }
         case let .appearance(appearance):
             writer.writeVarint(2)

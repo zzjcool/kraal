@@ -69,6 +69,41 @@ struct BincodeTests {
         #expect(reader.isAtEnd)
     }
 
+    @Test("a u8 is one raw byte, not a varint")
+    func u8IsRawByte() {
+        // bincode only variable-length-encodes integers wider than 8 bits. The
+        // two encodings agree for 0...250, so the difference is only observable
+        // at the top of the range — which is exactly where the host-theme
+        // palette lives (index 255, pure white 255/255/255).
+        var writer = BincodeWriter()
+        writer.writeU8(0)
+        writer.writeU8(250)
+        writer.writeU8(251)
+        writer.writeU8(255)
+        #expect(writer.bytes == [0x00, 0xFA, 0xFB, 0xFF])
+
+        // The same values through writeVarint grow past 250. Pinned here so a
+        // future "helpful" refactor cannot quietly re-widen these fields.
+        var varint = BincodeWriter()
+        for value in [UInt8(251), 255] {
+            varint.writeVarint(UInt64(value))
+        }
+        #expect(varint.bytes == [0xFB, 0xFB, 0x00, 0xFB, 0xFF, 0x00])
+    }
+
+    @Test("writeU8 round-trips through readU8")
+    func u8RoundTrip() throws {
+        var writer = BincodeWriter()
+        for value in [UInt8(0), 1, 249, 250, 251, 254, 255] {
+            writer.writeU8(value)
+        }
+        var reader = BincodeReader(Data(writer.bytes))
+        for value in [UInt8(0), 1, 249, 250, 251, 254, 255] {
+            #expect(try reader.readU8() == value)
+        }
+        #expect(reader.isAtEnd)
+    }
+
     @Test("a truncated payload throws instead of reading past the end")
     func truncated() {
         var reader = BincodeReader(Data([0xFB, 0x01]))

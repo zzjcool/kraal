@@ -54,9 +54,8 @@ REDS=(
     # synchronized output, resize no longer clears scrollback). `--compare` is
     # what surfaced them; they now guard again instead of being skipped.
     # Wire shape — herdr-gpui herdr-protocol/tests/host_theme.rs
-    "KraalProtocolTests.HostThemeEncodingTests/hostThemeLayout()"
-    "KraalProtocolTests.HostThemeEncodingTests/wideColorBytes()"
-    "KraalProtocolTests.HostThemeEncodingTests/fullPalette()"
+    # hostThemeLayout / wideColorBytes / fullPalette used to be here: issue #4
+    # fixed the u8-as-varint encoding (BincodeWriter.writeU8), so they guard now.
     # Frozen upstream fixture — endpoint.rs serde defaults
     "KraalProtocolTests.UpstreamFixtureTests/helloDecodes()"
     # Payload hygiene — compatibility.rs / render_ansi.rs:1882
