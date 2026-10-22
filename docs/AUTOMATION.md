@@ -275,7 +275,10 @@ AppKit 自动合成的 selector 名，**不唯一**：
 ```
 
 步骤：
-1. `tart clone tahoe-base kraal-agent`（不存在才做）
+1. `kraal-agent` **已存在**（2026-10-22 建），正常情况下跳过这步。
+   本地克隆源 `tahoe-base` 已删除以回收 31GB；若整台 VM 丢失，改用
+   `tart clone ghcr.nju.edu.cn/cirruslabs/macos-tahoe-base:latest kraal-agent`
+   （重建后要重做的 guest 设置见 `docs/ENVIRONMENT.md` §4.6）
 2. `tart set --cpu 6 --memory 12288 --disk-size 80 --display 1920x1200`
 3. `tart run --no-graphics`，等 guest agent（实测 18 s）
 4. 推 `herdr` 二进制（`gzip | tart exec -i gunzip`）
@@ -519,7 +522,7 @@ SSH 只用于**宿主**；进 VM 一律 `tart exec`。
 | 4 | `docs/ENVIRONMENT.md:301,416` | tart 版本写 2.32.1，实测 **2.41.1** |
 | 5 | `docs/ENVIRONMENT.md:421-423` | 「可直接 clone 本地缓存镜像」——OCI 缓存符号链接已断 |
 | 6 | `Sources/KraalMac/KraalMacMain.swift:153-155` | 注释仍是旧结论（Accessibility 导致失败） |
-| 7 | `README.md:91` | 声称「本机现有 `kraal-agent`」——**不存在**，只有 `tahoe-base` |
+| 7 | ~~`README.md:91`~~ | 已过时：`kraal-agent` 现在**存在**并且是 `gui.sh` 的默认后端；`tahoe-base` 已删除 |
 | 8 | `AGENTS.md:85` | 「173 个测试，28 个套件」→ 实际 228 `@Test` / 38 `@Suite` / 26 XCTest |
 | 9 | `Scripts/agent-vm.sh:64` | `die` 在 `case` 之前，VM 不存在时连 `destroy` 都执行不了 |
 | 10 | `Scripts/agent-vm.sh:187` | `"$*"` 拼接丢失引号语义 |

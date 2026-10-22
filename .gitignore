@@ -29,3 +29,6 @@ research/*.local.ansi
 
 # GUI 验证产物（每次运行都重新生成，不入库）
 artifacts/
+
+# pi 运行时产物（异步任务日志、子代理会话）
+.pi/

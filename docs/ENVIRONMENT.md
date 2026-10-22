@@ -299,6 +299,32 @@ tart ip kraal-agent            # 例如 192.168.64.2
 tart exec kraal-agent uname -a # 不要写 `--`，会 exit 125
 ```
 
+#### `kraal-agent` 是唯一副本（2026-10-22 起）
+
+克隆源 `tahoe-base` 已删除以回收 31GB，所以**没有本地模板可再克隆**。它是
+`gui.sh` 的默认后端（`KRAAL_GUI_VM` 默认值），坏掉就没有 GUI 门禁了。
+
+丢了的重建路径，按代价从低到高：
+
+1. **VM 还在，只是状态脏**：`tart stop --force kraal-agent` 后重启即可；guest 内
+   的 `/tmp/kraal-gui/` 是部署产物，`gui.sh` 每次运行都会重新推一份，不用清理。
+2. **VM 镜像坏了**：`tart pull ghcr.io/cirruslabs/macos-tahoe-base:latest`
+   （走 `ghcr.nju.edu.cn` 镜像源，直连 GHCR 实测 ~116 KB/s）。
+3. **重建后要重做的 guest 侧设置**：autologin 用户 `admin`、SIP 关闭
+   （TCC 预授权需要，见 §4.3）、网络出网。
+
+健康自检（三条都应通过）：
+
+```bash
+tart exec kraal-agent /bin/bash -lc 'launchctl managername'   # 必须是 Aqua
+./Scripts/gui.sh probe                                        # axTrusted=true
+./Scripts/gui.sh run split-right                              # panes 1 -> 2
+```
+
+第一条最关键：`tart exec` 落在 **Aqua** 会话是合成事件能进 app 的唯一原因
+（§4.5）。如果这里返回 `Background`，`drag-divider` 这类用例会全部失败，
+而且看起来像产品 bug。
+
 VM 没起来时无头启动（不抢焦点，和在跑的桌面并存）：
 
 ```bash
