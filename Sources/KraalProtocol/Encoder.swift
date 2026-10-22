@@ -68,7 +68,7 @@ public enum ClientMessageEncoder {
             writer.writeVarint(UInt64(lines))
             writer.writeOptional(column) { $0.writeVarint(UInt64($1)) }
             writer.writeOptional(row) { $0.writeVarint(UInt64($1)) }
-            writer.writeVarint(UInt64(modifiers))
+            writer.writeU8(modifiers)
 
         case let .observeTerminal(target):
             writer.writeString(target)
@@ -134,7 +134,7 @@ public enum ClientMessageEncoder {
         case let .attachMouse(kind, position, geometry, modifiers, lines):
             encodeMouse(&writer, kind: kind, position: position)
             encodeMouseGeometry(&writer, geometry)
-            writer.writeVarint(UInt64(modifiers))
+            writer.writeU8(modifiers)
             writer.writeVarint(UInt64(lines))
 
         case let .clientShellHostTheme(update):
@@ -183,7 +183,7 @@ public enum ClientMessageEncoder {
         case let .pageKey(input):
             writer.writeVarint(1)
             writer.writeArray(input) { writer, byte in
-                writer.writeVarint(UInt64(byte))
+                writer.writeU8(byte)
             }
         }
     }
@@ -277,7 +277,7 @@ public enum ClientMessageEncoder {
                       generatedText, tracksRelease, physicalKeyId, windowsRecord):
             writer.writeVarint(0)
             encodeKeyCode(&writer, code)
-            writer.writeVarint(UInt64(modifiers))
+            writer.writeU8(modifiers)
             writer.writeVarint(kind.rawValue)
             writer.writeVarint(UInt64(repeatCount))
             writer.writeOptional(shiftedCodepoint) { $0.writeVarint(UInt64($1)) }
@@ -301,7 +301,7 @@ public enum ClientMessageEncoder {
             writer.writeVarint(2)
             encodeMouse(&writer, kind: kind, position: position)
             encodeMouseGeometry(&writer, geometry)
-            writer.writeVarint(UInt64(modifiers))
+            writer.writeU8(modifiers)
             writer.writeVarint(UInt64(lines))
 
         case let .paste(text):
@@ -332,7 +332,7 @@ public enum ClientMessageEncoder {
             writer.writeVarint(UInt64(scalar.value))
         case let .function(index):
             writer.writeVarint(16)
-            writer.writeVarint(UInt64(index))
+            writer.writeU8(index)
         case .null: writer.writeVarint(17)
         }
     }
