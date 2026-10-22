@@ -26,7 +26,47 @@ extension AppStore {
         surfaceIsStale = false
     }
 
+    /// Whether an incoming snapshot belongs to the projection we are already on.
+    ///
+    /// Revisions only ever increase within one boot. A smaller one means the
+    /// stream was renumbered under us, and every surface is fenced on
+    /// `projectionRevision == snapshot.revision` — so adopting the regression
+    /// makes every live frame look stale at once and the screen freezes, with no
+    /// later frame able to recover on its own.
+    ///
+    /// A different boot id is *not* a regression: the daemon restarted, so the
+    /// counter legitimately starts over. That is why this compares boot ids
+    /// first instead of just the revision.
+    ///
+    /// Split out as a pure function so the rule is testable without a daemon —
+    /// the same reason `eventIsCurrent` is shaped this way.
+    nonisolated static func snapshotIsCurrent(
+        incomingRevision: UInt64,
+        incomingBootId: String,
+        currentRevision: UInt64?,
+        currentBootId: String?
+    ) -> Bool {
+        guard let currentRevision, let currentBootId else { return true }
+        guard incomingBootId == currentBootId else { return true }
+        return incomingRevision >= currentRevision
+    }
+
     func handleSnapshot(_ snapshot: ClientShellSnapshot) {
+        let previous = self.snapshot
+        guard Self.snapshotIsCurrent(
+            incomingRevision: snapshot.revision,
+            incomingBootId: snapshot.bootId,
+            currentRevision: previous?.revision,
+            currentBootId: previous?.bootId
+        ) else {
+            // Do not drop this silently: a frozen screen with no explanation is
+            // the failure mode this fence exists to prevent.
+            let message = "snapshot revision \(snapshot.revision) regressed below "
+                + "\(previous?.revision ?? 0); keeping the newer projection"
+            kraalLog(message)
+            lastError = message
+            return
+        }
         kraalLog("snapshot: ws=\(snapshot.workspaces.count) tabs=\(snapshot.tabs.count) "
             + "panes=\(snapshot.panes.count) agents=\(snapshot.agents.count)")
         // A newer boot id invalidates every surface we hold.

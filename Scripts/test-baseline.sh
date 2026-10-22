@@ -68,8 +68,8 @@ REDS=(
     # gridLimit used to be here: issue #8 added the per-axis and total-cell
     # ceiling to resizeSurface (SurfaceGeometry.isAcceptableGrid).
     # Snapshot fences — session_state.rs / rootshell snapshot validation
-    "KraalClientTests.SnapshotFencePortTests/revisionRegression()"
-    "KraalClientTests.SnapshotFencePortTests/duplicatePaneIDs()"
+    # revisionRegression / duplicatePaneIDs used to be here: issue #6 added
+    # snapshotIsCurrent (boot-aware revision fence) and decode-time id checks.
     # Drag arithmetic — rootshell TmuxDividerResizeTests:66
     # nonFiniteDrag used to be here: issue #8 refuses a non-finite drag delta
     # before it can reach the ratio.
