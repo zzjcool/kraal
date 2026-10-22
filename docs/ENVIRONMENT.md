@@ -360,6 +360,24 @@ values ('kTCCServicePostEvent', '<agent 绝对路径>', 1, 2, 0, 1,
 
 之后 `killall tccd` 并重启 guest agent 才会生效。
 
+#### ⚠️ 升级 guest 里的 Homebrew 包会让授权全部失效
+
+`client` 存的是**解析符号链接后的绝对路径**，而 Homebrew 的 Cellar 路径含版本号：
+
+```
+TCC 里：  /opt/homebrew/Cellar/tart-guest-agent/0.15.0/bin/tart-guest-agent
+符号链接：/opt/homebrew/bin/tart-guest-agent -> ../Cellar/tart-guest-agent/0.15.0/bin/...
+```
+
+`brew upgrade tart-guest-agent` 之后，`/opt/homebrew/bin/...` 指向 `0.16.0/`，
+而 TCC 里那条 0.15.0 的路径再也没有进程去匹配它。**授权条目仍然"存在"**，
+所以任何只看"条目在不在"的检查都会误报健康。
+
+症状和缺授权完全一样：`AXPress` 正常，但点击/拖拽/截图全部失效。
+
+所以：**guest 里升级 Homebrew 包之后，必须重跑 `./Scripts/vm-bootstrap.sh --fix-tcc`。**
+`--fix-tcc` 用当前的实际路径重新插入条目（`insert or replace`），旧条目会留着但无害。
+
 第一条最关键：`tart exec` 落在 **Aqua** 会话是合成事件能进 app 的唯一原因
 （§4.5）。如果这里返回 `Background`，`drag-divider` 这类用例会全部失败，
 而且看起来像产品 bug。

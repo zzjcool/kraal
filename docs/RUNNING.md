@@ -195,28 +195,67 @@ $D window                                   # frame + windowNumber
 
 ## 7. 迁移到另一台机器
 
-代码和脚本都在仓库里，跟着 clone 走。机器上需要重建的只有三样：
+代码和脚本跟着 git clone 走。机器上要重建的是三样：工具链、VM 镜像、herdr。
+
+### 7.1 VM 镜像：`tart export` / `import`
+
+VM 是 31GB 的本地磁盘镜像，**不在 git 里**，也是唯一不能靠 clone 得到的东西。
+`Scripts/vm-bootstrap.sh` 封装了两端：
 
 ```bash
-# 1. 工具链
-brew install cirruslabs/cli/tart
-xcode-select -p    # 必须是 /Applications/Xcode.app/Contents/Developer
+# 旧机器
+./Scripts/vm-bootstrap.sh export ~/kraal-agent.tvm
+# 实测 32 秒，22GB（tart 会先停 VM，运行中拒绝导出）
 
-# 2. VM（bootstrap 会做，tens of GB，走国内镜像源）
-./Scripts/vm-bootstrap.sh
-./Scripts/vm-bootstrap.sh --fix-tcc   # 如果三条 TCC 授权缺失
-
-# 3. herdr（宿主需要它来开 scratch daemon；VM 里的是 gui.sh 每次推的）
-brew install <herdr 的安装方式见 README>
+# 通过移动硬盘 / rsync / 任何方式把 .tvm 传过去，然后
+./Scripts/vm-bootstrap.sh import ~/kraal-agent.tvm
+# 实测 17 秒
 ```
 
-`gui.sh` 会自己把 `kraal-gui`、`Kraal.app`、`herdr` 推进 VM，
-**VM 里不需要装 Xcode、不需要装 herdr、不需要联网**。
+导入后**不要新建**：TCC 授权、SIP 状态、autologin 都保存在镜像里，跟着走。
+实测验证过：导入的副本 `launchctl managername` 仍是 `Aqua`、SIP 仍关闭、
+4 条 TCC 授权完好，`gui.sh run split-right` 三条断言直接通过。
 
-本机专属、不应同步的东西：VM 镜像本身、`artifacts/`、`.pi/`、
-`~/Library/Logs/Kraal-*.log`。
+`import` 拒绝覆盖同名 VM（否则 tart 只会说 "is running"，看起来像 tart 的 bug）。
+要换名字用 `KRAAL_GUI_VM=xxx`。
 
----
+### 7.2 三条只有全新 provision 才需要做的事
+
+只有在**没有 .tvm 可用**（比如换了架构、或镜像彻底坏了）时才需要：
+
+```bash
+./Scripts/vm-bootstrap.sh              # clone 基础镜像 → 启动 → 验证 Aqua + TCC
+./Scripts/vm-bootstrap.sh --fix-tcc    # 如果三条授权缺失（需 SIP 关闭）
+```
+
+### 7.3 迁移时最容易静默失效的四个点
+
+这四个的共同点是**不报错，只是行为不对**，看起来都像产品 bug：
+
+| # | 点 | 失效时的表现 | 原因 |
+| --- | --- | --- | --- |
+| 1 | `launchctl managername` 不是 `Aqua` | 拖拽/点击类用例全失败 | `tart exec` 落在 Background 会话，`CGEvent` 进不了 app |
+| 2 | `tart-guest-agent` 缺 `PostEvent` | `AXPress` 全绿，只有拖拽失败 | 被授权的是 guest agent，不是 sshd / Kraal |
+| 3 | 缺 `ScreenCapture` | `screencapture` exit 0 但写出全黑 PNG | 无权限时它不报错 |
+| 4 | **`brew upgrade tart-guest-agent`** | 上面三条授权**全部失效** | TCC 按绝对路径匹配，而路径含版本号：`/opt/homebrew/Cellar/tart-guest-agent/0.15.0/bin/...`。升级后 `Cellar` 下的版本目录变了，旧条目不再匹配 |
+
+第 4 条是 2026-10-22 查 TCC.db 时发现的：`/opt/homebrew/bin/tart-guest-agent`
+是指向 `Cellar/0.15.0/...` 的符号链接，TCC 里存的是解析后的真实路径。
+所以 **guest 里升级 Homebrew 包后必须重跑 `--fix-tcc`**。
+
+`vm-bootstrap.sh` 无参数运行会检查上面 1–3；第 4 条它查不出来（授权条目新旧并存，
+旧的那条永远"存在"），只能靠「升级后重跑 `--fix-tcc`」这个纪律。
+
+### 7.4 不需要迁移的东西
+
+`gui.sh` 每次 `run` 都会重新推送这些到 guest，所以**不用**装进镜像：
+
+- `kraal-gui`（驱动）
+- `Kraal.app`
+- `herdr` 二进制
+
+guest 里也**不需要** Xcode（app 在宿主打包）、不需要联网。
+本机专属、不应同步：`artifacts/`、`.pi/`、`~/Library/Logs/Kraal-*.log`。
 
 ## 8. 已知未完成
 
