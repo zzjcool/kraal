@@ -133,7 +133,46 @@ func decodedFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -> FrameD
 
 注意**乘上 pane 数**：单 pane 看着无害的开销，四个 pane 时按倍数叠加。
 
-## 6. 多次运行，看波动而不是单次
+## 6. 本地微基准之后，要对真实 daemon 再测一遍
+
+微基准能定位「哪一行浪费」，但**不能回答「用户会不会感受到」**。本轮就有一段
+必须打到真 daemon 才看得清的差别：
+
+- 微基准说 `Task { }` 是解码成本的 50 倍（5.8 us vs 0.115 us）→ 看起来像问题
+- 真 daemon 上 200 次 Task-per-send，**没有一次超过 1 ms** → 不是问题
+
+方法：复用 `gui.sh` 的 scratch daemon（它已经保证不碰你自己的 workspace），
+用 `EndpointConnection` 直连，把探针编成可执行文件推进 guest 跑。
+
+```bash
+# 起隔离 daemon（与 gui.sh 同一套隔离约定）
+tart exec kraal-agent /bin/bash -lc '
+  rm -rf /tmp/perf; mkdir -p /tmp/perf/herdr-home
+  export HERDR_SOCKET_PATH=/tmp/perf/herdr.sock HOME=/tmp/perf/herdr-home
+  nohup /tmp/kraal-gui/bin/herdr server > /tmp/perf/server.log 2>&1 &
+  sleep 3; /tmp/kraal-gui/bin/herdr workspace create --cwd /tmp'
+
+# 探针要链接客户端两个库
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+/usr/bin/swiftc -O -o probe probe.swift \
+  -I .build/release -L .build/release \
+  -lKraalClient -lKraalTransport -lKraalProtocol
+
+# 推进 guest 再跑（注意 socket 在 guest 里，宿主机连不上）
+cp probe push/ && tar -czf - -C push probe | tart exec -i kraal-agent \
+  /bin/bash -lc 'mkdir -p /tmp/perf/bin && cd /tmp/perf/bin && tar -xzf - && chmod +x probe'
+tart exec kraal-agent /bin/bash -lc 'cd /tmp/perf/bin && ./probe /tmp/perf/herdr-client.sock'
+```
+
+两个坑：
+
+- **socket 路径在 guest 内**，宿主机 `connect()` 会 `No such file or directory`。
+  必须把探针推进去跑。
+- `EndpointConnection` 是 actor，`start()` / `sendPaneInput()` 都是 async。
+  在同步脚本里要 `Task { } + DispatchSemaphore` 包一层；但**测得这层包装本身
+  只有 5.8 us**，不会污染结论。
+
+## 7. 多次运行，看波动而不是单次
 
 单次读数可能是冷缓存。每项跑三次，看离散度：
 
@@ -165,8 +204,36 @@ full reps=2000 per=1524.3us      ← 三次差 < 2%，可信
 | `FrameData.validate()` | 3.1 us |
 | retain 一个帧（CoW 共享） | 0.01 us |
 | 行级 diff 检测（10000 格） | 104 us |
+| 解码一个按键（`TerminalInputDecoder`） | 0.115 us |
+| `inputDecoders` 字典取存一个 decoder | 0.038 us |
+| `Task { }` 创建 + hop | 5.8 us |
 
 > 记下健康数据同样重要：下次有人怀疑这些地方慢时，不必重测。
+
+### 端到端：真实 daemon 上量到的往返
+
+最后一条必须对着**真实 daemon** 测，本地微基准看不到网络与合成节奏。方法：起隔离
+daemon（`gui.sh` 那套 scratch 环境），用 `EndpointConnection` 直连，记录「发出一个
+按键」到「收到下一次 surface」的时间。
+
+| 测量 | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| 端点请求 RTT（socket 往返，不含渲染） | 0.135 ms | 0.193 | 3.50 | 3.50 ms |
+| 按键 → surface 回来 | 0.15-0.18 ms | 0.20-0.48 | 26-29 | 28.9 ms |
+| Task-per-send 200 次 | 0.034 ms | 0.049 | 0.153 | 1.00 ms |
+
+三个结论，都反直觉：
+
+1. **socket 往返没有长尾**（max 3.5 ms），而 surface 推送有 26-29 ms 的偶发长尾。
+   说明长尾来自 daemon 侧的帧合成节奏，**不是客户端能修的**。不要为此开 issue。
+2. **Task-per-send 200 次没有一次超过 1 ms** —— `AppStore.sendInput` 每键建一个
+   `Task` 看着可疑，实测不是瓶颈（`Task { }` 本身 5.8 us，是解码 0.115 us 的
+   50 倍，但绝对值小到无感）。
+3. **连发比单发快**：10 键连发合计 p50 0.51 ms（每键 0.051 ms），单键 p50 0.18 ms。
+   daemon 会合批，客户端逐键发送不会放大成本。
+
+> 反直觉的地方最值得先实测。这三条里有两条是我原本准备开 issue 的，
+> 量完发现不成立 —— 而「不开」和「开」一样是结论。
 
 ---
 
