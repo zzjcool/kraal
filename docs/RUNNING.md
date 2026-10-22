@@ -34,9 +34,13 @@ cd <repo>
 # "unable to resolve module dependency: 'XCTest'"——看起来像测试坏了。
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
-/usr/bin/swift test            # 基线：应当全绿
-./Scripts/verify.sh            # 六道门禁（见下），会自己导出 DEVELOPER_DIR
-```bash
+/usr/bin/swift test                        # 基线：应当全绿
+/usr/bin/swift build --product KraalGUIDriver   # kraal-gui 驱动（gui.sh 需要它）
+./Scripts/verify.sh                       # 六道门禁（见下），自己导出 DEVELOPER_DIR
+```
+
+`build-app.sh` 只打包 `Kraal.app`，**不构建 `KraalGUIDriver`**——两者是分开的
+产物，漏掉后者时 `gui.sh` 会报 `driver not built`。bash
 
 `verify.sh` 的六道：
 
