@@ -8,6 +8,7 @@
 // awkward to inspect without attaching a debugger.
 
 import AppKit
+import KraalProtocol
 import SwiftUI
 
 struct DebugInfoView: View {
@@ -32,6 +33,7 @@ struct DebugInfoView: View {
                     section("Application", rows: appRows)
                     section("Window", rows: windowRows)
                     section("Connection", rows: connectionRows)
+                    section("Daemon", rows: daemonRows)
                     section("Logging", rows: loggingRows)
                 }
                 .padding(KraalTheme.Space.loose)
@@ -94,6 +96,81 @@ struct DebugInfoView: View {
             ("Tabs", "\(store.visibleTabs.count)"),
             ("Surface stale", "\(store.surfaceIsStale)"),
         ]
+    }
+
+    /// Everything the daemon reports about itself.
+    ///
+    /// These eleven snapshot fields used to be decoded and dropped. They are not
+    /// all worth a status bar, but they are exactly what someone opening this
+    /// sheet is looking for when a config file "does nothing" or an agent list
+    /// looks wrong — and having them here is what turns "unused field" into
+    /// "inspectable state" without inventing banners for each one.
+    ///
+    /// `releaseNotes.body` and `productAnnouncement.body` are shown by their
+    /// summary here rather than inline: this sheet is a table, and a markdown
+    /// document squeezed into a 320pt column is unreadable.
+    private var daemonRows: [(String, String)] {
+        let snapshot = store.snapshot
+        let notices = SnapshotNotices.notices(in: snapshot)
+        let keybindings = SnapshotNotices.serverKeybindings(in: snapshot)
+        var rows: [(String, String)] = [
+            ("Notices", notices.isEmpty
+                ? "(none)"
+                : notices.map(\.summary).joined(separator: ", ")),
+            ("Config diagnostic", nonEmpty(snapshot?.configDiagnostic) ?? "(none)"),
+            ("Update available", nonEmpty(snapshot?.updateAvailable) ?? "(none)"),
+            ("Install command", nonEmpty(snapshot?.updateInstallCommand) ?? "(none)"),
+            // First line, not just a character count: the point of surfacing
+            // these is that the user can read what changed. The full body lives
+            // in `SnapshotNotice.detail` (shown by the status-bar tooltip), and
+            // this sheet is a table — not the place for a markdown document.
+            ("Release notes", snapshot?.releaseNotes.map {
+                "\($0.version): \(firstLine($0.body))"
+            } ?? "(none)"),
+            ("Announcement", snapshot?.productAnnouncement.map {
+                "\($0.title): \(firstLine($0.body))"
+            } ?? "(none)"),
+            ("Integration updates", (snapshot?.integrationUpdatesAvailable ?? false) ? "available" : "none"),
+            ("Worktree directory", SnapshotNotices.worktreeDirectory(in: snapshot) ?? "(not configured)"),
+            ("Server keybindings", keybindings.map { "\($0.count) chars" } ?? "(none)"),
+            ("Agent view filter", SnapshotNotices.agentViewFilterLabel(in: snapshot) ?? "(off)"),
+            // No force-unwrap: `agentOrder` is read once and rendered, so an
+            // `if let` inside a closure would only make the row builder harder to
+            // scan. An empty list is a legitimate state, not an error.
+            ("Agent order", orderedAgents(snapshot)),
+        ]
+        let agentRows = SnapshotNotices.agentRows(in: snapshot)
+            .map { "\($0.label)@\($0.paneId)" }
+            .joined(separator: ", ")
+        rows.append(("Agent rows", agentRows.isEmpty ? "(none)" : agentRows))
+        return rows
+    }
+
+    /// One readable line from a possibly-multi-line document.
+    ///
+    /// Same newline handling as `SnapshotNotices.firstLine` (`\r\n` is one
+    /// Character in Swift), kept local because this sheet must not depend on a
+    /// view-model helper's truncation length.
+    private func firstLine(_ text: String) -> String {
+        let line = text
+            .split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: \.isNewline)
+            .first
+            .map(String.init) ?? text
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "(empty)" : (trimmed.count > 80 ? String(trimmed.prefix(80)) + "…" : trimmed)
+    }
+
+    private func orderedAgents(_ snapshot: ClientShellSnapshot?) -> String {
+        guard let order = snapshot?.agentOrder, !order.isEmpty else { return "(empty)" }
+        return order.joined(separator: ", ")
+    }
+
+    /// `nil` for a missing or blank value, so a defaulted-to-`""` field reads as
+    /// "not set" rather than "set to nothing".
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private var loggingRows: [(String, String)] {
