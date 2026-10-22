@@ -260,3 +260,30 @@ screencapture -x -o -l "$(./Scripts/dev-session.sh status | grep -oE 'window: +[
 
 Ghostty 用 Metal 绘制，AX 树几乎是空的，所以**不要指望用 Accessibility 读终端
 内容**——读屏幕内容用 `kraal screenshot`，读渲染结果用窗口截图。
+
+### TOML 手写解析的三个真实缺陷（2026-10-22）
+
+`KeybindingProfile` 手工解析 daemon 的 `[keys]` 表（不引入 TOML 依赖，理由见该
+文件头注释）。第一次实现有三个 bug，全部「静默丢数据」而不是报错——用户看到的是
+「我改的配置没生效」，而不是「解析失败」。
+
+| 缺陷 | 原因 | 用户看到 |
+| --- | --- | --- |
+| 多行数组整块丢失 | 先按 `\n` 切行，再逐行解析。`prefix = [` 那一行没有 `]`，被跳过；续行没有 `=`，也被跳过 | 该绑定从面板消失 |
+| `key = "a\"b"` 被丢弃 | `scalar` 拒绝任何内部含引号的值 | 合法配置变成缺失行 |
+| `split_vertical = "prefix+["` 吞掉后续 | 计数括号时不区分是否在字符串内 | 该行之后的所有绑定消失 |
+
+**判断依据不是「TOML 允许什么」，而是「daemon 会发什么」**：`prefix = ["ctrl+a"`
+后跟新语句在真实 TOML 里是**语法错误**，daemon 不会产生它。所以解析器实际面对的是
+**截断文档**（写到一半被杀），此时括号不平衡就无法区分「续行」与「新键」。正确做法是
+把余下内容视为该值的一部分、并在 flush 时丢弃这个不平衡的值——前面已读到的绑定保留。
+
+一条老测试本来断言相反（跳过 `[` 行、保留 `new_tab`），那个期望是错的，已改。
+
+注入验证（三条都能红）：
+
+| 注入 | 结果 |
+| --- | --- |
+| 关掉多行续接 | ✘ `a multi-line array binding is not dropped` |
+| 括号计数忽略引号 | ✘ `a bracket inside a quoted binding is not a bracket` |
+| `scalar` 重新拒绝内部引号 | ✘ `an escaped quote inside a binding is resolved, not rejected` |

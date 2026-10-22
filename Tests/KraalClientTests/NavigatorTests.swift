@@ -264,17 +264,93 @@ struct KeybindingProfileTests {
         #expect(entries.first?.binding == "prefix+t")
     }
 
-    /// A truncated array (unterminated string) must not surface half a combo: the
-    /// built-in label is better than a wrong one.
-    @Test("a malformed array is refused instead of half-read")
-    func malformedArray() {
+    /// A multi-line array is legal TOML and is what a human editing the config
+    /// produces. Splitting on newlines first dropped the whole binding, which
+    /// reads as "my config was ignored" — the exact complaint this panel exists
+    /// to answer.
+    @Test("a multi-line array binding is not dropped")
+    func multiLineArray() {
+        let toml = """
+        [keys]
+        prefix = [
+        "ctrl+a",
+        "alt+a"
+        ]
+        new_tab = "prefix+t"
+        """
+        let entries = KeybindingProfile.entries(in: toml)
+        #expect(entries.count == 2)
+        #expect(KeybindingProfile.binding(for: "prefix", in: toml) == "ctrl+a / alt+a")
+        #expect(KeybindingProfile.binding(for: "new_tab", in: toml) == "prefix+t")
+    }
+
+    /// A keybinding can legitimately *be* the literal `[`, and counting it as an
+    /// opening bracket would make the parser wait for a closer that never comes —
+    /// swallowing every binding after it.
+    @Test("a bracket inside a quoted binding is not a bracket")
+    func bracketInsideString() {
+        let toml = """
+        [keys]
+        split_vertical = "prefix+["
+        new_tab = "prefix+t"
+        """
+        let entries = KeybindingProfile.entries(in: toml)
+        #expect(entries.count == 2)
+        #expect(KeybindingProfile.binding(for: "split_vertical", in: toml) == "prefix+[")
+    }
+
+    /// `key = "a\"b"` is legal TOML. The first parser rejected any value
+    /// containing an inner quote, which turned a correct config into a missing
+    /// row.
+    @Test("an escaped quote inside a binding is resolved, not rejected")
+    func escapedQuote() {
+        // Built by concatenation so the escape stays a single backslash-then-quote
+        // in the TOML text, which is what the daemon writes for a literal quote.
+        let escapedQuote = #"custom = "a\"b""#
+        let toml = "[keys]\n" + escapedQuote + "\n" + #"new_tab = "prefix+t""#
+        #expect(KeybindingProfile.binding(for: "custom", in: toml) == "a\"b")
+        #expect(KeybindingProfile.binding(for: "new_tab", in: toml) == "prefix+t")
+    }
+
+    /// A document ending mid-array must still contribute the bindings it did
+    /// have. The truncated array itself is dropped (there is no way to know what
+    /// it contained), but everything read before it survives.
+    @Test("a truncated multi-line array does not lose earlier bindings")
+    func truncatedArray() {
+        let toml = """
+        [keys]
+        new_tab = "prefix+t"
+        next_tab = "prefix+n"
+        prefix = [
+        "ctrl+a"
+        """
+        let entries = KeybindingProfile.entries(in: toml)
+        #expect(entries.count == 2)
+        #expect(KeybindingProfile.binding(for: "new_tab", in: toml) == "prefix+t")
+        #expect(KeybindingProfile.binding(for: "next_tab", in: toml) == "prefix+n")
+        #expect(KeybindingProfile.binding(for: "prefix", in: toml) == nil)
+    }
+
+    /// An unclosed array makes the rest of the document part of that array.
+    ///
+    /// This used to assert the opposite (skip the `[` line, keep `new_tab`), and
+    /// that expectation was wrong: `prefix = ["ctrl+a"` followed by a new
+    /// statement is a **TOML syntax error**, so the daemon never produces it. What
+    /// this parser actually faces is a truncated document — a cut-off write — and
+    /// once the brackets are unbalanced there is no way to tell a continuation
+    /// from a new key. Treating the rest as array contents is the only
+    /// interpretation that is not a guess, and it cannot corrupt a well-formed
+    /// document.
+    @Test("an unclosed array absorbs the rest instead of guessing")
+    func unclosedArrayAbsorbs() {
         let toml = """
         [keys]
         prefix = ["ctrl+a"
         new_tab = "prefix+t"
         """
         let entries = KeybindingProfile.entries(in: toml)
-        #expect(entries.count == 1)
-        #expect(entries.first?.name == "new_tab")
+        // Nothing is invented: neither the truncated array nor the text it
+        // swallowed becomes a binding.
+        #expect(entries.isEmpty)
     }
 }
