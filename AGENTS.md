@@ -267,7 +267,7 @@ KRAAL_HERDR_HOME="$HOME" KRAAL_DEV_BACKGROUND=1 \
 
 ## 3. 排查原则
 
-细节见 `docs/DEBUGGING.md`（7 条，每条对应一次真实白跑）。摘要：
+细节见 `docs/DEBUGGING.md`（10 条，每条对应一次真实白跑）。摘要：
 
 1. **样本要能区分对错**——空 shell 的"正确"和"空白"长得一样。
 2. **A/B 回退能复现**才算定位。
@@ -276,14 +276,23 @@ KRAAL_HERDR_HOME="$HOME" KRAAL_DEV_BACKGROUND=1 \
 5. **临时改动是完整动作**：加 → 验 → 还原 → 干净重启 → 再确认。
 6. **自动化点击先激活窗口**，再谈坐标。
 7. **没证据就说"没验证"**，不要用"逻辑上应该对"代替。
+8. **"检查通过"可能只是检查没跑**——门禁要能红，先故意让它失败一次。
+9. **前提错了，测试只会加固错误**——改 wire 字段先去读消费方代码。
+10. **路径含版本号 = 授权静默失效**——按路径授权的东西别放版本号。
 
-### 两条本仓库具体的经验
+### 三条本仓库具体的经验
 
 **带内报错。** endpoint 协议把拒绝写在响应体里
 （`{"error":{"code":"endpoint_busy",...}}`），帧是完整的、JSON 合法、socket
 不报错。任何"只 catch 异常"的代码都会把拒绝当成功。`call()` 现在
 `throwIfErrorEnvelope` 并记录 `ok / FAILED / BUSY / skipped` 全路径——改动
 请求层时不要把这些日志删掉，它们是唯一能看出"ok 但没发生"的东西。
+
+**改 wire 字段先去读消费方。** 协议文档只说字段叫什么，消费方代码才决定它意味着
+什么。`tracksRelease` 那次就是这么错的：按文档推演成「report-all 时置 true」，
+而 daemon 对 `true` 的处理是**挂起这个 press 等配对 release**
+（`server/clients.rs:275-311`），我们又不产生 release —— 结果按键全消失。
+细节见 `docs/DEBUGGING.md` §9。
 
 **一条连接一个命令。** 同一 tick 发两个请求，后一个会被 `endpoint_busy`
 拒绝。所以 focus 和它要影响的动作**不能并发**（`MacMenuBar.dispatch` 把
