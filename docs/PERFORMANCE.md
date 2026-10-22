@@ -187,6 +187,34 @@ full reps=2000 per=1524.3us      ← 三次差 < 2%，可信
 
 ---
 
+## 8. 不要用现成 CLI 当计时器
+
+`kraal` CLI（`Sources/KraalCLI/KraalCLI.swift`）看上去是最顺手的探针：一条命令就能
+握手 + 拿 surface。**它内置两处固定等待，会让任何端到端计时失真**：
+
+| 位置 | 代码 | 后果 |
+|---|---|---|
+| `KraalCLI.swift:244` | `Task.sleep(nanoseconds: 20_000_000)` | 等 surface 的轮询间隔 → **计时精度下限 ~20 ms** |
+| `KraalCLI.swift:389` | `Task.sleep(nanoseconds: 200_000_000)` | `runInput` 发送前硬等 → **测按键延迟必须扣掉 200 ms** |
+
+本轮实测印证：`kraal screenshot` 在 80×24、120×40、200×60 三种尺寸下分别是
+42-47 ms、81-115 ms、43-79 ms —— **不随尺寸单调**。主导项是进程启动与那两处
+sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」这种荒谬结论。
+
+> 而且 CLI 一次运行只有一条连接、发一次请求，**无法在同一进程内做多次测量** ——
+> 而进程启动本身就有 5-7 ms（实测 `kraal --socket /tmp/nonexistent.sock` 7.4 ms）。
+
+正确做法：像 `Scripts/bench.sh` 那样，把被测代码直接链进一个探针进程，循环 N 次。
+需要真实 daemon 时用 `EndpointConnection` 直连（见 §6），不要绕 CLI。
+
+顺带两条关于路径的事实（scout 核实）：
+
+- `build/debug/kraal` **不存在**；正确的是 `.build/debug/kraal`
+- `.build/debug` 和 `.build/release` 都是**符号链接**，指向 `out/Products/<Config>`，
+  会随最后一次构建的工具链漂移（`AGENTS.md` §3 有完整解释）
+- `Scripts/gui.sh:70` 与 `Scripts/agent-vm.sh:203` **硬编码 Debug 路径**，不认
+  `-c release` —— 想用 release 产物跑 GUI 用例需要自己改，别以为传 `-c release` 就行
+
 ## 附：本仓库的性能现状（2026-10-22 实测）
 
 已确认的两个热点，各有独立 issue：
@@ -219,7 +247,7 @@ daemon（`gui.sh` 那套 scratch 环境），用 `EndpointConnection` 直连，�
 | 测量 | p50 | p90 | p99 | max |
 |---|---|---|---|---|
 | 端点请求 RTT（socket 往返，不含渲染） | 0.135 ms | 0.193 | 3.50 | 3.50 ms |
-| 按键 → surface 回来 | 0.15-0.18 ms | 0.20-0.48 | 26-29 | 28.9 ms |
+| 按键 → surface 回来 | 0.17 ms | 0.35 ms | 26.5 ms | 28.9 ms |
 | Task-per-send 200 次 | 0.034 ms | 0.049 | 0.153 | 1.00 ms |
 
 三个结论，都反直觉：
