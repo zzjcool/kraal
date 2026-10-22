@@ -58,7 +58,7 @@ public struct StyledCell: Equatable, Sendable {
     public var isDim: Bool { modifier & CellModifier.dim != 0 }
     public var isItalic: Bool { modifier & CellModifier.italic != 0 }
     public var isUnderlined: Bool { modifier & CellModifier.underline != 0 }
-    public var isReversed: Bool { modifier & (CellModifier.reverse | CellModifier.reversed) != 0 }
+    public var isReversed: Bool { modifier & CellModifier.reversed != 0 }
     public var isStrikethrough: Bool { modifier & CellModifier.strikethrough != 0 }
     public var isHidden: Bool { modifier & CellModifier.hidden != 0 }
 }

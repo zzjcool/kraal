@@ -44,11 +44,10 @@ REDS=(
     # ANSI re-encoding — herdr/src/protocol/render_ansi.rs
     # namedForeground / namedBackground used to be here: issue #1 replaced the
     # 256-color fallback with the real 30-37 / 90-97 named-colour table.
-    "KraalProtocolTests.TerminalColorEncodingTests/curlyUnderline()"
-    "KraalProtocolTests.WideGlyphTests/halfwidthVoicedKana()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/osc8()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/cursorShape()"
-    "KraalProtocolTests.ANSICursorAndHyperlinkTests/hiddenCursorParked()"
+    # curlyUnderline / halfwidthVoicedKana / cursorShape / hiddenCursorParked
+    # used to be here: issue #3 fixed the underline style nibble, the halfwidth
+    # katakana + voiced mark width, and the three cursor rules (DECSCUSR, hide on
+    # a missing cursor, park a hidden one). osc8 left earlier in the same issue.
     # missingCursorHides / synchronizedOutputOnDiffs / sizeChangeDoesNotClear were
     # on this list until issue #2 landed on main (diff frames wrapped in
     # synchronized output, resize no longer clears scrollback). `--compare` is
@@ -82,13 +81,13 @@ REDS=(
 )
 
 if [ "${1:-}" = "--list" ]; then
-    printf '%s\n' "${REDS[@]}"
+    printf '%s\n' ${REDS[@]+"${REDS[@]}"}
     exit 0
 fi
 
 if [ "${1:-}" = "--compare" ]; then
     available=$("$SWIFT" test --list-tests 2>/dev/null || true)
-    for red in "${REDS[@]}"; do
+    for red in ${REDS[@]+"${REDS[@]}"}; do
         if ! printf '%s\n' "$available" | grep -qxF "$red"; then
             printf 'gone:       %s\n' "$red"
             continue
@@ -100,9 +99,12 @@ if [ "${1:-}" = "--compare" ]; then
     exit 0
 fi
 
+# Empty is the goal state: every ported difference is fixed, so this degrades to
+# a plain `swift test`. The `+`-guarded expansion is what makes that legal under
+# `set -u` — a bare `${REDS[@]}` on an empty array aborts the script.
 SKIP_ARGS=()
-for red in "${REDS[@]}"; do
+for red in ${REDS[@]+"${REDS[@]}"}; do
     SKIP_ARGS+=(--skip "${red%()}")
 done
 
-"$SWIFT" test "${SKIP_ARGS[@]}"
+"$SWIFT" test ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"}
