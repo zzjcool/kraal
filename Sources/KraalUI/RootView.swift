@@ -132,7 +132,7 @@ public struct RootView: View {
                 .help("Toggle sidebar (⌘B)")
 
                 Button {
-                    store.connect()
+                    store.reconnectAllEndpoints()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }

@@ -309,6 +309,43 @@ public extension AppStore {
         }
     }
 
+    /// Reconnects **every** enabled machine, dropping whatever each one is doing
+    /// first.
+    ///
+    /// This is what the toolbar's Refresh button and the `.reconnect` command
+    /// mean (issue #67). They used to call `connect()`, whose contract is
+    /// different on both counts:
+    ///
+    ///  - it only looks at the *active* machine, so a background machine that
+    ///    had given up was not touched at all — pressing Refresh looked like it
+    ///    did nothing, and it had, for the one machine that was broken;
+    ///  - it returns early when `connectionTask != nil`, which is exactly the
+    ///    state a stuck machine is in — so the one case the button exists for
+    ///    was the one case it refused to handle.
+    ///
+    /// `connect()` is not changed: it means "connect the target the user just
+    /// named in the connection panel", and the three call sites in
+    /// `ConnectionViews` rely on that narrower reading.
+    ///
+    /// The disconnect-then-connect order is what makes this work on a stuck
+    /// machine. `disconnectEndpoint` bumps `connectionEpoch`, which invalidates
+    /// the in-flight task's `epoch` guard, cancels it, and stops the connection;
+    /// the follow-up `connectEndpoint` then starts a fresh attempt with a new
+    /// epoch regardless of what the old task is doing.
+    ///
+    /// Disabled machines and machines whose saved target will not parse are
+    /// skipped rather than dialled: `rebuildEndpoints` sets `enabled` to false
+    /// for both, and trying anyway would only replace a `! check target` badge
+    /// with a generic `! error`.
+    func reconnectAllEndpoints() {
+        intentionalStop = false
+        for endpoint in endpoints {
+            guard endpoint.enabled else { continue }
+            disconnectEndpoint(endpoint)
+            connectEndpoint(endpoint)
+        }
+    }
+
     // MARK: - Per-machine connection
 
     /// Opens this machine's connection.
@@ -329,7 +366,10 @@ public extension AppStore {
             guard let self else { return }
             let resolved: HerdrTarget
             do {
-                resolved = try HerdrDiscovery.resolve(settings)
+                resolved = try HerdrDiscovery.resolve(
+                    settings,
+                    environment: self.discoveryEnvironment
+                )
             } catch {
                 endpoint.status = .attention("! error")
                 endpoint.connectionTask = nil
@@ -351,7 +391,7 @@ public extension AppStore {
             }
             endpoint.connection = connection
             do {
-                try await connection.start()
+                try await self.startHandshake(connection)
                 guard !Task.isCancelled, endpoint.connectionEpoch == epoch else { return }
                 endpoint.reconnectAttempt = 0
                 // The task is done once the handshake lands. Leaving it set would
@@ -369,9 +409,14 @@ public extension AppStore {
                 kraalLog("endpoint \(endpoint.label): connect failed: \(error)")
                 endpoint.status = .attention("! error")
                 endpoint.connectionTask = nil
+                // `stop()` reports `.disconnected`, and that branch schedules the
+                // retry. Scheduling one here as well counted every failure twice:
+                // the backoff went 2, 4, 8, 16 instead of 1, 2, 4, 8, so the first
+                // retry after a failed handshake already waited twice as long as
+                // the one after a dropped connection. Measured before the fix:
+                // `attempt 0 -> 2` on a single failed handshake.
                 await connection.stop()
                 endpoint.connection = nil
-                self.scheduleEndpointRetry(endpoint)
             }
         }
     }
@@ -544,6 +589,13 @@ public extension AppStore {
         let connection = endpoint.connection
         endpoint.connection = nil
         if connection != nil {
+            // `abort()` first, and not only `stop()`. `stop()` is actor-isolated
+            // and queues behind a handshake that is parked in a blocking read —
+            // which is the exact state `disconnectEndpoint` is being called to get
+            // out of (issue #67's Refresh). `abort()` closes the stream from
+            // outside the actor, so the parked read returns immediately instead of
+            // holding the socket until the deadline below notices.
+            connection?.abort()
             Task { await connection?.stop() }
         }
     }

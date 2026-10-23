@@ -21,6 +21,15 @@ public enum BridgeError: Error, CustomStringConvertible {
     /// them is what made issue #66 hard to see — the silent case never even
     /// reached an error, it simply never returned.
     case handshakeTimedOut(seconds: TimeInterval)
+    /// The UI's watchdog gave up on a handshake that the connection below never
+    /// bounded (issue #67).
+    ///
+    /// Separate from `handshakeTimedOut` because they come from different layers
+    /// and mean different things: that one is "the connection's own deadline
+    /// fired", this one is "the connection's deadline did not fire, and the layer
+    /// above stopped waiting". The second is a bug in the first, and reporting
+    /// them as one would hide it.
+    case handshakeWatchdogExpired(seconds: TimeInterval)
     case frame(FrameError)
     case wire(WireDecodeError)
     case transport(String)
@@ -46,6 +55,8 @@ public enum BridgeError: Error, CustomStringConvertible {
             "the connection closed before the handshake finished"
         case let .handshakeTimedOut(seconds):
             "the daemon did not answer the handshake within \(Self.secondsText(seconds))"
+        case let .handshakeWatchdogExpired(seconds):
+            "the handshake did not finish within \(Self.secondsText(seconds)) and was abandoned"
         case let .frame(error):
             error.description
         case let .wire(error):
