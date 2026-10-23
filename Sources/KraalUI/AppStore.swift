@@ -304,11 +304,8 @@ public final class AppStore {
         disconnectAllEndpoints()
         phase = .idle
         surface = nil
-        // The surface this latch was waiting for is gone, so the wait is over. Left
-        // armed, a `connect()` on this same store would start with a latch no
-        // rejection can release — and the handshake is the only other thing that
-        // would have cleared it, which `intentionalStop` can suppress. Stated here
-        // rather than relied upon from `handleWelcome`.
+        // The surface the latch waited for is gone. Left armed, a later `connect()`
+        // would start with a latch nothing can release.
         clearResyncLatch()
     }
 
@@ -781,53 +778,11 @@ public final class AppStore {
     @ObservationIgnored var resyncPending = false
     /// Guards `reprojectSurface` against overlapping toggles.
     @ObservationIgnored var reprojectInFlight = false
-    /// Set when a resync has been requested and not yet paid off by a fresh
-    /// surface.
+    /// Backing store for ``surfaceResyncLatched`` and its counters.
     ///
-    /// This replaces an earlier `resyncInFlight` flag, which could not do the job:
-    /// it cleared as soon as the *request* completed, which is before the fresh
-    /// surface lands, so a baseline that was already diverged (every patch
-    /// rejected) re-armed it immediately. The reconnect branch had no in-flight
-    /// state at all, and `resetBackoff: true` made every rejection restart the
-    /// handshake — a reconnect per frame, forever.
-    ///
-    /// A `resyncPending` flag already existed for the "daemon cannot re-project"
-    /// case in `handleSurface`; it covers a stale *surface*, not a rejected patch,
-    /// so the two are kept apart rather than merged.
-    ///
-    /// Deliberately no single release point any more; the six are documented in
-    /// `AppStore+Events.swift` and split in two kinds:
-    ///
-    ///   `clearResyncLatch()` — the question is *settled* (a surface was adopted or
-    ///     refused on arrival, a handshake landed, the machine changed, the store
-    ///     disconnected, or the request was never sent). Also resets the release
-    ///     budget.
-    ///   `releaseResyncLatch(_:)` — weaker evidence: a surface was dropped by one of
-    ///     `handleSurface`'s early returns, or a snapshot showed the projection was
-    ///     renumbered. Bounded by ``resyncLatchReleaseLimit``, because that evidence
-    ///     is produced by every frame while a resync is in flight.
-    @ObservationIgnored var surfaceResyncLatched = false
-    /// How many times the latch has been released on weaker evidence within one
-    /// settled baseline.
-    ///
-    /// The bound is what keeps the new release points from becoming the old bug
-    /// mirrored: while the client is on projection P and the daemon streams P+1
-    /// (exactly what a resync causes until the snapshot catches up), *every* dropped
-    /// frame is evidence of a moved projection. Releasing unbounded on that evidence
-    /// would turn a stuck latch into one resync per frame. Two is enough for the
-    /// answer to arrive late, and small enough that no amount of churn can amplify
-    /// into a flood. Reset by `clearResyncLatch()`, never by `releaseResyncLatch`.
-    @ObservationIgnored var surfaceResyncLatchReleases = 0
-    /// How many weaker-evidence releases one latch allows. See
-    /// ``surfaceResyncLatchReleases``.
-    static let resyncLatchReleaseLimit = 2
-    /// How many times a rejected patch has asked for a fresh surface.
-    ///
-    /// Diagnostic state, and the only *synchronous* evidence that the recovery path
-    /// ran: the request itself is asynchronous (one command per connection tick),
-    /// so a test cannot assert on the wire without a daemon. Incremented where the
-    /// decision is made, which is also where a real failure would be invisible.
-    @ObservationIgnored public internal(set) var surfaceResyncRequests = 0
+    /// One stored property rather than three: `AppStore` is at swiftlint's body
+    /// limit, and the latch's own state is described in `AppStore+SurfaceResync`.
+    @ObservationIgnored var surfaceResyncState = SurfaceResyncState()
 }
 
 /// Coalescing state for a divider drag.

@@ -243,22 +243,9 @@ public extension AppStore {
         for endpoint in next where !endpoint.enabled {
             disconnectEndpoint(endpoint)
         }
-        // A latch is a promise about *one* connection's surface. This function can
-        // drop the endpoint that latch belongs to (a profile removed or disabled
-        // mid-resync) and can swap the active machine out from under it, and the
-        // handshake that would normally release it may never happen for a machine
-        // that is now gone. Releasing here is the same argument as
-        // `selectEndpoint`'s, applied to the whole catalog rather than one row.
-        //
-        // Cheap and safe: `rebuildEndpoints` runs at launch and after the machines
-        // dialog writes a profile, not per frame. A resync that is still genuinely
-        // in flight on a connection that survives this call loses its latch — it can
-        // ask once more if the divergence persists, which is the same bound the
-        // release budget allows anyway.
         clearResyncLatch()
         endpoints = next
-        // The selected machine may have been removed entirely; fall back to the
-        // local one rather than pointing at a row that no longer exists.
+        // The selected machine may be gone; fall back rather than dangle.
         if let active = activeEndpointID, !kept.contains(active) {
             activeEndpointID = .local
             target = .local
@@ -672,14 +659,10 @@ public extension AppStore {
         activeEndpointID = endpoint.id
 
         // Adopt what the incoming machine already has. Its connection has been
-        // receiving snapshots all along, so this is usually instant — the point
-        // of the whole design.
+        // receiving snapshots all along, so this is usually instant (by design).
         snapshot = endpoint.snapshot ?? snapshot
         surface = nil
         surfaceIsStale = false
-        // Per-machine state, not store state: the latch tracks *this* connection's
-        // outstanding resync. Carrying it across a switch would leave the new
-        // machine unable to ask for its own first resync.
         clearResyncLatch()
         phase = endpoint.status == .online ? .live : .connecting
         welcome = endpoint.welcome ?? welcome
