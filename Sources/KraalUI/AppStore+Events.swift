@@ -20,6 +20,11 @@ extension AppStore {
         kraalLog("welcome: \(welcome.serverVersion) gen=\(welcome.generation)")
         self.welcome = welcome
         resyncPending = false
+        // A handshake is a new connection, so any latched resync belonged to the
+        // old one. Left set, a rejection on this connection would take the
+        // "already requested" path and never ask — the surface would stay diverged
+        // for the life of the connection.
+        surfaceResyncLatched = false
         if phase != .live {
             phase = .live
         }
@@ -170,6 +175,15 @@ extension AppStore {
             // means every row after the first is offset.
             lastError = "surface rejected: \(error)"
             kraalLog("surface: rejected, \(error)")
+            // The latch has to come off here, or it is permanent.
+            //
+            // It is set when a resync is requested and cleared only by a surface
+            // being adopted — and this branch is precisely the one where the
+            // resync's answer gets refused. Left set, every later rejection would
+            // take the "already requested" path below and never ask again: the
+            // screen strands on the diverged baseline with no path back short of
+            // a reconnect.
+            surfaceResyncLatched = false
             return
         }
         let previousPanes = Set(self.surface?.panes.map(\.paneId) ?? [])
@@ -191,16 +205,28 @@ extension AppStore {
             try current.apply(patch)
             surface = current
         } catch {
-            // A rejected patch means our baseline diverged; ask for a fresh
-            // surface rather than showing a corrupt screen.
+            // A rejected patch comes in two flavours, and only one of them is
+            // recoverable by asking for a fresh surface.
             //
-            // The comment has always said this, but the code only recorded an
-            // error: `lastError` is rendered as an icon in the tab bar, and the
-            // screen stayed on the diverged baseline while the daemon kept
-            // patching *its* version of it. A rejection is not self-healing — the
-            // base revision we are missing is only recoverable by asking for the
-            // whole surface again.
+            //   diverged — `patchIdentity` / `patchBeforeBaseline`. Our baseline
+            //     is not the daemon's any more, and no number of further patches
+            //     will make it so. A rejection is not self-healing; the whole
+            //     surface has to be re-sent.
+            //
+            //   refused  — everything else. The frame is fine; the daemon sent
+            //     something this client will not apply (a popup owns the screen, a
+            //     row is out of bounds, a hyperlink index dangles). Re-projecting
+            //     returns the same screen and the same refusal, 60 times a second,
+            //     so the only honest response is to record it.
+            //
+            // The popup case is the one that made this distinction necessary: it
+            // used to be reported as `patchIdentity`, so every popup on screen
+            // turned into a full re-projection per frame.
             lastError = "surface patch rejected: \(error)"
+            guard Self.patchRejectionIsRecoverable(error) else {
+                kraalLog("surface: patch refused (\(error)), not asking for a resync")
+                return
+            }
             if surfaceResyncLatched {
                 // A fresh surface is already on its way; asking again per rejected
                 // frame would be 60 rounds of commands a second. Logged, not sent.
@@ -209,6 +235,23 @@ extension AppStore {
                 kraalLog("surface: patch rejected (\(error)), requesting a fresh surface")
                 resyncSurface()
             }
+        }
+    }
+
+    /// Whether asking for a fresh surface could plausibly fix this rejection.
+    ///
+    /// A pure function so the rule is readable in one place and testable without
+    /// a daemon. Everything not listed is a *refusal*: the daemon's frame is
+    /// intact and re-sending it changes nothing.
+    nonisolated static func patchRejectionIsRecoverable(_ error: any Error) -> Bool {
+        guard let surfaceError = error as? SurfaceError else { return false }
+        return switch surfaceError {
+        case .patchIdentity, .patchBeforeBaseline:
+            true
+        case .patchPopupOpen, .patchRowBounds, .patchRowOverlap, .patchGeometry,
+             .cellCount, .hyperlinkIndex, .cursorBounds, .bootIdMismatch,
+             .unexpectedValidationFailure:
+            false
         }
     }
 
@@ -239,7 +282,17 @@ extension AppStore {
         Task { [weak self] in
             guard let self else { return }
             if supportsSurfaceInterest {
-                await reprojectSurface()
+                // `reprojectSurface` gives up when a toggle is already in flight.
+                // That is not a reason to keep the latch: the in-flight request
+                // was for some *earlier* reason (a tab switch, a split) and
+                // finishes long before our fresh surface would arrive. Keeping the
+                // latch armed on a request that was never sent swallows the next
+                // legitimate one.
+                if await !self.reprojectSurface() {
+                    kraalLog("surface: resync skipped (a re-projection was already in "
+                        + "flight); releasing the latch so the next rejection can ask")
+                    self.surfaceResyncLatched = false
+                }
             } else {
                 scheduleReconnect(resetBackoff: true)
             }

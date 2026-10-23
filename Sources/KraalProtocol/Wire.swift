@@ -303,7 +303,7 @@ public struct FrameData: Equatable, Sendable {
     /// the slice it came from (`Array(slice)` does not share storage). A caller
     /// that already loops per row — `PaneTerminalModel.paneFrame` does — should use
     /// this one and skip both the flattening and the re-chunking; see
-    /// docs/PERFORMANCE.md §8.
+    /// docs/PERFORMANCE.md, "`paneFrame`：本次改动自己制造、又自己还回去的那笔存储拷贝".
     public init(
         buffer: CellBuffer,
         width: UInt16,

@@ -416,8 +416,11 @@ public final class PaneTerminalModel {
     /// rather than flattened into one array and re-split. The flatten-then-chunk
     /// shape copied the pane twice — once into `[CellData]`, once per row by
     /// `Array(slice)` inside `CellBuffer.init(_:width:)`, which does not share
-    /// storage with the slice it comes from. Measured 200x50 full width 99.4 us ->
-    /// 63.1 us, half width 50.9 -> 33.1 us (docs/PERFORMANCE.md §8).
+    /// storage with the slice it comes from. The storage step alone is what that
+    /// removes, and it is the reproducible part: 200x50, 37.5 us -> 0.033 us
+    /// (docs/PERFORMANCE.md, "`paneFrame`：本次改动自己制造、又自己还回去的那笔
+    /// 存储拷贝"). The whole-path timings this comment used to quote could not be
+    /// reproduced independently and were dropped — do not reintroduce them.
     private func paneFrame(
         from surface: PaneSurfaceFrame,
         geometry: PaneSurfacePane

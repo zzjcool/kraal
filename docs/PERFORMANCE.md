@@ -89,10 +89,12 @@ no-op diff      0.33 us（错，共享存储）   →   86.9 us（对，真实�
 探针，不是在测风险）：
 
 ```swift
-let sameBuffer = first.cells.withUnsafeBufferPointer { a in
-    second.cells.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
-}
+let sameBuffer = first.buffer.sharesRow(0, with: second.buffer)
 ```
+
+粒度是**行**而不是整帧，因为 #50 之后 cell 存在一行一个 CoW 数组里（`CellBuffer`）。
+`sharesRow` 就是为此存在的：`Array` 的相等比较会在两侧共享同一块 buffer 时短路，
+而逐格断言看不到这件事。
 
 注入 `first: frame, second: frame` 会让它打印 `YES -> BROKEN` 并以退出码 1 结束
 （已 A/B 验证）。
@@ -300,36 +302,37 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 
 | 观察 | 位置 | 实测成本 |
 |---|---|---|
-| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:130` | 见下：#50 第一版让它多付一次逐行拷贝，现已改为直接交行（33.1 us 半宽 / 62.9 us 全宽） |
+| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:130` | 见下：#50 第一版让它多付一次逐行拷贝，现已改为直接交行。存储单步可复现（37.5 -> 0.033 us）；整条路径的耗时未独立复现，见下节 |
 | `render` 每帧新建 `Data()` 无 `reserveCapacity` | `SurfaceANSIRenderer.swift:58` | 未单独测（整屏 300×80 输出约 90 KB，会有多次扩容） |
 | `linkURI` 每个 cell 都调用，带链接时每次重新 sanitize 整个 URI | `SurfaceANSIRenderer.swift:297` | 未单独测（同一行同一 URI 出现 N 次就 sanitize N 次） |
 | `changedRows` 无单元格级 diff，一行变一格整行重写 | `SurfaceANSIRenderer.swift:164` | 已含在「1 格变化」29.7-257 us 里 |
 
 #### `paneFrame`：本次改动自己制造、又自己还回去的那笔存储拷贝
 
-`paneFrame` 的形态没变（逐格裁一个 pane），变的是「怎么交给 `FrameData`」。三种存储
-形态，同一个进程里跑同一份裁剪逻辑（200×50 网格、一个 200×50 的 pane，release）：
+`paneFrame` 的形态没变（逐格裁一个 pane），变的是「怎么交给 `FrameData`」。
 
-| 形态 | 全宽 200 | 半宽 100 |
-|---|---|---|
-| A 父提交 `4f6056a`：flat `[CellData]` 逐格下标，`FrameData(cells:)` 原样存（O(1)） | 96.1–102.8 us | 49.2–53.2 us |
-| B `311b9db`：按行读进**一个** flat 数组，`FrameData(cells:)` 再切块 | 98.7–104.2 us（+1…3%） | 49.6–53.5 us（+0–1%） |
-| C 本提交：按行读进 `[[CellData]]`，`CellBuffer(rows:width:)` 直接用 | 62.3–65.1 us（**−35%**） | 33.1–34.4 us（**−35%**） |
-
-B 的增量和审查员在忠实模型上量到的 +75% 方向一致，但在这个进程内只有 +1…3%：裁剪本身
-（按行取 + 边界判断）在这台机器上占主导，切块那一次拷贝被压在里面。把存储那一步单独
-抠出来量，差价就干净了：
+**只有存储那一步可以当作结论引用**（同一个进程内可复现）：
 
 ```
 200×50 裁剪结果交给 FrameData，只算存储这一步（release）
-width 200   flat→chunk 40.8–42.3 us    rows→init 0.05–0.07 us   −100%
-width 100   flat→chunk 21.1–22.1 us    rows→init 0.04–0.07 us   −100%
+width 200   flat→chunk 37.5 us    rows→init 0.033 us
 ```
 
-`Array(slice)` 不与源共享存储 —— 这是 B 白付的那笔钱，也是 `CellBuffer(rows:width:)`
-存在的唯一理由。C 相对 A 的 −35% 不是存储省下来的（A 的存储本来就 O(1)），而是 A 走的是
-`frame[column, row]` 的逐格下标、每格都要过一次边界计算；C 按行拿 `ArraySlice` 再按
-offset 读。**两个维度要分开说，别把它们算成一笔。**
+`Array(slice)` 不与源共享存储 —— 这是 `CellBuffer(rows:width:)` 存在的唯一理由，
+也是这次 M4 的核心证据。
+
+> **已删除的归因（未独立复现，不要引用）**
+>
+> 本节早先有一张 A/B/C 三行表（父提交逐格下标 / 按行读进 flat 再切块 / 按行读进
+> `[[CellData]]`），声称 A 是 96.1–102.8 us、C 是 62.3–65.1 us，并把「C 相对 A 的
+> −35%」归因于「A 走逐格下标而 C 走 `ArraySlice`」。
+>
+> 审查员用同形态探针独立复现失败：A 组量到 51.7 / 25.9 us（不是 96.1 / 49.2），
+> 逐格下标 vs 按行读只差 1.5–3.5 us，A→C 的差价是 ~4%（不是 −35%）。数字差近 2 倍，
+> 归因方向也不成立。
+>
+> 结论：**逐格下标不是这次改动的收益来源**，别引用那张表。`paneFrame` 整体时间的
+> 可信范围以 `Scripts/bench.sh` 复测为准；这里只保留可复现的存储单步。
 
 健康、不需要动的部分（同样实测）：
 
@@ -516,7 +519,14 @@ A/B：把 clamp 去掉，`pendingWrapCursorAdopted` 立刻变红（4 条断言�
 `validateGrid` 通过，之后行索引全部错位。
 
 两处一起改：兜底分支改成 `return false`；`PaneSurfaceFrame.apply` 先写进局部
-`var next`，全部成功后才 `frame = next`（存储是 CoW，原子性免费）。
+`var next`，全部成功后才 `frame = next`。
+
+**「原子性免费」是过度声明，已更正。** 实测原子版（`var next = frame` 写副本再发布）
+相对原地写：200×50 多 **+0.069 us（6.3%）**、200×300 多 **+0.41 us（11%）**、
+200×1200 多 **+1.69 us（13.6%）**。原因是原子版让外层 `rows` 数组多搬迁一次，
+而那是 O(高度) 的（见上文「残留成本」）；两个维度作用在同一个数组上，所以会叠加。
+相对旧 flat 数组为同一保证付的 ~40 us 当然便宜得多，但「免费」不成立。
+
 A/B 两次注入：恢复逐格兜底 → 测试红（「期望抛错但没抛」+「buffer 变了」）；
 `apply` 改回非原子 → 也红（「部分写入留在 buffer 里」）。
 

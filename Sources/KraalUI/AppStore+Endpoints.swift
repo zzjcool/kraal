@@ -664,6 +664,10 @@ public extension AppStore {
         snapshot = endpoint.snapshot ?? snapshot
         surface = nil
         surfaceIsStale = false
+        // Per-machine state, not store state: the latch tracks *this* connection's
+        // outstanding resync. Carrying it across a switch would leave the new
+        // machine unable to ask for its own first resync.
+        surfaceResyncLatched = false
         phase = endpoint.status == .online ? .live : .connecting
         welcome = endpoint.welcome ?? welcome
 

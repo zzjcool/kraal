@@ -49,12 +49,19 @@ extension AppStore {
     /// re-evaluates the focused tab on activation, returning the
     /// `projection_revision` it settled on. This is what makes a tab switch
     /// visible on daemons that never send a fresh snapshot on their own.
-    func reprojectSurface() async {
-        guard supportsSurfaceInterest, !reprojectInFlight else { return }
+    ///
+    /// - Returns: `false` when the call was dropped because another toggle was
+    ///   already in flight. The caller has to know: `resyncSurface` latches on the
+    ///   *request*, so a request that never went out has to release the latch or
+    ///   the next legitimate resync is swallowed.
+    @discardableResult
+    func reprojectSurface() async -> Bool {
+        guard supportsSurfaceInterest, !reprojectInFlight else { return false }
         reprojectInFlight = true
         defer { reprojectInFlight = false }
         await call("client_shell.surface.set", ["active": false])
         await call("client_shell.surface.set", ["active": true])
+        return true
     }
 
     /// Issues an endpoint request, reporting failures through `lastError`.

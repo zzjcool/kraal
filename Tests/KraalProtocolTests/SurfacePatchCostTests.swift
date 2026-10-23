@@ -427,11 +427,26 @@ struct CellBufferTests {
         #expect(buffer.count == 12)
         #expect(buffer.rowCount == 3)
         // The initialiser took the row arrays themselves: a second buffer built from
-        // the same `rows` shares every row's storage with the first. A defensive
-        // `row.map { Array($0) }` inside the initialiser would break this, and that
-        // defensive copy is precisely the cost this initialiser exists to avoid.
+        // the same `rows` shares every row's storage with the first.
+        //
+        // **What this catches, and what it does not.** A/B was run by replacing the
+        // initialiser's body with an element-by-element rebuild
+        // (`for cell in row { copy.append(cell) }`): this assertion goes red,
+        // because a rebuilt row is a fresh buffer. It does **not** catch the
+        // defensive copy the comment here used to name — `row.map { Array($0) }` —
+        // because `Array(existingArray)` returns a value that still shares the same
+        // storage. There is no observable difference between that and the identity
+        // assignment, so no assertion on this buffer can distinguish them, and the
+        // claim that this test pins against `Array($0)` was wrong (issue #50
+        // review).
         #expect(buffer.sharesRow(0, with: CellBuffer(rows: rows, width: 4)))
         #expect(buffer.sharesRow(2, with: CellBuffer(rows: rows, width: 4)))
+        // What the initialiser exists to avoid is the *re-chunking* copy: building
+        // from a flat array slices each row out with `Array(slice)`, which does not
+        // share. That difference is real and is what the flat initialiser costs.
+        #expect(!buffer.sharesRow(0, with: CellBuffer(rows[0] + rows[1] + rows[2], width: 4)),
+                Comment(rawValue: "chunking a flat array produced rows that share storage "
+                    + "with the caller's — then the `rows:` initialiser would be pointless"))
         // And the rows are the caller's values, not a builder's leftovers.
         #expect(buffer.flattened.map(\.symbol) == rows.flatMap { $0.map(\.symbol) })
         var mutable = rows
@@ -452,6 +467,39 @@ struct CellBufferTests {
         #expect(buffer.rowCount == 2)
         #expect(buffer.cell(column: 2, row: 1) == nil)
         #expect(buffer.cell(column: 0, row: 1) != nil)
+    }
+
+    /// The flat subscript and `cell(at:)` must agree on a ragged buffer.
+    ///
+    /// `count` is the *sum* of the rows, so it can admit an index the row chunking
+    /// cannot place: `[[a, b], [c]]` at width 3 has count 3, but flat index 2 is
+    /// past the end of row 0. `cell(at:)` answered `nil` there while the subscript
+    /// trapped (`rows[0][2]`), so the same malformed frame crashed one reader and
+    /// not the other. Both now read `.blank`, which is also what an out-of-grid
+    /// cell looks like everywhere else.
+    ///
+    /// The precondition is deliberately kept for an index outside `count`: that is
+    /// a caller bug, not a malformed frame.
+    @Test("a ragged buffer answers a flat index instead of trapping")
+    func flatSubscriptAgreesOnRaggedRows() {
+        let rows: [[CellData]] = [
+            [CellData(symbol: "a", foreground: 0, background: 0, modifier: 0,
+                      skip: false, hyperlink: nil),
+             CellData(symbol: "b", foreground: 0, background: 0, modifier: 0,
+                      skip: false, hyperlink: nil)],
+            [CellData(symbol: "c", foreground: 0, background: 0, modifier: 0,
+                      skip: false, hyperlink: nil)],
+        ]
+        let buffer = CellBuffer(rows: rows, width: 3)
+        #expect(buffer.count == 3)
+        // Flat 2 is "in range" by count, but row 0 is only two cells long.
+        #expect(buffer[2] == .blank,
+                Comment(rawValue: "the flat subscript returned \(buffer[2]) for an index "
+                    + "its row chunking cannot place; before the guard this trapped"))
+        #expect(buffer.cell(at: 2) == nil, "cell(at:) is nil here, so the two disagree")
+        // The indices it can place still read their own cells.
+        #expect(buffer[0].symbol == "a")
+        #expect(buffer[1].symbol == "b")
     }
 
     @Test("buffers with different chunking are still equal when their cells are")

@@ -19,7 +19,8 @@
 // one live copy still relocates the buffer. Only making the *storage* cheap to
 // copy removes it.
 //
-// Two candidate storages were measured (docs/PERFORMANCE.md §8):
+// Two candidate storages were measured (docs/PERFORMANCE.md, "附：本仓库的
+// 性能现状" -> "#50 修掉之后的数字" -> "实际修法" / "残留成本"):
 //
 //   final class CellBuffer  — a plain reference type aliases on copy, so a patch
 //     would write through into the renderer's `previous` and the view's copy.
@@ -49,7 +50,8 @@
 // 200x1200: 12.3 us). The *width* dimension is what the change eliminated.
 // 300x80 costs ~1.7 us per patch, 2% of a frame budget: acceptable, and *not*
 // O(1). Boxing the row array to get rid of it would add a reference indirection
-// to every render read; see docs/PERFORMANCE.md §8.
+// to every render read; see docs/PERFORMANCE.md, "残留成本：与 pane **高度**线性，
+// 不是 O(1)".
 
 public struct CellBuffer: Equatable, Sendable {
     /// One CoW array per row, `rowWidth` cells each (the last may be short).
@@ -86,7 +88,8 @@ public struct CellBuffer: Equatable, Sendable {
     /// Handing them over costs one retain of the outer array instead of
     /// `Array(slice)` per row, which does not share storage with its source and
     /// so is a second full copy of the pane. Measured on the storage step alone,
-    /// 200x50: 40.8-42.3 us -> 0.05-0.07 us (docs/PERFORMANCE.md §8).
+    /// 200x50: 37.5 us -> 0.033 us (docs/PERFORMANCE.md, "`paneFrame`：本次改动
+    /// 自己制造、又自己还回去的那笔存储拷贝").
     ///
     /// - Parameters:
     ///   - rows: one array per row, in frame order.
@@ -147,11 +150,23 @@ public struct CellBuffer: Equatable, Sendable {
     }
 
     /// A flat-index read. Traps outside the buffer, like the array it replaces.
+    ///
+    /// The trap is on `cellCount` on purpose — a caller indexing past the frame
+    /// has a bug, and a silently blank cell would hide it. A **ragged** buffer is
+    /// the other case: `count` is the sum of the rows, so `count` can admit an
+    /// index the row chunking cannot place (`CellBuffer(rows: [[a, b], [c]],
+    /// width: 3)` -> flat 2 is "in range" but lands past row 0). That one is not
+    /// the caller's bug — the frame arrived malformed — so it reads blank, which
+    /// is exactly what ``cell(at:)`` answers for the same index.
     public subscript(index: Int) -> CellData {
         get {
             precondition(index >= 0 && index < cellCount, "cell index \(index) outside \(cellCount)")
-            let rowCells = rows[index / rowWidth]
-            return rowCells[index % rowWidth]
+            let row = index / rowWidth
+            guard row < rows.count else { return .blank }
+            let rowCells = rows[row]
+            let column = index - row * rowWidth
+            guard column < rowCells.count else { return .blank }
+            return rowCells[column]
         }
         set {
             precondition(index >= 0 && index < cellCount, "cell index \(index) outside \(cellCount)")
