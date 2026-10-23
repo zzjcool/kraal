@@ -21,7 +21,20 @@ public enum SSHTransportError: Error, CustomStringConvertible {
     /// silent and a peer that closed must not look the same, which is what made
     /// issue #66 take so long to find.
     case handshakeTimedOut(seconds: TimeInterval, detail: String)
+    /// The remote *spoke* — status lines arrived — but no banner followed.
     case readyBannerMissing(String)
+    /// The remote wrote to stderr and then closed: a `herdr` that exists and
+    /// failed, not a host without one.
+    ///
+    /// Split out of `noRemoteHerdr` by issue #74: a remote whose
+    /// `herdr status client` exited 3 with `boom: cannot read config` on stderr
+    /// was still reported as "not installed, or older than 0.9.0", which sends
+    /// the user looking for a missing binary that is right there. The only case
+    /// that may claim "not installed" is the one where the remote said nothing
+    /// at all — the bridge script prints every candidate's stderr and nothing
+    /// else, so silence there really does mean no usable `herdr` was found.
+    case remoteHerdrFailed(String)
+    /// The remote closed without a banner *and* without a word on stderr.
     case noRemoteHerdr(String)
     case processFailed(status: Int32, stderr: String)
 
@@ -34,11 +47,19 @@ public enum SSHTransportError: Error, CustomStringConvertible {
                 + "\(Self.secondsText(seconds)). \(detail)"
         case let .readyBannerMissing(output):
             "The remote host answered, but not with a Herdr bridge banner: \(output)"
+        case let .remoteHerdrFailed(detail):
+            Self.message("Herdr is installed on the remote host, but it failed to start the bridge:", detail)
         case let .noRemoteHerdr(detail):
-            "Herdr is not installed on the remote host, or it is older than 0.9.0. \(detail)"
+            Self.message("Herdr is not installed on the remote host, or it is older than 0.9.0.", detail)
         case let .processFailed(status, stderr):
             "ssh exited with status \(status). \(stderr)"
         }
+    }
+
+    /// Joins a fixed sentence with whatever the remote said, without leaving a
+    /// dangling space when the remote said nothing.
+    private static func message(_ sentence: String, _ detail: String) -> String {
+        detail.isEmpty ? sentence : "\(sentence) \(detail)"
     }
 
     /// Whole numbers read as "30s", fractions keep one decimal ("0.5s") so a
@@ -196,16 +217,28 @@ public final class SSHProcessTransport: @unchecked Sendable {
 
         // The bridge closed without a banner: that is a reportable failure of the
         // remote side, not a timeout.
+        //
+        // Which failure it is comes down to stderr. The bridge script writes a
+        // candidate's diagnostics to stderr and nothing else, so a non-empty
+        // stderr means a `herdr` was found and then refused to report its status
+        // — saying "not installed" there would be false (issue #74).
         let stderr = drainStderr()
         if process.isRunning {
             process.terminate()
         }
-        if !statusLines.isEmpty {
+        let said = statusLines.suffix(3).joined(separator: " | ")
+        // Status lines first: if `herdr status client --json` produced output the
+        // binary is demonstrably there, so "installed, but the banner never came"
+        // is the fact — stderr at that point is context, not the diagnosis.
+        if !said.isEmpty {
             throw SSHTransportError.readyBannerMissing(
-                "\(statusLines.suffix(3).joined(separator: " | ")) \(stderr)"
+                stderr.isEmpty ? said : "\(said) \(stderr)"
             )
         }
-        throw SSHTransportError.noRemoteHerdr(stderr)
+        if !stderr.isEmpty {
+            throw SSHTransportError.remoteHerdrFailed(stderr)
+        }
+        throw SSHTransportError.noRemoteHerdr("")
     }
 
     /// Splits complete lines out of `pending`; `true` once the ready banner
