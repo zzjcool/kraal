@@ -86,10 +86,12 @@ extension AppStore {
     ///
     /// Ghostty returns encoded bytes; they are translated into semantic events
     /// here so they can travel on the endpoint connection. The decoder holds
-    /// partial escape sequences between calls, hence one per pane.
+    /// partial escape sequences between calls, hence one per pane — and one per
+    /// *machine*, because pane ids repeat across daemons.
     public func sendInput(_ data: Data, to paneId: String?) {
         guard let paneId else { return }
-        var decoder = inputDecoders[paneId] ?? TerminalInputDecoder()
+        let key = decoderKey(for: paneId)
+        var decoder = inputDecoders[key] ?? TerminalInputDecoder()
         // Fresh each call: the program can toggle report-all at any moment, and a
         // decoder captured once would keep answering with the old mode.
         decoder.reportsAllKeys = keyboardReportAll
@@ -101,7 +103,7 @@ extension AppStore {
                 events.append(escape)
             }
         }
-        inputDecoders[paneId] = decoder
+        inputDecoders[key] = decoder
         guard !events.isEmpty else { return }
 
         Task {
@@ -111,6 +113,16 @@ extension AppStore {
                 lastError = "\(error)"
             }
         }
+    }
+
+    /// Which decoder a terminal's bytes belong to.
+    ///
+    /// The machine half is the daemon's `boot_id`, taken from the surface the
+    /// terminal is drawn from. Before the first snapshot there is no boot id; the
+    /// empty string is then a single "unknown machine" bucket, which is the same
+    /// behaviour as the old pane-id-only key for that one startup moment.
+    private func decoderKey(for terminal: String) -> InputDecoderKey {
+        InputDecoderKey(machine: surface?.bootId ?? "", terminal: terminal)
     }
 
     /// Sends pasted text to a pane as a paste, not as keystrokes.
@@ -124,19 +136,21 @@ extension AppStore {
     ///
     /// Encodes keystroke bytes for a popup and sends them to that terminal.
     ///
-    /// The decoder table is shared with the panes, keyed by terminal id. Pane ids and
-    /// popup terminal ids are different namespaces (`w1:p1` vs a terminal id), so one
-    /// dictionary is enough — and it has to be one, because the decoder holds
-    /// half-parsed escape sequences between calls and a popup that typed part of an
-    /// escape sequence must not have it completed against a pane's state.
+    /// The decoder table is shared with the panes, keyed by `(machine, terminal)`.
+    /// Pane ids and popup terminal ids are different namespaces (`w1:p1` vs a
+    /// terminal id), so one dictionary is enough — and it has to be one, because
+    /// the decoder holds half-parsed escape sequences between calls and a popup
+    /// that typed part of an escape sequence must not have it completed against a
+    /// pane's state.
     public func sendPopupInput(_ data: Data, terminalId: String) {
-        var decoder = inputDecoders[terminalId] ?? TerminalInputDecoder()
+        let key = decoderKey(for: terminalId)
+        var decoder = inputDecoders[key] ?? TerminalInputDecoder()
         decoder.reportsAllKeys = keyboardReportAll
         var events = decoder.decode(data)
         if events.isEmpty, let escape = decoder.flushEscape() {
             events.append(escape)
         }
-        inputDecoders[terminalId] = decoder
+        inputDecoders[key] = decoder
         guard !events.isEmpty else { return }
 
         Task {

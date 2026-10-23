@@ -67,6 +67,17 @@ else
     CLIENT_SOCKET="$SCRATCH/herdr-client.sock"
     HERDR_HOME="$SCRATCH/herdr-home"
 fi
+# Where the fixture's saved-machine roster lives. Separate from HERDR_HOME on
+# purpose: `herdr machine` reads `~/.local/state/herdr/client/endpoints.json` under
+# `$HOME`, not under the socket directory, so isolating the daemon does not
+# isolate the roster. `KRAAL_HERDR_HOME` is what the app passes to its `herdr`
+# child, so pointing both at this one directory makes the fixture's machines the
+# only machines either side can see.
+if [ "$BACKEND" = "vm" ]; then
+    ROSTER_HOME="$VM_ROOT/roster-home"
+else
+    ROSTER_HOME="$SCRATCH/roster-home"
+fi
 DRIVER="$ROOT/.build/out/Products/Debug/KraalGUIDriver"
 HOST_ARTIFACTS="$ROOT/artifacts"
 if [ "$BACKEND" = "vm" ]; then
@@ -211,6 +222,17 @@ vm_deploy() {
         | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf -" \
         || die "failed to push herdr-api.py into the guest"
 
+    # The `kraal` CLI. The machines fixture reads a daemon's `boot` id with it: pane
+    # ids repeat across daemons (both machines have a `w1:p1`), so the boot id is the
+    # only cheap proof that two roster entries are two servers. It is a debug binary
+    # that already exists after `swift build`, so this costs one tar and no build.
+    local kraal_cli="$ROOT/.build/out/Products/Debug/kraal"
+    if [ -x "$kraal_cli" ]; then
+        tar -czf - -C "$(dirname "$kraal_cli")" kraal \
+            | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf - && chmod +x $VM_ROOT/kraal" \
+            || die "failed to push the kraal CLI into the guest"
+    fi
+
     # `type -P` and not `command -v`: this file defines a `herdr()` wrapper, and
     # inside that scope `command -v herdr` returns the *function* name, so the tar
     # below looked for a file called "herdr" in a directory called nothing.
@@ -224,7 +246,7 @@ vm_deploy() {
     # signature but the quarantine attribute would make Gatekeeper refuse it.
     tart exec "$VM" /bin/bash -lc \
         "xattr -dr com.apple.quarantine $VM_APP 2>/dev/null; true" >/dev/null 2>&1
-    ok "deployed driver + Kraal.app + herdr"
+    ok "deployed driver + Kraal.app + herdr + kraal CLI"
 }
 
 # Copies the artefacts the guest produced back to the host.
@@ -530,7 +552,7 @@ launch_app() {
     case "$BACKEND" in
     local)
         KRAAL_HERDR_SOCKET="$CLIENT_SOCKET" \
-        KRAAL_HERDR_HOME="$HERDR_HOME" \
+        KRAAL_HERDR_HOME="$ROSTER_HOME" \
         KRAAL_DEV_BACKGROUND="$background" \
         KRAAL_DEV_SESSION="$SESSION" \
         nohup "$ROOT/build/Kraal.app/Contents/MacOS/KraalMac" \
@@ -543,7 +565,7 @@ launch_app() {
         tart exec "$VM" /bin/bash -lc \
             "pkill -f '$VM_APP/Contents/MacOS/KraalMac' 2>/dev/null; sleep 1
              cd $VM_ROOT
-             KRAAL_HERDR_SOCKET=$CLIENT_SOCKET KRAAL_HERDR_HOME=$HERDR_HOME \
+             KRAAL_HERDR_SOCKET=$CLIENT_SOCKET KRAAL_HERDR_HOME=$ROSTER_HOME \
              KRAAL_DEV_BACKGROUND=$background KRAAL_DEV_SESSION=$SESSION \
              nohup $VM_APP/Contents/MacOS/KraalMac > $VM_ROOT/app.out 2>&1 </dev/null &
              disown 2>/dev/null
@@ -1602,6 +1624,392 @@ case_paste() {
     }
 }
 
+# ---------------------------------------------------------------- machines
+#
+# Two machines on one box, reached the way the product reaches a remote machine:
+# a second daemon behind `ssh <this host> herdr remote-client-begin`, driven by a
+# roster that lives in a scratch HOME.
+#
+# Why this does not need a second VM or a container: `herdr --session <name>` is a
+# whole separate daemon — its own socket, its own boot id, its own panes — and
+# `herdr machine add` prepares such a session for you (it starts the daemon). The
+# guest's sshd is already running, so loopback SSH is the transport under test.
+#
+# Facts this fixture depends on, all measured against herdr 0.9.5:
+#
+#   * `machine add` only accepts a session daemon that IT started. A daemon started
+#     by hand is refused with "remote server is not ready for saved machines", even
+#     with HERDR_MACOS_SERVER_CONTEXT=user + HERDR_SESSION. So: never start one by
+#     hand; let `add` do it, and reset with `herdr --session X server stop` + `rm`.
+#   * saved machines use strict host-key checking, so `known_hosts` must be seeded
+#     first. Kraal's own SSH pass uses `accept-new`; the CLI's preflight does not.
+#   * the roster is `~/.local/state/herdr/client/endpoints.json` under `$HOME`, so
+#     `KRAAL_HERDR_HOME` isolates it. The app already honours that (KraalMacMain).
+#
+# The roster is written by `machine add` rather than by hand: hand-writing it works
+# for reading, but the fixture should exercise the same write path the panel does.
+
+# Runs a command in the guest (or here) with the machine fixture's HOME.
+roster_cmd() {
+    case "$BACKEND" in
+    local) env HOME="$ROSTER_HOME" herdr "$@" ;;
+    vm) tart exec "$VM" /bin/bash -lc \
+        "HOME=$ROSTER_HOME $VM_ROOT/bin/herdr $*" ;;
+    esac
+}
+
+# The SSH target the fixture's machines point at: this host, over loopback.
+#
+# The user name is *not* `id -un` on the host: under the vm backend the machine
+# being added is the guest, whose own account is `admin`, and adding
+# `zheng@127.0.0.1` there fails authentication. Resolving it inside the backend
+# is the only spelling that is right for both.
+fixture_ssh_target() {
+    local user
+    case "$BACKEND" in
+    local) user=$(id -un) ;;
+    vm) user=$(tart exec "$VM" /bin/bash -lc 'id -un' 2>/dev/null | tr -d '\r\n') ;;
+    esac
+    [ -n "$user" ] || return 1
+    printf '%s@127.0.0.1' "$user"
+}
+
+# The roster as `label<TAB>session` lines — what the sidebar is supposed to show.
+roster_labels() {
+    roster_cmd machine list --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    machines = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+for machine in machines:
+    print(machine["label"] + "\t" + (machine.get("session") or ""))
+'
+}
+
+# The API socket of one of the fixture's machine daemons.
+#
+# Two sockets, two audiences: `herdr-client.sock` speaks the inary endpoint
+# protocol Kraal uses, `herdr.sock` is what the `herdr` CLI speaks. Reading a pane
+# count with the *client* socket answers `EmptyResponse` — measured, not guessed:
+#
+#   HERDR_SOCKET_PATH=…/herdr-client.sock herdr pane list
+#   -> Error: Custom { kind: Other, error: EmptyResponse }
+#
+# So a CLI assertion must point at `herdr.sock` and a Kraal/probe assertion at
+# `herdr-client.sock`; the same `<session>/` directory holds both.
+#
+# Deliberately NOT under `$ROSTER_HOME`: `machine add` puts the roster under
+# `$HOME` but prepares the remote session in the account's real
+# `~/.config/herdr/sessions/<name>` (issue #75). Hard-coding the scratch path here
+# was what made boot ids read as `none` while `machine status` said `reachable`.
+machine_socket() {
+    printf '%s/.config/herdr/sessions/%s/%s' "$1" "$2" "$3"
+}
+
+machine_client_socket() { machine_socket "$1" "$2" herdr-client.sock; }
+machine_api_socket() { machine_socket "$1" "$2" herdr.sock; }
+
+# The home the fixture's daemons actually live in: the real one, on both backends.
+machine_home() {
+    case "$BACKEND" in
+    local) printf '%s' "$HOME" ;;
+    vm) tart exec "$VM" /bin/bash -lc 'printf %s "$HOME"' 2>/dev/null | tr -d '\r\n' ;;
+    esac
+}
+
+# "<label> head=<boot id>" for every session daemon the fixture runs.
+# The boot id is what proves two machines are two daemons; pane ids are not
+# enough, because both machines will have a `w1:p1`.
+fixture_boots() {
+    local real_home
+    real_home=$(machine_home) || return 1
+    local label session
+    roster_labels | while IFS=$'\t' read -r label session; do
+        [ -n "$session" ] || continue
+        local boot client
+        client=$(machine_client_socket "$real_home" "$session")
+        case "$BACKEND" in
+        local)
+            boot=$("$ROOT/.build/out/Products/Debug/kraal" \
+                --socket "$client" probe --timeout 12 2>/dev/null \
+                | sed -n 's/^boot \([^ ]*\).*/\1/p')
+            ;;
+        vm)
+            boot=$(tart exec "$VM" /bin/bash -lc \
+                "$VM_ROOT/kraal --socket $client probe --timeout 12" \
+                2>/dev/null | sed -n 's/^boot \([^ ]*\).*/\1/p')
+            ;;
+        esac
+        printf '%s head=%s\n' "$label" "${boot:-none}"
+    done
+}
+
+# Pane count on one of the fixture's machines (`machine_panes alpha-a`).
+machine_panes() {
+    local session
+    session=$(roster_labels | awk -F'\t' -v want="$1" '$1 == want { print $2; exit }')
+    [ -n "$session" ] || { echo ""; return 1; }
+    local real_home
+    real_home=$(machine_home) || { echo ""; return 1; }
+    case "$BACKEND" in
+    local)
+        env HERDR_SOCKET_PATH="$(machine_api_socket "$real_home" "$session")" \
+            herdr pane list 2>/dev/null \
+            | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["panes"]))'
+        ;;
+    vm)
+        tart exec "$VM" /bin/bash -lc \
+            "HERDR_SOCKET_PATH=$real_home/.config/herdr/sessions/$session/herdr.sock $VM_ROOT/bin/herdr pane list" \
+            2>/dev/null \
+            | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["panes"]))'
+        ;;
+    esac
+}
+
+# Loopback SSH for the guest's own sshd, plus the known_hosts entry the CLI's
+# strict host-key checking demands. Idempotent.
+machines_prereqs() {
+    local script='
+set -e
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519
+cp ~/.ssh/id_ed25519.pub ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+ssh-keyscan -t ed25519 127.0.0.1 >> ~/.ssh/known_hosts 2>/dev/null || true
+sort -u -o ~/.ssh/known_hosts ~/.ssh/known_hosts
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
+    "$(id -un)@127.0.0.1" true
+'
+    case "$BACKEND" in
+    local) bash -lc "$script" >/dev/null 2>&1 ;;
+    vm) tart exec "$VM" /bin/bash -lc "$script" >/dev/null 2>&1 ;;
+    esac
+}
+
+# Stops anything this fixture started. Called by every machines case's cleanup
+# hook so a failed run does not leave daemons behind, and again at the start of
+# each fixture: a failed run must not make the next one fail for its own mess
+# (the first attempt at this case inherited `alpha-a` from an aborted run and
+# reported three roster entries where it expected two).
+#
+# The session directories have to be removed from `$HOME/.config/herdr/sessions`,
+# NOT from $ROSTER_HOME. Measured: `herdr machine add` writes the roster under
+# `$HOME` (so KRAAL_HERDR_HOME isolates it) but prepares the *remote* session in
+# the account's real `~/.config/herdr/sessions/<name>` — neither `HOME` nor
+# `XDG_CONFIG_HOME` moves it. So the roster half is isolated and the session half
+# is not, and a teardown that only deletes $ROSTER_HOME leaves live daemons and
+# stale entries in `herdr session list` behind (issue #75).
+machines_teardown() {
+    local session
+    roster_labels 2>/dev/null | while IFS=$'\t' read -r _ session; do
+        [ -n "$session" ] || continue
+        case "$BACKEND" in
+        local)
+            env HERDR_SOCKET_PATH="$ROSTER_HOME/.config/herdr/sessions/$session/herdr.sock" \
+                herdr server stop >/dev/null 2>&1
+            ;;
+        vm)
+            tart exec "$VM" /bin/bash -lc \
+                "HERDR_SOCKET_PATH=$ROSTER_HOME/.config/herdr/sessions/$session/herdr.sock $VM_ROOT/bin/herdr server stop" \
+                >/dev/null 2>&1
+            ;;
+        esac
+    done
+    case "$BACKEND" in
+    local) rm -rf "$ROSTER_HOME" ;;
+    vm) tart exec "$VM" /bin/bash -lc "rm -rf $ROSTER_HOME" >/dev/null 2>&1 ;;
+    esac
+    # The part `$HOME` does not move: the real account's session directories.
+    local sessions='for s in fx-alpha fx-beta; do
+        HERDR_SOCKET_PATH="$HOME/.config/herdr/sessions/$s/herdr.sock" herdr server stop >/dev/null 2>&1
+        rm -rf "$HOME/.config/herdr/sessions/$s"
+    done'
+    case "$BACKEND" in
+    local) bash -lc "$sessions" >/dev/null 2>&1 ;;
+    vm)
+        tart exec "$VM" /bin/bash -lc \
+            "for s in fx-alpha fx-beta; do
+                 $VM_ROOT/bin/herdr --session \$s server stop >/dev/null 2>&1
+                 rm -rf \$HOME/.config/herdr/sessions/\$s
+             done" >/dev/null 2>&1
+        ;;
+    esac
+}
+
+# The window-relative point to click for a sidebar row whose text is `label`.
+#
+# Two facts make this necessary rather than nice:
+#
+#   1. The repo writes no `accessibilityIdentifier`s, and SwiftUI puts a `Text`'
+#      content in `AXValue` — so the row is addressable by *value*, not by title
+#      (issue #71).
+#   2. `onTapGesture` responds to real clicks only; an `AXPress` does nothing, so
+#      the row cannot be "pressed" and the case must synthesise a click.
+#
+# Hence: read the row's screen frame from AX, subtract the window origin, click.
+# A hard-coded y broke the first version: with two workspaces on Local, the machine
+# rows sat lower and the click landed on Local's own row, so the case failed with
+# "the split landed on alpha-a" while the product was fine.
+sidebar_row_point() {
+    local label="$1" ax window_x window_y
+    ax=$(driver ax --json --depth 22 2>/dev/null) || return 1
+    printf '%s' "$ax" | LABEL="$label" python3 -c '
+import json, os, sys
+label = os.environ["LABEL"]
+tree = json.load(sys.stdin)
+nodes = tree["nodes"]
+hit = None
+for node in nodes:
+    if node.get("value") == label and node.get("role") == "AXStaticText":
+        frame = node.get("frame") or {}
+        if "x" in frame and frame["x"] < 260:
+            hit = frame
+            break
+if hit is None:
+    sys.exit(1)
+print(hit["x"] + 20, hit["y"] + hit["h"] // 2)
+' || return 1
+}
+
+# Machines in the sidebar, by clicking a machine row and checking which daemon
+# the next command lands on.
+#
+# The assertion is daemon-side on purpose: the row is a SwiftUI `Text`, so it has
+# no AXTitle (only AXValue), and `SELECT * FROM pixels` is not a gate. What a
+# machine row *means* is "commands from now on go to that daemon", and that is
+# observable through `pane list` on the second machine.
+# The roster must exist BEFORE the app launches, because the app reads it exactly
+# once at startup (and again only when Settings writes a profile). `fixture` runs
+# after `launch_app`, which is right for daemon state and wrong for this: building
+# the roster there had the app draw an empty list while the file on disk held both
+# entries — issue #69's reload gap, hit from the harness side.
+#
+# Top level, not nested in the case: a nested function only exists once the outer
+# one runs, and this hook has to run before it. (The same trap the `daemon_config`
+# comment below documents.)
+case_machines_switch_app_setup() {
+    machines_teardown           # start from an empty roster, always
+    machines_prereqs || { echo "loopback ssh unavailable"; return 1; }
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label alpha-a \
+        >/dev/null 2>&1 || { echo "machine add alpha-a failed for $target"; return 1; }
+    roster_cmd machine add "$target" --remote-session fx-beta --label alpha-b \
+        >/dev/null 2>&1 || { echo "machine add alpha-b failed for $target"; return 1; }
+    # Both machines must be reachable before the case is meaningful; a roster
+    # entry that never connects would make the switch assertion vacuous.
+    local statuses
+    statuses=$(roster_cmd machine status 2>/dev/null)
+    printf '%s\n' "$statuses" | grep -q 'reachable' || {
+        echo "no machine reported reachable: $(printf '%s' "$statuses" | head -c 200)"
+        return 1
+    }
+    return 0
+}
+
+case_machines_switch() {
+    requires() { echo focus; }
+    fixture() {
+        # The daemon fixture only: a pane to split, and the roster already in place.
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        [ "$(roster_labels | wc -l | tr -d ' ')" = "2" ] || {
+            echo "the app_setup hook did not leave two machines in the roster"
+            return 1
+        }
+        return 0
+    }
+    action() {
+        # Two machine rows sit under the `machines` heading, after Local's own
+        # workspace rows. Locate the row by its text instead of by a remembered y:
+        # Local's workspace count changes the offsets, and the first version of this
+        # case clicked a workspace row while everything else was correct.
+        local window_x window_y point
+        window_x=$(driver window 2>&1 | sed -n 's/.*x=\([-0-9]*\).*/\1/p')
+        window_y=$(driver window 2>&1 | sed -n 's/.*y=\([-0-9]*\).*/\1/p')
+        point=$(sidebar_row_point alpha-b) || {
+            echo "no sidebar row with value alpha-b (issue #71: rows are AXValue only)"
+            return 1
+        }
+        driver click --at "$(( ${point% *} - window_x )),$(( ${point#* } - window_y ))"
+        sleep 3
+    }
+    assert() {
+        local before_a after_a before_b after_b
+        before_a=$(machine_panes alpha-a)
+        before_b=$(machine_panes alpha-b)
+        check "both fixture machines are real daemons" \
+            "$([ -n "$before_a" ] && [ -n "$before_b" ] && echo 0 || echo 1)" \
+            "alpha-a=$before_a panes, alpha-b=$before_b panes" || return 1
+
+        # The switch's whole job: the next command goes to the other daemon.
+        # alpha-b is the row the action clicked, so its pane count is the one that
+        # must grow — a command that quietly stayed on alpha-a would be the bug.
+        driver press --title "Split Right" >/dev/null 2>&1
+        sleep 3
+        after_a=$(machine_panes alpha-a)
+        after_b=$(machine_panes alpha-b)
+        check "the split landed on the selected machine" \
+            "$([ "$after_b" = "$((before_b + 1))" ] && [ "$after_a" = "$before_a" ] && echo 0 || echo 1)" \
+            "alpha-a $before_a->$after_a, alpha-b $before_b->$after_b"
+    }
+}
+
+# The roster the app draws must match the roster on disk. This is the read half
+# of the machines panel, and it is the assertion that catches the sidebar showing
+# a stale list (the reload trigger is the bug in #69).
+case_machines_roster_app_setup() {
+    machines_teardown           # start from an empty roster, always
+    machines_prereqs || return 1
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label roster-a \
+        >/dev/null 2>&1 || return 1
+    roster_cmd machine add "$target" --remote-session fx-beta --label roster-b \
+        >/dev/null 2>&1 || return 1
+    return 0
+}
+
+case_machines_roster() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        [ "$(roster_labels | wc -l | tr -d ' ')" = "2" ] || {
+            echo "the app_setup hook did not leave two machines in the roster"
+            return 1
+        }
+        return 0
+    }
+    action() {
+        # Nothing to click: the roster is read at launch, which is one of the two
+        # moments the app actually reloads it.
+        sleep 2
+    }
+    assert() {
+        local expected heads
+        expected=$(roster_labels | cut -f1 | sort)
+        check "the roster has both saved machines" \
+            "$([ "$(printf '%s\n' "$expected" | wc -l | tr -d ' ')" = "2" ] && echo 0 || echo 1)" \
+            "$(printf '%s' "$expected" | tr '\n' ' ')" || return 1
+
+        # Two distinct boot ids is the claim "these are two daemons", which is what
+        # makes the case worth running at all — and it is also the setup every
+        # later cross-machine assertion depends on.
+        heads=$(fixture_boots | sed -n 's/.*head=//p' | sort -u)
+        check "the two machines are different daemons" \
+            "$([ "$(printf '%s\n' "$heads" | wc -l | tr -d ' ')" = "2" ] && echo 0 || echo 1)" \
+            "$(printf '%s' "$heads" | tr '\n' ' ')"
+
+        # The app logged the roster it loaded; that line is the app's own account
+        # of what it drew, and it exists precisely because the sidebar has no AX
+        # text to read (issue #71).
+        local log="$host_dir/kraal.log"
+        check "the app loaded the same two machines" \
+            "$(grep -aq 'endpoints: 2 saved machine(s)' "$log" 2>/dev/null && echo 0 || echo 1)" \
+            "$(grep -ao 'endpoints: .*' "$log" 2>/dev/null | tail -1)"
+    }
+}
+
 # ---------------------------------------------------------------- runner# ---------------------------------------------------------------- runner
 
 # Reads a case's declared requirement without executing the case.
@@ -1657,6 +2065,17 @@ run_case() {
     # the outer one runs, and the hook has to run before that. Asking bash to run
     # `case_popup_config` when it may not exist is fine — nothing happens.
     daemon_config() { "case_${name//-/_}_config" 2>/dev/null || true; }
+
+    # The *app's* pre-start hook: state that has to exist before Kraal launches,
+    # because Kraal reads it exactly once at launch.
+    #
+    # The machines roster is the case that forced this. `fixture` runs after
+    # `launch_app`, which is right for a daemon fixture (a fresh daemon has no
+    # panes) and wrong for anything the app reads at startup: the case asked for
+    # two saved machines, the app had already listed an empty roster, and the
+    # assertion failed with "endpoints: 0 saved machine(s)" even though the roster
+    # on disk had both. That is issue #69's reload gap seen from the harness side.
+    app_setup() { "case_${name//-/_}_app_setup" 2>/dev/null || true; }
 
     local run_id
     run_id="$(date +%Y%m%d-%H%M%S)-$name"
@@ -1729,6 +2148,7 @@ run_case() {
     # under a live app leaves it connected to a socket nobody is listening on.
     daemon_config
     start_daemon
+    app_setup
     launch_app
 
     # These are host-side shell redirections, so they must target host_dir: under
@@ -1843,6 +2263,11 @@ JSON
 
     stop_app
     stop_daemon
+    # Only the machines cases create session daemons; calling this unconditionally
+    # would run `herdr machine list` for every other case and slow the gate down.
+    case "$name" in
+    machines-*) machines_teardown ;;
+    esac
 
     if [ "$code" -eq 0 ]; then
         ok "$name passed (panes $before -> $after)"
@@ -1853,7 +2278,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch"; }
 
 # ---------------------------------------------------------------- entrypoint
 
