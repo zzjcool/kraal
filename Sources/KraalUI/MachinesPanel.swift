@@ -120,11 +120,16 @@ public final class MachinesStore {
             return
         }
         perform(done: done) {
-            try client.add(
+            let output = try client.add(
                 target: trimmedTarget,
                 label: label.isEmpty ? nil : label,
                 remoteSession: remoteSession.isEmpty ? nil : remoteSession
             )
+            kraalLog(addReport(
+                target: trimmedTarget,
+                session: remoteSession.isEmpty ? HerdrDiscovery.defaultSession : remoteSession,
+                output: output
+            ))
         }
     }
 
@@ -181,6 +186,34 @@ public final class MachinesStore {
             }
         }
     }
+}
+
+/// The log line written after a machine is added, holding the CLI's text verbatim.
+///
+/// Issue #70 wanted "this session did not exist, it was just created" to be
+/// visible. That fact is **not** in the CLI's output, so it is not inferred here:
+///
+///  - every successful `machine add` prints the same two lines
+///    (`Saved SSH machine <id>. Remote server is ready.` / `Open Herdr clients
+///    connect automatically.` — herdr 0.9.5 `src/cli/machine.rs:388-389`);
+///  - with `--remote-session` supplied, the CLI never queries the remote's
+///    session list first (that happens only when the flag is omitted *and* stdin
+///    is a terminal), so it does not know either;
+///  - the session is created by `remote-client-bridge` on the remote side, whose
+///    output is consumed as a status probe and never printed.
+///
+/// So the raw text is recorded instead of a guess. A wrong "session was just
+/// created" banner would be exactly the kind of confident-but-unfounded claim
+/// this repository keeps paying for.
+func addReport(target: String, session: String, output: String) -> String {
+    // Every line the CLI printed is kept; newlines are folded to ` | ` so the
+    // entry stays one line per event in the log file.
+    let lines = output
+        .split(separator: "\n", omittingEmptySubsequences: true)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+    let body = lines.isEmpty ? "<herdr said nothing>" : lines.joined(separator: " | ")
+    return "machines: add \(target) session=\(session) -> \(body)"
 }
 
 // MARK: - Panel
