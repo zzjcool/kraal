@@ -184,8 +184,46 @@ public struct SurfaceANSIRenderer {
     /// value makes the "reset at end of row" rule explicit and keeps `appendRow`
     /// within the parameter limit.
     private struct RowStream {
-        var lastStyle: String?
+        /// The style of the last cell written, as its **raw** fields.
+        ///
+        /// Deliberately not the encoded SGR string: deciding whether a style
+        /// changed must not allocate. Comparing encoded strings meant running
+        /// `StyleCode.encode` for every cell and throwing the result away for all
+        /// but the ~1 cell per run that starts a new style (issue #49). Raw
+        /// `UInt32`/`UInt16` fields compare in a few instructions.
+        var lastStyle: CellStyleKey?
         var activeLink: String?
+    }
+
+    /// Everything `StyleCode.encode` reads, exactly as the cell stores it.
+    ///
+    /// Two cells with equal keys produce equal SGR, which is the only property
+    /// the renderer needs: it decides *whether* to encode, and `encode` still
+    /// does the encoding. Deriving the key from raw fields rather than from the
+    /// encoded string is what makes the check free.
+    ///
+    /// Equality here is deliberately finer than SGR equality, never coarser.
+    /// `TerminalColor.init(raw:)` folds unknown tags to `named(0)`, so two
+    /// different `foreground` values can encode to the same SGR; treating those
+    /// as "changed" costs one redundant SGR write, while the reverse (treating
+    /// two different SGRs as equal) would drop a colour. `reversed` needs no
+    /// special case: it is a modifier bit and the fg/bg swap is a function of
+    /// the two fields already in the key.
+    ///
+    /// `internal` rather than `private` so tests can hold the one invariant that
+    /// makes skipping safe: equal SGR implies equal key (see
+    /// `CellStyleEncodingTests.styleKeyNeverCollapsesDistinctStyles`). That test
+    /// keys a dictionary by it, so it is `Hashable` as well as `Equatable`.
+    struct CellStyleKey: Hashable {
+        var foreground: UInt32
+        var background: UInt32
+        var modifier: UInt16
+
+        init(cell: CellData) {
+            foreground = cell.foreground
+            background = cell.background
+            modifier = cell.modifier
+        }
     }
 
     private func appendRow(
@@ -219,10 +257,10 @@ public struct SurfaceANSIRenderer {
                 output: &output
             )
 
-            let style = StyleCode.encode(cell)
+            let style = CellStyleKey(cell: cell)
             if style != stream.lastStyle {
                 output.appendUTF8("\u{1B}[0")
-                output.appendUTF8(style)
+                output.appendUTF8(StyleCode.encode(cell))
                 output.appendUTF8("m")
                 stream.lastStyle = style
             }
@@ -239,7 +277,7 @@ public struct SurfaceANSIRenderer {
             output.appendUTF8("\u{1B}]8;;\u{1B}\\")
             stream.activeLink = nil
         }
-        if stream.lastStyle != nil, stream.lastStyle != StyleCode.encode(.blank) {
+        if let lastStyle = stream.lastStyle, lastStyle != CellStyleKey(cell: .blank) {
             output.appendUTF8("\u{1B}[0m")
             stream.lastStyle = nil
         }

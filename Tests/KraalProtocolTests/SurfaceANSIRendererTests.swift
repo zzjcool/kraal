@@ -11,6 +11,10 @@
 // Split out of ProtocolTests.swift once that file passed the 900-line lint
 // limit — the renderer had grown enough state (frame diffing, clear policy, sync
 // wrapping, cursor hiding) to justify its own file anyway.
+//
+// The SGR side (what a style encodes to, and the key that decides whether it
+// needs re-encoding) lives in CellStyleEncodingTests.swift, split out when this
+// type passed swiftlint's 400-line body limit.
 
 import Foundation
 import Testing
@@ -515,20 +519,5 @@ struct SurfaceANSIRendererTests {
         let text = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
         // Row 2, column 7 (0-based) → CUP `3;8`.
         #expect(text.contains("\u{1B}[3;8H"), "expected the bottom-right fallback: \(text)")
-    }
-
-    @Test("colors use the non-ARGB encoding in SGR output")
-    func colorEncoding() {
-        let trueColor = CellData(
-            symbol: "z",
-            foreground: 0x020A_141E,
-            background: 0x0100_00FF,
-            modifier: 0,
-            skip: false,
-            hyperlink: nil
-        )
-        let code = StyleCode.encode(trueColor)
-        #expect(code.contains("38;2;10;20;30"))
-        #expect(code.contains("48;5;255"))
     }
 }
