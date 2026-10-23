@@ -414,7 +414,9 @@ struct PatchRefusalTests {
     /// classification every other frame.
     ///
     /// A/B: drop the revision claim in the refusal branch and this goes red with
-    /// "2 resyncs" (one per identity flap) instead of 0.
+    /// "1 resync" instead of 0 — not 2, because the latch then stays armed and the
+    /// later identity flaps only log "already requested". The first assertion that
+    /// fires is the revision one on frame 1, so the red comes before that.
     @Test("a patch refused every frame with an advancing base never resyncs")
     @MainActor
     func popupRefusalDoesNotResync() throws {

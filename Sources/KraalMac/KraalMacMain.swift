@@ -245,12 +245,18 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         //
         // One consequence worth naming: a patch the store *refused* still claims its
         // frame number (issue #50 review), so `surfaceRevision` can advance with the
-        // popup's cells unchanged. `applyPopup` then repaints a few hundred identical
-        // cells once per refused frame — bounded by the refusal itself, and cheaper
-        // than the resync-per-other-frame it replaces. It is deliberately not
-        // optimised against: a popup grid compares by value, so the guard would have
-        // to scan it to prove nothing changed, which costs about what painting it
-        // does.
+        // popup's cells unchanged. `applyPopup` then does its full first-frame path —
+        // `renderer.reset()`, a `CSI 2J 3J H` clear and a whole-grid render
+        // (`PaneTerminal.applyPopup`) — once per refused frame. Note what `3J` means:
+        // the popup's scrollback goes with it, so this is a visible flash, not a
+        // repaint of a few hundred identical cells.
+        //
+        // Left unoptimised on purpose: `frameGrid` compares by value, so a guard could
+        // prove nothing changed only by scanning the grid and then comparing it cell by
+        // cell — and a refusal only reaches this branch for errors the daemon does not
+        // actually produce (a popup open on the daemon side, or a malformed row),
+        // so the path is unreachable in practice. If it ever becomes reachable, guard
+        // on `frameGrid == frame` *before* `lastRevision` instead of widening this.
         model.applyPopup(frame: popup.frame, revision: surface.surfaceRevision)
         return AnyView(GhosttyPopupView(model: model, terminalId: popup.terminalId))
     }

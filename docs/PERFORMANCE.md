@@ -489,18 +489,20 @@ hyperlinks 数组**，所以它不可能让未被触碰的行的索引失效。
 `resyncInFlight` 因窗口被 latch 严格包含而删掉（留着它反而会让
 第二个 guard 吞掉更晚的合法请求）。
 
-**latch 的复位点（2026-10-23 收尾修正，共 6 处）**。原文写的是「在**新的 surface
+**latch 的复位点（2026-10-23 收尾修正；7 个 `clearResyncLatch()` + 2 个
+`releaseResyncLatch(_:)` 调用点）**。原文写的是「在**新的 surface
 被采纳**时才复位」，那是不完整的：一次 resync 的答案经常根本走不到「被采纳」这一步。
 现在的分类与复位点：
 
 | 事件 | 复位方式 | 理由 |
 | --- | --- | --- |
-| `handleSurface` 采纳了新 surface | `clearResyncLatch()` | 问题已解决，预算归零 |
-| `handleSurface` **拒绝了**到达帧（校验失败） | `clearResyncLatch()` | 答案到了但不可用；不带它永远无法再问 |
-| `handleSurface` 两条早退（投影已不是当前 / revision 回退） | `releaseResyncLatch()` | 答案**被丢弃**：这是 resync 的常规落点，不是异常 |
-| `handleSnapshot` 里 revision 前进 / focused tab 变了 / boot 变了 | `releaseResyncLatch()` | 投影被重编号（`client_shell.surface.set` 的回复先于 surface 到达） |
-| `handleWelcome`（新连接） | `clearResyncLatch()` | latch 属于旧连接 |
-| `selectEndpoint` / `rebuildEndpoints` / `disconnect` | `clearResyncLatch()` | 那条连接/那台机器的语境没了 |
+| `handleSurface` 采纳了新 surface（`AppStore+Events.swift:244`） | `clearResyncLatch()` | 问题已解决，预算归零 |
+| `handleSurface` **拒绝了**到达帧（`:234`） | `clearResyncLatch()` | 答案到了但不可用；不带它永远无法再问 |
+| `handleSurface` 两条早退（`:169` / `:182`，经 `noteDroppedResyncAnswer`） | `releaseResyncLatch()` | 答案**被丢弃**：这是 resync 的常规落点，不是异常 |
+| `handleSnapshot` 里 revision 前进 / focused tab 变了 / boot 变了（`:119` / `:138`） | `release` / `clear` | 投影被重编号（`client_shell.surface.set` 的回复先于 surface 到达）；新 boot 则是旧语境彻底没了 |
+| `handleWelcome`（`:29`，新连接） | `clearResyncLatch()` | latch 属于旧连接 |
+| `selectEndpoint`（`AppStore+Endpoints.swift:589`）/ `rebuildEndpoints`（`:236`）/ `disconnect`（`AppStore.swift:257`） | `clearResyncLatch()` | 那条连接/那台机器的语境没了 |
+| 请求根本没发出去（`:480`，`reprojectSurface` 返回 false，被在飞的 toggle 吞掉） | `clearResyncLatch()` | 没问过，就没有问题待了结 |
 
 `releaseResyncLatch` 与 `clearResyncLatch` 是**两个**函数，不是笔误：前者用于「证据较弱」
 的路径，受 `resyncLatchReleaseLimit`（2）约束 —— 因为 resync 在飞的时候客户端停在投影
@@ -509,7 +511,7 @@ P 而 daemon 在推 P+1，**每一帧**都是「投影动了」的证据，无�
 
 ### H1（收尾）：拒绝也必须认领帧号
 
-`Surface.swift:230` 的 `surfaceRevision = patch.surfaceRevision` 只在**成功**路径，所以
+`Surface.swift:232` 的 `surfaceRevision = patch.surfaceRevision` 只在**成功**路径，所以
 任何被拒的 patch 都让客户端 revision 落后一帧，而 daemon 照常提交该帧。下一帧的
 `baseSurfaceRevision` 就是 N+1，于是 identity guard 先命中 `patchIdentity`（可恢复类），
 发出一次 resync —— 「系统性拒绝不 resync」于是变成「拒绝/分叉交替」，每两帧翻一次。
@@ -524,7 +526,11 @@ patch；本客户端的 optional codecs 也默认关。所以「一次 popup 一
 分类逻辑里的不一致，只是它的触发条件在当前 daemon 上够不到。
 
 顺带纠正一条旧说法：「拒绝即无副作用」不再成立（revision 会前进）。已复核三处受 revision
-影响的决策，见 `handleSurfacePatch` 里那段注释与 `PERFORMANCE.md` 本节的复核小节。
+影响的决策，见 `handleSurfacePatch` 里那段注释（它们不在这里重复，因为写得比这张表长）。
+
+还有一条代价没写进那张表：认领帧号后，**非 popup 类拒绝失去了唯一的自动恢复出口**——
+它们现在既不重绘也不 resync，只写 `lastError`。当前不可达（herdr 0.9.5 的 retained 路径
+在几何/hyperlink 变化时直接 fallback 整帧），若将来 daemon 行为变了，要重新评估这条。
 
 ### 第四笔（审查修正）：到达帧校验差点变成「屏幕定格」
 
