@@ -510,7 +510,7 @@ private func performViewAction(
     case .reloadConfig: store.reloadServerConfig()
     case .keyboardShortcuts: env.showShortcuts()
     case .settings: env.showSettings()
-    case .reconnect: store.connect()
+    case .reconnect: store.reconnectAllEndpoints()
     default: break
     }
 }

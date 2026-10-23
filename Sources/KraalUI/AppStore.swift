@@ -160,6 +160,25 @@ public final class AppStore {
     /// See `Tests/KraalClientTests/CrossMachineInputTests.swift`.
     @ObservationIgnored var inputDecoders: [InputDecoderKey: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
+    /// How long the UI waits for one machine's handshake before abandoning it
+    /// (issue #67). See `AppStore.startHandshake` and
+    /// `ConnectionLimits.handshakeWatchdog`.
+    ///
+    /// Injectable so a test can prove the watchdog fires without spending the
+    /// production 45 s — the same reason `EndpointConnection` takes its handshake
+    /// timeout as an init parameter.
+    @ObservationIgnored var handshakeWatchdog =
+        ConnectionLimits.handshakeWatchdog
+    /// What `HerdrDiscovery.resolve` reads when turning an endpoint's saved
+    /// settings into a dialable target.
+    ///
+    /// Injectable for the same reason `handshakeWatchdog` is: a test that had to
+    /// rely on the ambient environment would either dial the developer's own
+    /// daemon or depend on one being absent. `HerdrDiscovery.resolve` already
+    /// takes the environment as a parameter, so this only stops it defaulting to
+    /// `ProcessInfo`.
+    @ObservationIgnored var discoveryEnvironment =
+        ProcessInfo.processInfo.environment
     /// The identity of an input decoder: which machine's terminal.
     ///
     /// `machine` is the daemon's `boot_id`, the same namespace `PaneTerminalPool`

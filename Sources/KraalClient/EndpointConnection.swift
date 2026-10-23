@@ -49,6 +49,25 @@ public enum ConnectionLimits {
     public static let handshakeTimeout: TimeInterval = 10
     public static let commandTimeout: TimeInterval = 60
     public static let maxResponseBytes = FrameLimits.maxResponseBytes
+
+    /// How long the *UI* waits for one machine's handshake before giving up on it
+    /// and starting over, whatever the connection is doing (issue #67).
+    ///
+    /// Every layer below already has its own bound: the local socket arms
+    /// `SO_RCVTIMEO` with `handshakeTimeout`, the SSH bridge has a 30 s ready
+    /// deadline, and `start()` re-checks its own deadline between reads. This
+    /// constant exists **because that is a delegation and delegations rot**: a
+    /// new unbounded read, or one blocking step added to `StreamFactory.open`,
+    /// puts the dead state straight back with nothing above it to notice. Which
+    /// is exactly what happened once already — #66 was "the deadline is only
+    /// checked between reads", and the fix was inside the connection. The
+    /// watchdog is the layer that does not trust the ones under it.
+    ///
+    /// Larger than what it backstops, on purpose: 30 s SSH ready handshake + 10 s
+    /// endpoint handshake, plus slack. If it fired first it would abort
+    /// handshakes that are still legitimately inside their own budgets, turning a
+    /// slow machine into a failing one.
+    public static let handshakeWatchdog: TimeInterval = 45
 }
 
 public actor EndpointConnection {
@@ -74,6 +93,15 @@ public actor EndpointConnection {
     private nonisolated(unsafe) var rawFrames: [Data] = []
     private nonisolated(unsafe) var framesDecoder = FrameDecoder()
     private nonisolated(unsafe) var stream: ProtocolStream?
+    /// Set by `abort()`, guarded by `framesLock`.
+    ///
+    /// Closing the stream only interrupts a read that is *already* parked. A
+    /// watchdog that fires in the moment between `StreamFactory.open` returning
+    /// and `start()` storing the stream would find nothing to close and the read
+    /// that follows would park until its own deadline — the whole point of the
+    /// watchdog, gone in a one-instruction window. The flag is checked after the
+    /// stream is stored, so either order aborts.
+    private nonisolated(unsafe) var aborted = false
 
     private var welcome: EndpointServerWelcome?
     private var bootId: String?
@@ -130,9 +158,9 @@ public actor EndpointConnection {
         guard !isRunning else { return }
 
         let stream = try StreamFactory.open(target, handshakeTimeout: handshakeTimeout)
-        framesLock.lock()
-        self.stream = stream
-        framesLock.unlock()
+        guard try claimStream(stream) else {
+            throw BridgeError.transport("connection aborted before the handshake started")
+        }
         isRunning = true
 
         let hello = EndpointClientHello(
@@ -678,5 +706,61 @@ extension EndpointConnection {
         } catch {
             // A failed ping is handled by the read loop's EOF/error path.
         }
+    }
+}
+
+// MARK: - Aborting from outside the actor
+
+extension EndpointConnection {
+    /// Drops the stream from outside the actor, so a `start()` parked in a
+    /// blocking read returns instead of waiting for its own deadline.
+    ///
+    /// **Not the same thing as `stop()`**, and the difference is the whole point
+    /// (issue #67). `stop()` is actor-isolated: while `start()` is parked in a
+    /// blocking `read(2)` the actor is occupied, so `stop()` queues *behind* the
+    /// call it is meant to interrupt. Measured on this Mac, against a peer that
+    /// accepts and then says nothing, with `handshakeTimeout: 20`:
+    ///
+    ///     [ 0.32s] calling stop() (fire and forget)
+    ///     ...                                        (stop() never returned)
+    ///     [20.00s] outcome: ["timeout-3s", "beats done"]   <- only after start() timed out itself
+    ///
+    /// So "the UI calls `stop()` when its watchdog fires" does not work: it runs
+    /// after the deadline it was supposed to replace. Closing the stream is what
+    /// a parked read actually notices — measured directly: after
+    /// `shutdown(SHUT_RDWR)` + `close()` on the same fd from another thread, the
+    /// blocked `read` returned `-1 errno=9` (EBADF) immediately. This entry point
+    /// does exactly that, under the same `framesLock` that `teardown` uses for the
+    /// field, and clears it so the stream is closed once rather than twice.
+    ///
+    /// `start()` then sees EOF and throws, which is the ordinary failure path: the
+    /// caller's `catch` runs its normal cleanup. Deliberately not a second
+    /// teardown — `isRunning` is actor state and is left for the `stop()` the
+    /// caller issues next, which the actor is now free to run.
+    public nonisolated func abort() {
+        framesLock.lock()
+        aborted = true
+        let stream = self.stream
+        self.stream = nil
+        framesLock.unlock()
+        stream?.close()
+    }
+
+    /// Stores the freshly opened stream, or closes it and says so when the
+    /// watchdog already fired.
+    ///
+    /// The two-step dance — claim, then read the flag — is what closes the window
+    /// between `StreamFactory.open` returning and the stream becoming reachable by
+    /// `abort()`. Either order aborts: an `abort()` before this call is seen by the
+    /// flag, one after finds the stream.
+    private func claimStream(_ stream: ProtocolStream) throws -> Bool {
+        framesLock.lock()
+        defer { framesLock.unlock() }
+        guard !aborted else {
+            stream.close()
+            return false
+        }
+        self.stream = stream
+        return true
     }
 }
