@@ -186,12 +186,14 @@ public extension PaneSurfaceFrame {
     /// The cells are written into a copy and published only once every row has
     /// landed. That used to need a deliberate backup because the write could fail
     /// halfway; with row-chunked CoW storage the copy is one retain per row, so
-    /// atomicity is cheap — but **not free**: the copy relocates the outer `rows`
-    /// array once more than an in-place write does (one retain per row, i.e. the
-    /// same O(height) residual described in `CellBuffer`). Measured against the
-    /// in-place form at 200 columns: +0.069 us at 50 rows (6.3%), +0.41 us at 300
-    /// (11%), +1.69 us at 1200 (13.6%) — versus the ~40 us the flat array paid for
-    /// the same guarantee. No partial state can exist even for a moment.
+    /// atomicity is cheap. **How cheap is not a number this comment can give**: the
+    /// percentages it used to quote (+6.3% at 50 rows, +11% at 300, +13.6% at 1200)
+    /// never had a probe behind them, and `./Scripts/bench.sh patch`'s
+    /// copy-then-publish vs write-in-place pair now measures no stable difference —
+    /// at tall sizes the direction even reverses. See docs/PERFORMANCE.md, "第五笔",
+    /// for the per-size numbers and why the old ones are not quoted any more.
+    /// What `apply` guarantees concretely: no partial state can exist even for a
+    /// moment, and the untouched rows stay the same buffers as before the call.
     mutating func apply(_ patch: PaneSurfacePatch) throws {
         try validatePatch(patch)
 

@@ -483,12 +483,48 @@ hyperlinks 数组**，所以它不可能让未被触碰的行的索引失效。
 就走它，没有就重握手），并用 `surfaceResyncRequests` 暴露给测试。
 
 **这一笔补过一次（审查发现）**：第一版没有 latch。`resyncInFlight` 在**请求完成**
-时就清掉，而刷新后的 surface 要更晚才到 —— 分叉期间每个被拒的 patch（60/s）都会
+时就清掉，而刷新后的 surface 要更晚才到 —— 分叉期间每个被拒的 patch 都会
 再发一轮两条命令；旧 daemon 那条分支更糟，没有 in-flight 状态，`resetBackoff: true`
 每次把 `reconnectAttempt` 归零并断开端点，等于每秒重连一次、永不停止。
-现在 `surfaceResyncLatched` 在**新的 surface 被 `handleSurface` 采纳**时才复位，
-期间拒绝只记日志。`resyncInFlight` 因窗口被 latch 严格包含而删掉（留着它反而会让
+`resyncInFlight` 因窗口被 latch 严格包含而删掉（留着它反而会让
 第二个 guard 吞掉更晚的合法请求）。
+
+**latch 的复位点（2026-10-23 收尾修正，共 6 处）**。原文写的是「在**新的 surface
+被采纳**时才复位」，那是不完整的：一次 resync 的答案经常根本走不到「被采纳」这一步。
+现在的分类与复位点：
+
+| 事件 | 复位方式 | 理由 |
+| --- | --- | --- |
+| `handleSurface` 采纳了新 surface | `clearResyncLatch()` | 问题已解决，预算归零 |
+| `handleSurface` **拒绝了**到达帧（校验失败） | `clearResyncLatch()` | 答案到了但不可用；不带它永远无法再问 |
+| `handleSurface` 两条早退（投影已不是当前 / revision 回退） | `releaseResyncLatch()` | 答案**被丢弃**：这是 resync 的常规落点，不是异常 |
+| `handleSnapshot` 里 revision 前进 / focused tab 变了 / boot 变了 | `releaseResyncLatch()` | 投影被重编号（`client_shell.surface.set` 的回复先于 surface 到达） |
+| `handleWelcome`（新连接） | `clearResyncLatch()` | latch 属于旧连接 |
+| `selectEndpoint` / `rebuildEndpoints` / `disconnect` | `clearResyncLatch()` | 那条连接/那台机器的语境没了 |
+
+`releaseResyncLatch` 与 `clearResyncLatch` 是**两个**函数，不是笔误：前者用于「证据较弱」
+的路径，受 `resyncLatchReleaseLimit`（2）约束 —— 因为 resync 在飞的时候客户端停在投影
+P 而 daemon 在推 P+1，**每一帧**都是「投影动了」的证据，无上限地释放就是把 latch 卡死
+换成「每帧一次 resync」（H1 的反向形态）。后者只用于「问题已了结」的路径，预算归零。
+
+### H1（收尾）：拒绝也必须认领帧号
+
+`Surface.swift:230` 的 `surfaceRevision = patch.surfaceRevision` 只在**成功**路径，所以
+任何被拒的 patch 都让客户端 revision 落后一帧，而 daemon 照常提交该帧。下一帧的
+`baseSurfaceRevision` 就是 N+1，于是 identity guard 先命中 `patchIdentity`（可恢复类），
+发出一次 resync —— 「系统性拒绝不 resync」于是变成「拒绝/分叉交替」，每两帧翻一次。
+
+现在不可恢复分支在拒掉 cells 的同时**认领帧号**（不动 cells）：daemon 的 baseline 确实
+前进了，客户端是「决定不跟这一帧的 cells」，而不是「落后了」。
+
+**这条是「防未来 / 防其它 daemon 配置」，不是「修掉了一个每帧 flood」。** 对 herdr 0.9.5，
+retained-patch 路径在 popup 打开时直接 fallback 到整帧渲染，daemon 根本不在 popup 期间发
+patch；本客户端的 optional codecs 也默认关。所以「一次 popup 一分钟 = 3600 轮命令」是
+**推演，未在真实 daemon 上复现**（仓库规矩：不把推测写成实测）。被修的是一个真实存在于
+分类逻辑里的不一致，只是它的触发条件在当前 daemon 上够不到。
+
+顺带纠正一条旧说法：「拒绝即无副作用」不再成立（revision 会前进）。已复核三处受 revision
+影响的决策，见 `handleSurfacePatch` 里那段注释与 `PERFORMANCE.md` 本节的复核小节。
 
 ### 第四笔（审查修正）：到达帧校验差点变成「屏幕定格」
 
@@ -521,11 +557,30 @@ A/B：把 clamp 去掉，`pendingWrapCursorAdopted` 立刻变红（4 条断言�
 两处一起改：兜底分支改成 `return false`；`PaneSurfaceFrame.apply` 先写进局部
 `var next`，全部成功后才 `frame = next`。
 
-**「原子性免费」是过度声明，已更正。** 实测原子版（`var next = frame` 写副本再发布）
-相对原地写：200×50 多 **+0.069 us（6.3%）**、200×300 多 **+0.41 us（11%）**、
-200×1200 多 **+1.69 us（13.6%）**。原因是原子版让外层 `rows` 数组多搬迁一次，
-而那是 O(高度) 的（见上文「残留成本」）；两个维度作用在同一个数组上，所以会叠加。
-相对旧 flat 数组为同一保证付的 ~40 us 当然便宜得多，但「免费」不成立。
+**「原子性免费」是过度声明，但这组百分比也一并废了（不可复现）。**
+
+曾写过：原子版（`var next = frame` 写副本再发布）相对原地写 200×50 多 +0.069 us
+（6.3%）、200×300 +0.41 us（11%）、200×1200 +1.69 us（13.6%），并归因于「原子版让
+外层 `rows` 数组多搬迁一次」。
+
+**这组数字没有探针，而且已复现不出来。** 2026-10-23 收尾时在 `bench.sh patch` 段加了
+一条对照（copy-then-publish vs write-in-place，只算存储那一步，两臂都留一个活引用
+防止优化器删掉复制），三次运行的结果是：
+
+| 尺寸 | copy-then-publish | write-in-place | 差值 |
+|---|---|---|---|
+| 80×24 | 0.55–0.58 us | 0.53–0.57 us | 噪声以内 |
+| 200×50 | 1.30–1.47 us | 1.25–1.35 us | 0–0.2 us（≈0–15%，但方向不稳定） |
+| 300×80 | 1.46–1.58 us | 1.49–1.56 us | 噪声以内 |
+| 200×300 | 3.90–4.11 us | 4.24–4.44 us | **反向**（原地写更慢） |
+| 200×1200 | 12.4–14.5 us | 12.8–15.3 us | **反向**（原地写更慢） |
+
+结论只能写成定性的：**原子版没有可稳定测出的额外代价，也没有「随高度增长」的趋势**。
+原来那组「+6.3% / +11% / +13.6%」不再引用——它们在对照探针里复现不出来，且高行数处
+方向是反的。机制上也可以解释：`var next = frame` 只多一次外层数组值的 retain，而
+`write(_:at:)` 本来就要为被改的那一行做一次 CoW 复制，两者不是同一量级。
+
+要重新提这个问题，先跑 `./Scripts/bench.sh patch` 看最后那段对照，不要引用历史数字。
 
 A/B 两次注入：恢复逐格兜底 → 测试红（「期望抛错但没抛」+「buffer 变了」）；
 `apply` 改回非原子 → 也红（「部分写入留在 buffer 里」）。

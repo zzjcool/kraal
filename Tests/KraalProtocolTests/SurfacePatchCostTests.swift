@@ -475,8 +475,9 @@ struct CellBufferTests {
     /// cannot place: `[[a, b], [c]]` at width 3 has count 3, but flat index 2 is
     /// past the end of row 0. `cell(at:)` answered `nil` there while the subscript
     /// trapped (`rows[0][2]`), so the same malformed frame crashed one reader and
-    /// not the other. Both now read `.blank`, which is also what an out-of-grid
-    /// cell looks like everywhere else.
+    /// not the other. Both now treat the index as unplaceable; the *types* differ
+    /// because they must — the optional says "no cell" with `nil`, and the
+    /// subscript's `CellData` has no way to express missing, so it answers `.blank`.
     ///
     /// The precondition is deliberately kept for an index outside `count`: that is
     /// a caller bug, not a malformed frame.
@@ -496,7 +497,9 @@ struct CellBufferTests {
         #expect(buffer[2] == .blank,
                 Comment(rawValue: "the flat subscript returned \(buffer[2]) for an index "
                     + "its row chunking cannot place; before the guard this trapped"))
-        #expect(buffer.cell(at: 2) == nil, "cell(at:) is nil here, so the two disagree")
+        #expect(buffer.cell(at: 2) == nil,
+                Comment(rawValue: "cell(at:) must answer 'no cell' here; the two readers "
+                    + "agree on the verdict and differ only in how their types say it"))
         // The indices it can place still read their own cells.
         #expect(buffer[0].symbol == "a")
         #expect(buffer[1].symbol == "b")

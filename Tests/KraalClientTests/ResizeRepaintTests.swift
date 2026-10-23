@@ -388,6 +388,50 @@ struct ScreenResetScopeTests {
         ))
     }
 
+    /// A refused patch now advances `surfaceRevision` while the cells stay put
+    /// (issue #50 review). Every repaint decision must treat that frame as
+    /// "nothing to paint" — not as a missed frame and not as a reset.
+    ///
+    /// The three decisions that a revision feeds, asserted together because they
+    /// have to agree: `PaneTerminalModel.apply(surface:)` keys on the pane's own
+    /// `contentRevision`, the grid and the cells (never the surface revision); the
+    /// renderer's `changedRows` only runs when a render happens at all; and
+    /// `needsRepaint` returns false. The cost that *is* real is one crop per pane and
+    /// one popup repaint per claimed frame — those are re-run because the surface
+    /// value changed, and they draw nothing new. Recorded here so a later change to
+    /// any of the three cannot quietly turn a claimed revision into a repaint.
+    @Test("an advanced surface revision with unchanged cells repaints nothing")
+    func claimedRevisionPaintsNothing() {
+        let grid = (width: 98, height: 35)
+        // The pane's own contentRevision did not move: a refused patch carried no
+        // new cells, so the daemon did not bump it either.
+        #expect(!SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: grid,
+            currentGrid: grid,
+            cellsDiffer: false
+        ), "a claimed revision made the pane repaint")
+
+        // The projection cannot have changed: a refused patch never crosses one
+        // (`handleSurfacePatch` drops foreign-projection patches before this point).
+        // Explicitly typed rather than `.init(...)`: the parameter is optional, and a
+        // discarded `Optional` context would make this assert against `nil` (which
+        // `projectionChanged` treats as "first frame ever", i.e. always changed).
+        let sameProjection = SurfaceGeometry.ProjectionIdentity(bootId: "boot-1", revision: 3)
+        #expect(!SurfaceGeometry.projectionChanged(
+            previous: sameProjection,
+            current: sameProjection
+        ), "a claimed revision was mistaken for a new projection")
+
+        // And it is not a restarted delta stream, so nothing may wipe the screen.
+        #expect(!SurfaceGeometry.deltaStreamRestarted(previousRevision: 7, incomingRevision: 7))
+        #expect(!SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: grid,
+            currentGrid: grid
+        ), "a claimed revision triggered a screen reset")
+    }
+
     /// The guard has to hold for the exact shape of a Return press: same grid,
     /// cursor one row lower. Pinned as a pair because the two answers together are
     /// what the fix is — reset only when the grid moves, and never when only the

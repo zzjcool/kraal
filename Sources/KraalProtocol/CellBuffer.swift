@@ -156,8 +156,12 @@ public struct CellBuffer: Equatable, Sendable {
     /// the other case: `count` is the sum of the rows, so `count` can admit an
     /// index the row chunking cannot place (`CellBuffer(rows: [[a, b], [c]],
     /// width: 3)` -> flat 2 is "in range" but lands past row 0). That one is not
-    /// the caller's bug — the frame arrived malformed — so it reads blank, which
-    /// is exactly what ``cell(at:)`` answers for the same index.
+    /// the caller's bug — the frame arrived malformed — so it reads blank. The two
+    /// readers express the same *verdict* — "no cell here" — in the only way their
+    /// types allow: ``cell(at:)`` returns `nil` (an optional can say "missing"), the
+    /// subscript returns `.blank` (a `CellData` cannot). They are not interchangeable
+    /// values and were never meant to be; the malformed frame is what they agree is
+    /// unplaceable.
     public subscript(index: Int) -> CellData {
         get {
             precondition(index >= 0 && index < cellCount, "cell index \(index) outside \(cellCount)")
@@ -226,7 +230,8 @@ public struct CellBuffer: Equatable, Sendable {
     /// every other row is the *same buffer*, not an equal copy. Exposed because a
     /// timing assertion cannot prove that and a value-equality assertion cannot
     /// see it — `scripts/bench.sh` and the tests use this instead (see
-    /// docs/PERFORMANCE.md §2 on probes that measure the wrong thing).
+    /// docs/PERFORMANCE.md §1b, "两份数据不能共享存储", on why an equality check
+    /// cannot answer this).
     ///
     /// Public rather than `internal` + `@testable` because `Scripts/bench.sh`
     /// links the release library and imports it like any other client, so its

@@ -24,7 +24,9 @@
 #      from a decoded frame where every cell owns its string. The numbers moved
 #      by 3x between the two shapes. Frames here are built cell by cell.
 #
-# Both traps are written down in docs/PERFORMANCE.md §2.
+# Both traps are written down in docs/PERFORMANCE.md — §1 ("没被消费的结果会被删掉")
+# for the optimiser deleting the work, §2 ("合成数据要和真实数据同形") for the
+# repeating-cell frame.
 #
 # A third trap is shape, not code: a frame's *style count* changes the cost of
 # rendering it by 7x once issue #49 was fixed. `decodedFrame` cycles colours so
@@ -416,7 +418,7 @@ if mode == "all" || mode == "patch" {
     //
     // The view's copy is what makes this honest: with no second reference alive
     // the optimiser can prove the published copy is unobservable and the loop
-    // measures nothing (docs/PERFORMANCE.md §2).
+    // measures nothing (docs/PERFORMANCE.md §1, "没被消费的结果会被删掉").
     header("-- one patch, 1 cell, with a view holding a copy of the surface --")
     for (label, width, height) in sizes {
         var surface = decodedSurface(width, height)
@@ -478,6 +480,67 @@ if mode == "all" || mode == "patch" {
         measure("\(label) validate()", iterations: 3000) {
             try? frame.validate()
             sink &+= 1
+        }
+    }
+    // The cost of `apply`'s atomicity: write into a local copy and publish once,
+    // versus write straight into the stored value.
+    //
+    // This exists because the numbers this comment used to quote (`+0.069 us` at
+    // 200x50 and friends) had no probe behind them, and an independent reviewer
+    // measured a different order of magnitude. A claim about the *cost of a code
+    // shape* needs a probe with both shapes in it, not an inference from the shape
+    // that shipped — see docs/PERFORMANCE.md §3 ("拆到能单独归因").
+    //
+    // Deliberately measures the storage step only: `apply`'s validation is shared
+    // by both shapes, so including it would dilute the difference being measured.
+    // Both arms hold a second reference for the whole loop, for the same reason the
+    // patch section does — with one reference alive the optimiser deletes the copy
+    // and the atomic arm reports the in-place cost (§1).
+    header("-- atomicity: copy-then-publish vs write-in-place, one 1-cell row write --")
+    // The tall sizes are here on purpose: the doc this replaced claimed the cost
+    // grows with *height* (+6.3% at 50 rows, +11% at 300, +13.6% at 1200), which is
+    // a claim about the outer row array being relocated one extra time. Probing only
+    // the 24/50/80-row sizes could not have found that.
+    let atomicitySizes = sizes + [("200x300", 200, 300), ("200x1200", 200, 1200)]
+    for (label, width, height) in atomicitySizes {
+        for atomic in [true, false] {
+            var frame = decodedFrame(width, height)
+            var viewHolds = frame
+            var cell = CellData(
+                symbol: "x", foreground: 1, background: 2, modifier: 0,
+                skip: false, hyperlink: nil
+            )
+            let iterations = 3000
+            for _ in 0 ..< 300 {
+                cell.foreground = 1
+                if atomic {
+                    var next = frame
+                    next.buffer.write([cell], at: Int(width) + 1)
+                    frame = next
+                } else {
+                    frame.buffer.write([cell], at: Int(width) + 1)
+                }
+                viewHolds = frame
+            }
+            let start = DispatchTime.now().uptimeNanoseconds
+            for iteration in 0 ..< iterations {
+                cell.foreground = UInt32(iteration % 8)
+                if atomic {
+                    var next = frame
+                    next.buffer.write([cell], at: Int(width) + 1)
+                    frame = next
+                } else {
+                    frame.buffer.write([cell], at: Int(width) + 1)
+                }
+                viewHolds = frame
+                // Consume both references, or the copy is dead code (§1).
+                sink &+= UInt64(frame.buffer[1].foreground)
+                sink &+= UInt64(viewHolds.buffer[1].symbol.utf8.count)
+            }
+            let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
+                / Double(iterations) / 1000.0
+            emit("\(label) \(atomic ? "copy-then-publish" : "write-in-place")",
+                 us: micros, fps: 1_000_000.0 / micros)
         }
     }
 }

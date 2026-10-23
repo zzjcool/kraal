@@ -242,6 +242,15 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         // A popup has no revision of its own on the wire, so the parent surface's is
         // used: the popup's grid only changes when the surface is re-projected, and
         // repainting identical cells every frame would be wasteful at 60 Hz.
+        //
+        // One consequence worth naming: a patch the store *refused* still claims its
+        // frame number (issue #50 review), so `surfaceRevision` can advance with the
+        // popup's cells unchanged. `applyPopup` then repaints a few hundred identical
+        // cells once per refused frame — bounded by the refusal itself, and cheaper
+        // than the resync-per-other-frame it replaces. It is deliberately not
+        // optimised against: a popup grid compares by value, so the guard would have
+        // to scan it to prove nothing changed, which costs about what painting it
+        // does.
         model.applyPopup(frame: popup.frame, revision: surface.surfaceRevision)
         return AnyView(GhosttyPopupView(model: model, terminalId: popup.terminalId))
     }

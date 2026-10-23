@@ -390,19 +390,35 @@ struct StorePatchTests {
 @Suite("Patch refusal handling (issue #50 review)")
 struct PatchRefusalTests {
     /// While a popup owns the screen the daemon composes a different projection, so
-    /// *every* patch is refused — once per frame, up to 60 times a second.
+    /// *every* patch is refused — once per frame.
     ///
     /// That was always true (`popup == nil` has been in the guard since the parent
     /// commit). What was new is the reaction: the catch in `handleSurfacePatch`
-    /// asked for a fresh surface on *any* rejection, so one popup open for a minute
-    /// became 3600 rounds of two commands, each answered with the same refusal.
+    /// asked for a fresh surface on *any* rejection.
     ///
-    /// A/B: fold `patchPopupOpen` back into `patchIdentity` and this goes red with
-    /// "a popup caused 1 resyncs per frame".
-    @Test("a patch refused because a popup is open does not ask for a resync")
+    /// **This is a guard against a configuration, not a fix for an observed flood.**
+    /// The flood itself was never reproduced against a real daemon: for herdr 0.9.5
+    /// the retained-patch path falls back to a whole-frame render while a popup is
+    /// open, so the daemon does not send patches during a popup at all, and this
+    /// client's optional surface codecs are off by default. The classification is
+    /// what makes the reaction correct *if* a daemon (or a future codec setting)
+    /// does send them — nothing here claims such a daemon was observed.
+    ///
+    /// **The base advances every frame**, which is what a real stream does and what
+    /// the old fixture got wrong: it fed the same `base = 1` patch five times, so
+    /// the client's revision never had a reason to fall behind. With a moving base
+    /// the daemon commits each refused frame, so the next patch's base is one ahead
+    /// of a client that did not claim the refused frame number — the identity guard
+    /// then fires, `patchIdentity` is recoverable, and a resync goes out for a
+    /// refusal that is about to repeat. That is the real shape, and it flipped the
+    /// classification every other frame.
+    ///
+    /// A/B: drop the revision claim in the refusal branch and this goes red with
+    /// "2 resyncs" (one per identity flap) instead of 0.
+    @Test("a patch refused every frame with an advancing base never resyncs")
     @MainActor
     func popupRefusalDoesNotResync() throws {
-        let store = try makeStore(at: 1)
+        let store = try makeStore(at: 10)
         var withPopup = try #require(store.surface)
         withPopup.popup = ClientShellPopupSurface(
             terminalId: "popup-1",
@@ -417,15 +433,24 @@ struct PatchRefusalTests {
         )
         store.handleSurface(withPopup)
         #expect(store.surface?.popup != nil, "the fixture never put a popup on screen")
+        #expect(store.surface?.surfaceRevision == 10, "the popup frame moved the revision")
         let requestsBefore = store.surfaceResyncRequests
 
-        let newPatch = try patch(base: 1, row: 0, column: 0, symbol: "P")
-        for _ in 0 ..< 5 {
-            store.handleSurfacePatch(newPatch)
+        // Five frames, each based on the one before it — the daemon commits every
+        // one of them whether or not this client applies it.
+        for frame in 0 ..< 5 {
+            let base = UInt64(10 + frame)
+            store.handleSurfacePatch(try patch(base: base, row: 0, column: 0, symbol: "P"))
+            // The refusal claimed the frame number, so the client is in step with
+            // the daemon and the next patch's base is exactly one ahead.
+            #expect(store.surface?.surfaceRevision == base &+ 1,
+                    Comment(rawValue: "after frame base=\(base) the client is on "
+                        + "\(store.surface?.surfaceRevision ?? 0) instead of \(base &+ 1): "
+                        + "the next patch's base will miss and be misread as a divergence"))
         }
 
-        // The patch really was refused — otherwise the rest passes for the wrong
-        // reason (an applied patch also does not resync).
+        // The patch really was refused every time — otherwise the rest passes for
+        // the wrong reason (an applied patch also does not resync).
         #expect(store.surface?.frame.buffer[0].symbol != "P",
                 "the patch was applied, so this test never exercised the refusal")
         #expect(store.lastError?.contains("patch rejected") == true,
@@ -433,9 +458,9 @@ struct PatchRefusalTests {
                     + "\(store.lastError ?? "nil")"))
         #expect(store.surfaceResyncRequests == requestsBefore,
                 Comment(rawValue: "a popup caused "
-                    + "\(store.surfaceResyncRequests - requestsBefore) resyncs; a popup "
-                    + "cannot be fixed by re-projecting, so this floods the connection "
-                    + "and changes nothing"))
+                    + "\(store.surfaceResyncRequests - requestsBefore) resyncs over 5 "
+                    + "frames; re-projecting cannot fix a popup, so each one is a round of "
+                    + "two commands that changes nothing"))
     }
 
     /// The other half of the classification: a genuine divergence still asks.
@@ -676,6 +701,144 @@ struct PatchRefusalTests {
         store.selectEndpoint(other)
         #expect(store.surfaceResyncLatched == false,
                 "the latch followed the store to another machine, which never asked")
+    }
+
+    /// A rebuild of the machine catalog can drop the very connection the latch
+    /// belongs to (a profile removed or disabled mid-resync), and `selectEndpoint`
+    /// is not the only way the active machine changes.
+    ///
+    /// A/B: remove the `clearResyncLatch()` from `rebuildEndpoints` and this goes red.
+    @Test("rebuilding the machine catalog releases the resync latch")
+    @MainActor
+    func catalogRebuildReleasesLatch() throws {
+        let store = try makeStore(at: 5)
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        #expect(store.surfaceResyncLatched == true)
+
+        store.rebuildEndpoints(roster: [])
+        #expect(store.surfaceResyncLatched == false,
+                "the latch survived a catalog rebuild that may have dropped its endpoint")
+    }
+
+    /// And a disconnect: the surface it was waiting for is gone, and
+    /// `intentionalStop` can keep the handshake that would otherwise release it from
+    /// ever happening.
+    ///
+    /// A/B: remove the `clearResyncLatch()` from `disconnect()` and this goes red.
+    @Test("disconnecting releases the resync latch")
+    @MainActor
+    func disconnectReleasesLatch() throws {
+        let store = try makeStore(at: 5)
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        #expect(store.surfaceResyncLatched == true)
+
+        store.disconnect()
+        #expect(store.surfaceResyncLatched == false,
+                "the latch outlived the connection it was waiting on")
+    }
+
+    /// `handleSurface`'s **stale-projection** early return is where a resync's
+    /// answer normally lands, and it used to leave the latch armed forever.
+    ///
+    /// The chain: a patch is refused, `resyncSurface` asks for a re-projection, the
+    /// daemon bumps its projection revision, and the re-projected surface comes back
+    /// stamped with the *new* revision while this client's snapshot still has the
+    /// old one. `handleSurface` compares it against the snapshot, calls it stale, and
+    /// returns — no adoption, so the adopt-path release never ran. Every later
+    /// divergence then took the "already requested" branch and the screen stayed
+    /// stranded on the refused baseline for the life of the connection.
+    ///
+    /// A/B: remove the `noteDroppedResyncAnswer` call from the stale-projection
+    /// branch and this goes red at the second resync.
+    @Test("a resync answered by a stale projection releases the latch")
+    @MainActor
+    func staleProjectionAnswerReleasesLatch() throws {
+        let store = try makeStore(at: 5)
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        #expect(store.surfaceResyncRequests == 1)
+        #expect(store.surfaceResyncLatched == true, "the first rejection did not latch")
+
+        // The re-projected answer: a *new* projection revision, so it is compared
+        // against the snapshot and dropped as stale. Authored here rather than
+        // through a daemon: `reprojectSurface` bumps the daemon's projection, and
+        // the frame that follows carries it.
+        var reprojected = try #require(store.surface)
+        reprojected.projectionRevision = 4        // snapshot is still on 3
+        reprojected.surfaceRevision = 1           // a new projection renumbers
+        store.handleSurface(reprojected)
+        #expect(store.surface?.projectionRevision == 3,
+                "the stale-projection frame was adopted after all")
+        #expect(store.surface?.surfaceRevision == 5,
+                "the stale-projection frame was adopted after all")
+        #expect(store.surfaceResyncLatched == false,
+                Comment(rawValue: "the latch survived the answer it was waiting for, so "
+                    + "every later divergence will be swallowed as 'already requested'"))
+
+        // And a later divergence can ask again — the assertion that fails without
+        // the release above. `base: 1` is a gap against revision 5, so it is
+        // refused for real rather than applying.
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "H"))
+        #expect(store.surfaceResyncRequests == 2,
+                Comment(rawValue: "only \(store.surfaceResyncRequests) resyncs: the second "
+                    + "divergence is stranded because the latch never came off"))
+    }
+
+    /// The **revision-regression** early return is the other one, and the same
+    /// chain lands there when the re-projected frame is older than what is on
+    /// screen rather than newer.
+    ///
+    /// A/B: remove the release from that branch and this goes red.
+    @Test("a resync answered by an older revision releases the latch")
+    @MainActor
+    func staleRevisionAnswerReleasesLatch() throws {
+        let store = try makeStore(at: 5)
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        #expect(store.surfaceResyncLatched == true)
+
+        // Same projection (so the revision comparison applies), lower revision: a
+        // late frame from the projection that just went away.
+        var late = try #require(store.surface)
+        late.surfaceRevision = 2
+        store.handleSurface(late)
+        #expect(store.surface?.surfaceRevision == 5, "the stale frame was adopted")
+        #expect(store.surfaceResyncLatched == false,
+                "a dropped frame released nothing, so the latch is stuck")
+    }
+
+    /// Releasing on a moved projection must **not** become one resync per frame.
+    ///
+    /// This is H1's failure mode mirrored: while a resync is in flight the client
+    /// sits on projection P and the daemon streams P+1, so every frame is stale and
+    /// every frame is evidence of a moved projection. Unbounded, that would be a
+    /// request per frame — exactly the flood the classification exists to prevent.
+    ///
+    /// The bound is per *settled* baseline: two releases, then the latch stays armed
+    /// until a surface is adopted or the connection restarts. A/B: drop the
+    /// `resyncLatchReleaseLimit` guard and this goes red with a request per frame.
+    @Test("repeated moved projections do not each cause a resync")
+    @MainActor
+    func movedProjectionReleasesAreBounded() throws {
+        let store = try makeStore(at: 5)
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        #expect(store.surfaceResyncRequests == 1)
+
+        // Twelve frames, each on a projection the snapshot does not know. Every one
+        // of them is dropped as stale; every one shows a moved projection.
+        for step in 1 ... 12 {
+            var moved = try #require(store.surface)
+            moved.projectionRevision = UInt64(3 + step)
+            moved.surfaceRevision = 1
+            store.handleSurface(moved)
+            // Each drop is followed by another patch rejection, which is what would
+            // re-arm an unbounded release.
+            store.handleSurfacePatch(try patch(
+                base: 5, row: 0, column: 0, symbol: "X"))
+        }
+
+        #expect(store.surfaceResyncRequests <= 1 + AppStore.resyncLatchReleaseLimit,
+                Comment(rawValue: "\(store.surfaceResyncRequests) resyncs for 12 moved "
+                    + "projections: the release is unbounded, so a resync in flight "
+                    + "turns into a request per frame"))
     }
 }
 
