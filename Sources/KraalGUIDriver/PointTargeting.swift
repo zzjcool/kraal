@@ -154,6 +154,52 @@ func commandClick(_ args: Arguments) -> Never {
     exit(Exit.success.rawValue)
 }
 
+/// Scrolls the wheel at a point, in whichever space the caller has it in.
+///
+/// Same two spaces as `click` (issue #72), same refusal rules. Exists because the
+/// pane under the pointer is decided by the app from the event's own position, so
+/// this is the only way to test that decision — `pane.scroll` names its target and
+/// would pass even if the routing were inverted.
+func commandScroll(_ args: Arguments) -> Never {
+    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
+        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
+    }
+    let relative = args.string("at")
+    let absolute = args.string("at-screen")
+    if relative != nil, absolute != nil {
+        fail(.harness, "scroll takes --at X,Y or --at-screen X,Y, not both")
+    }
+    guard relative != nil || absolute != nil else {
+        fail(.harness, "scroll needs --at X,Y (window-relative) or --at-screen X,Y (screen)")
+    }
+    guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
+        fail(.harness, "app '\(app.name)' has no window")
+    }
+    let point: CGPoint
+    if absolute != nil {
+        point = resolvePoint(
+            requirePoint(args, prefix: "at-screen"), space: .screen,
+            in: window, caller: "scroll --at-screen"
+        )
+    } else {
+        point = resolvePoint(
+            requirePoint(args, prefix: "at"), space: .windowRelative,
+            in: window, caller: "scroll --at"
+        )
+    }
+    guard let lines = Int32(args.string("lines") ?? "3") else {
+        fail(.harness, "--lines must be an integer, got '\(args.string("lines") ?? "")'")
+    }
+    guard activateAndConfirm(app) else {
+        fail(.harness, explanation(for: app))
+    }
+    SyntheticInput.scroll(at: point, lines: lines)
+    print("scrolled screen(\(Int(point.x)),\(Int(point.y))) lines=\(lines) "
+        + "window+(\(windowOffset(point, in: window)))")
+    requireAlive(app, context: "scroll")
+    exit(Exit.success.rawValue)
+}
+
 /// Drags between two window-relative points.
 ///
 /// Only the window-relative form exists. No case needs a screen-space drag, and a

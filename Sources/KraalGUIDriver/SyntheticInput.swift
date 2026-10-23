@@ -105,6 +105,26 @@ enum SyntheticInput {
         return true
     }
 
+    /// Posts a scroll-wheel event at a screen point.
+    ///
+    /// A wheel event carries its position, so "which pane is under the pointer"
+    /// is answered by the app's own hit testing — unlike `pane.scroll`, which
+    /// names its target and therefore cannot test the routing that picks one.
+    static func scroll(at point: CGPoint, lines: Int32) {
+        let move = CGEvent(
+            mouseEventSource: nil, mouseType: .mouseMoved,
+            mouseCursorPosition: point, mouseButton: .left
+        )
+        move?.post(tap: .cghidEventTap)
+        usleep(120_000)
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil, units: .line, wheelCount: 1,
+            wheel1: lines, wheel2: 0, wheel3: 0
+        ) else { return }
+        event.location = point
+        event.post(tap: .cghidEventTap)
+    }
+
     private static func post(
         _ type: CGEventType, at point: CGPoint, button: CGMouseButton = .left
     ) {
