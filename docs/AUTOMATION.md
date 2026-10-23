@@ -226,9 +226,15 @@ AppKit 自动合成的 selector 名，**不唯一**：
 |---|---|---|
 | 按菜单项/按钮 | `press --title` / `--desc` | **不需要**（AXPress 不抢焦点） |
 | 按菜单里没展开过的项 | `menu --menu View --item "Split Right"` | 不需要 |
-| 点某个坐标 | `click --at X,Y`（窗口相对） | 需要，会自动 activate 并确认 |
-| 拖分隔条 | `drag --from --to` | 需要 |
+| 点某个坐标 | `click --at X,Y`（窗口相对）或 `click --at-screen X,Y`（屏幕） | 需要，会自动 activate 并确认 |
+| 拖分隔条 | `drag --from --to`（窗口相对） | 需要 |
 | 键盘快捷键 | `key --char w --mod cmd` | 需要 |
+
+两种坐标不是一个东西，这一点在 issue #72 之前是静默的：`ax --json` 的 `frame` 是**屏幕**
+坐标（AX 原生），`click --at` 的参数是**窗口相对**偏移。要点的东西来自 AX，就直接用
+`click --at-screen`（原样传，不少一次减法）；只有自己按窗口几何算出的点才用 `--at`。
+两种形式都会校验落点在窗口 frame 内，越界退出码 2 并打印窗口 frame 与实际屏幕坐标——
+不再 clamp 到窗口边缘（那会让「坐标算错了」表现成「产品 bug」）。
 
 ### 4.3 实现坑（P0/P1 实测，2026-10-22）
 
@@ -352,7 +358,8 @@ kraal-gui window [--timeout 10] [--title T]  # 窗口 frame + windowNumber
 kraal-gui press --title T | --desc D | --id I [--index N] [--within-title M]
 kraal-gui menu --menu View --item "Split Right"
 kraal-gui click --at X,Y [--right] [--no-activate]    # 窗口相对坐标
-kraal-gui drag --from X,Y --to X,Y [--steps N]
+kraal-gui click --at-screen X,Y [--right] [--no-activate]  # 屏幕坐标（AX frame 空间）
+kraal-gui drag --from X,Y --to X,Y [--steps N]        # 窗口相对坐标
 kraal-gui key --char w [--mod cmd,shift]
 kraal-gui wait --title T [--timeout 10]
 kraal-gui shot --out FILE
@@ -462,9 +469,14 @@ KRAAL_HERDR_HOME=$ROSTER KRAAL_HERDR_SOCKET=... KraalMac-bin
 坐标**，不能写死：
 
 ```bash
-# 读 value=alpha-b 那一行的屏幕坐标，减去窗口原点 => 窗口相对坐标
-point=$(sidebar_row_point alpha-b)   # Scripts/gui.sh
+# 读 value=alpha-b 那一行的 AX frame（**屏幕**坐标），原样交给 --at-screen
+point=$(sidebar_row_point alpha-b)   # Scripts/gui.sh，输出 X,Y
+$D click --at-screen "$point"
 ```
+
+这里曾经要在调用方减一次窗口原点再走 `click --at`（issue #72）。减法没了：AX frame 本来就
+是屏幕坐标，`--at-screen` 原样使用；而「越界不报错、悄悄 clamp 到窗口边缘」也一起没了。
+`sidebar_row_point` 返回的就是屏幕点，不再需要 `driver window` 配合。
 
 写死 y 的版本失败过：Local 多一个 workspace，机器行整体下移，点击落到 workspace 行上，
 用例报「split 落到了 alpha-a」，而产品是对的。

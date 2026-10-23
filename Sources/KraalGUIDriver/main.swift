@@ -637,7 +637,9 @@ func commandQuit(_ args: Arguments) -> Never {
 /// Reporting the third when the first is true sends the reader hunting for a
 /// product bug. It happened during this work: the machine was locked and the
 /// driver blamed the app's activation policy.
-private func explanation(for app: TargetApp) -> String {
+/// Not `private` because `PointTargeting.swift` needs it: a click that cannot take
+/// the front is a harness problem and both paths report it the same way.
+func explanation(for app: TargetApp) -> String {
     if isScreenLocked() {
         return "the screen is locked (IOConsoleLocked), so no app can become "
             + "frontmost and synthetic events go to loginwindow. Unlock the machine, "
@@ -755,61 +757,6 @@ func commandMenu(_ args: Arguments) -> Never {
 
 // MARK: - P1: synthetic event commands
 
-/// Clicks at a point given relative to the app's window.
-///
-/// Window-relative is the only form worth exposing: absolute screen coordinates
-/// break the moment the window moves, and every coordinate bug so far came from
-/// hard-coding a position instead of deriving it from the window.
-///
-/// Activates the app first. Unlike `AXPress`, a synthetic click goes wherever the
-/// pointer is, so without activation it lands on whatever is frontmost — that is
-/// the failure mode that made a VM probe click TextEdit instead of the target.
-func commandClick(_ args: Arguments) -> Never {
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
-    let (offsetX, offsetY) = requirePoint(args)
-    guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
-        fail(.harness, "app '\(app.name)' has no window")
-    }
-    let clamped = CGPoint(
-        x: window.frame.origin.x + min(max(offsetX, 0), window.frame.width - 1),
-        y: window.frame.origin.y + min(max(offsetY, 0), window.frame.height - 1)
-    )
-
-    let stealsFocus = !args.has("no-activate")
-    if stealsFocus && !activateAndConfirm(app) {
-        fail(.harness, explanation(for: app))
-    }
-    let button: CGMouseButton = args.has("right") ? .right : .left
-    SyntheticInput.click(at: clamped, clicks: args.int("clicks") ?? 1, button: button)
-    print("clicked window+(\(Int(offsetX)),\(Int(offsetY))) -> screen(\(Int(clamped.x)),\(Int(clamped.y))) "
-        + "button=\(button == .right ? "right" : "left") activated=\(stealsFocus)")
-    requireAlive(app, context: "click")
-    exit(Exit.success.rawValue)
-}
-
-func commandDrag(_ args: Arguments) -> Never {
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
-    let (fromX, fromY) = requirePoint(args, prefix: "from")
-    let (toX, toY) = requirePoint(args, prefix: "to")
-    guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
-        fail(.harness, "app '\(app.name)' has no window")
-    }
-    let start = CGPoint(x: window.frame.origin.x + fromX, y: window.frame.origin.y + fromY)
-    let end = CGPoint(x: window.frame.origin.x + toX, y: window.frame.origin.y + toY)
-
-    guard activateAndConfirm(app) else {
-        fail(.harness, "could not bring '\(app.name)' to the front for a drag")
-    }
-    SyntheticInput.drag(from: start, to: end, steps: args.int("steps") ?? 1)
-    print("dragged window+(\(Int(fromX)),\(Int(fromY))) -> (\(Int(toX)),\(Int(toY)))")
-    requireAlive(app, context: "drag")
-    exit(Exit.success.rawValue)
-}
-
 /// Sends a key chord to the app, e.g. `--mod cmd --char w` for ⌘W.
 func commandKey(_ args: Arguments) -> Never {
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
@@ -828,21 +775,6 @@ func commandKey(_ args: Arguments) -> Never {
     exit(Exit.success.rawValue)
 }
 
-private func requirePoint(_ args: Arguments, prefix: String = "at") -> (Double, Double) {
-    let raw: String?
-    if prefix == "at" {
-        raw = args.string("at")
-    } else {
-        raw = args.string(prefix)
-    }
-    guard let raw else { fail(.harness, "missing --\(prefix) X,Y") }
-    let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-    guard parts.count == 2, let pointX = Double(parts[0]), let pointY = Double(parts[1]) else {
-        fail(.harness, "--\(prefix) must be X,Y — got '\(raw)'")
-    }
-    return (pointX, pointY)
-}
-
 // MARK: - Entry point
 
 let argv = Array(CommandLine.arguments.dropFirst())
@@ -858,8 +790,21 @@ guard let command = argv.first else {
       window                         print window frame + window number
       shot  -o FILE [--full]         screenshot one window
       type  --text S                 type text (AX first, CGEvent fallback)
+      click --at X,Y | --at-screen X,Y [--right] [--clicks N] [--no-activate]
+                                     synthetic click; --at is window-relative,
+                                     --at-screen is absolute (AX frame space)
+      drag  --from X,Y --to X,Y [--steps N]
+                                     synthetic drag, both points window-relative
+      key   --char C [--mod cmd,shift]
+                                     key chord (needs the app frontmost)
+      menu  --menu T --item T [--index N]
+                                     open a menu bar menu, then press an item
       launch --app PATH [--env K=V] [--wait-window T] [--match NAME]
       quit                           terminate the app under test
+
+    Coordinates: `kraal-gui window` and `ax --json` frames are screen coordinates;
+    `--at`/`drag` offsets are relative to that window's top-left corner. A point
+    outside the window is refused (exit 2) instead of being clamped to its edge.
 
     exit codes: 0 ok · 1 assertion · 2 harness · 3 crash
     """

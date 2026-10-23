@@ -172,7 +172,8 @@ $D ax --json                                # 整棵 AX 树（agent 读这个）
 $D press --title "Split Right"              # 不抢焦点，锁屏也可用
 $D menu --menu View --item "Split Right"    # 先展开指定菜单再点
 $D click --at X,Y [--right]                 # 窗口相对坐标，需要前台
-$D drag --from X,Y --to X,Y                 # 需要前台
+$D click --at-screen X,Y [--right]          # 屏幕坐标（AX frame 空间），需要前台
+$D drag --from X,Y --to X,Y                 # 窗口相对坐标，需要前台
 $D key --char w --mod cmd                   # 需要前台
 $D window                                   # frame + windowNumber
 ```
