@@ -199,18 +199,35 @@ public final class AppStore {
     /// send is in flight is not lost.
     @ObservationIgnored var resizePending = false
 
-    public init(target: ConnectionSettings = .local) {
+    public init(target: ConnectionSettings = .local, rosterSource: MachineRosterSource? = nil) {
         self.target = target
         self.endpointCatalog = EndpointCatalogLoader(
-            local: LocalMachineDescriptor.resolve(settings: target)
+            local: LocalMachineDescriptor.resolve(settings: target),
+            source: rosterSource
         )
+        // The roster file is shared with every other herdr process on the account,
+        // so it is changed from outside this app all the time (issue #69). The
+        // loader watches it and tells us when it moves; the two calls below are
+        // exactly what `loadEndpoints()` does with a fresh roster, and they are
+        // reused deliberately rather than special-cased, so an external change
+        // takes the same path as a launch-time one.
+        //
+        // Not a reconnect: `rebuildEndpoints` reuses an existing `EndpointState` by
+        // id (it only mutates the row and closes connections for machines that are
+        // gone or disabled), and `connectMissingEndpoints` skips any machine that
+        // already has a connection or a connection task. A machine that was
+        // already connected therefore keeps its socket.
+        self.endpointCatalog.onRosterChanged = { [weak self] roster in
+            guard let self else { return }
+            self.rebuildEndpoints(roster: roster)
+            self.connectMissingEndpoints()
+        }
     }
 
     /// Rebuilds the machine catalog from the saved-profile list.
     ///
-    /// Called at launch and after the machines dialog writes a profile, so the
-    /// sidebar's machine rows and the dialog never disagree about which machines
-    /// exist.
+    /// Called at launch, after the machines dialog writes a profile, and whenever
+    /// the roster file changes on disk.
     public func loadEndpoints() async {
         let roster = await endpointCatalog.reload()
         rebuildEndpoints(roster: roster)

@@ -163,6 +163,50 @@ public struct HerdrMachineClient: Sendable {
         return nil
     }
 
+    /// Absolute path of the file `herdr machine list` reads.
+    ///
+    /// Derived, not asked for, because the CLI has no command that prints it and
+    /// `list --json` gives no hint. Three facts pin it down, all verified against
+    /// herdr 0.9.5 and its source:
+    ///
+    ///  - Upstream calls `crate::config::state_dir().join("client").join("endpoints.json")`
+    ///    (`src/client/endpoint/catalog.rs:373-377`).
+    ///  - `state_dir()` is `$XDG_STATE_HOME/<app>` when `XDG_STATE_HOME` is set, and
+    ///    otherwise `$HOME/.local/state/<app>` on every non-Windows platform
+    ///    (`src/config/io.rs:37-97`). `<app>` is `herdr`, or `herdr-dev` in a debug
+    ///    build.
+    ///  - Measured: with `HOME=/tmp/probe-home` and a hand-written
+    ///    `~/.local/state/herdr/client/endpoints.json`, `herdr machine list --json`
+    ///    printed that file's machines; the real roster was untouched. With
+    ///    `XDG_STATE_HOME=/tmp/probe-xdg` the file under `$XDG_STATE_HOME/herdr/`
+    ///    won instead — including over a non-empty `HOME` — which is why that
+    ///    variable is honoured here rather than assumed absent.
+    ///
+    /// `home` is the same `$HOME` the child process is given (`KRAAL_HERDR_HOME`),
+    /// so a dev session watches the roster it is actually listed from instead of
+    /// the user's real one.
+    ///
+    /// Returns nil only when there is no `$HOME` to build the path from at all,
+    /// which would leave the child and this path disagreeing.
+    public func rosterPath(
+        development: Bool = false,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        let app = development ? "herdr-dev" : "herdr"
+        let stateDirectory: String
+        if let xdg = environment["XDG_STATE_HOME"], !xdg.isEmpty {
+            stateDirectory = (xdg as NSString).appendingPathComponent(app)
+        } else {
+            // Same fallback order `discover()` uses, so the path and the child's
+            // `$HOME` cannot diverge.
+            let home = home ?? environment["HOME"] ?? NSHomeDirectory()
+            stateDirectory = ((home as NSString).appendingPathComponent(".local/state") as NSString)
+                .appendingPathComponent(app)
+        }
+        return ((stateDirectory as NSString).appendingPathComponent("client") as NSString)
+            .appendingPathComponent("endpoints.json")
+    }
+
     /// `KRAAL_HERDR_HOME`, when set, becomes `$HOME` for the `herdr` child only.
     ///
     /// Empty is treated as unset: an empty `$HOME` would make "$HOME/.local/..."

@@ -282,4 +282,69 @@ final class HerdrMachineClientTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - roster path
+
+    /// The path the app watches has to be the file `herdr machine list` reads,
+    /// or the watch reports a change nobody reads (issue #69).
+    ///
+    /// Upstream builds it as `state_dir()/client/endpoints.json`, and `state_dir()`
+    /// is `$HOME/.local/state/herdr` on every non-Windows platform. Verified
+    /// against herdr 0.9.5 by hand: a fake `HOME` holding
+    /// `.local/state/herdr/client/endpoints.json` was the one `machine list`
+    /// reported.
+    func testRosterPathFollowsHome() {
+        let client = HerdrMachineClient(
+            executable: URL(fileURLWithPath: "/bin/true"),
+            home: "/tmp/kraal-probe-home"
+        )
+        XCTAssertEqual(
+            client.rosterPath(environment: ["HOME": "/tmp/other"]),
+            "/tmp/kraal-probe-home/.local/state/herdr/client/endpoints.json"
+        )
+    }
+
+    /// `KRAAL_HERDR_HOME` is what isolates a dev session's roster, so the watch must
+    /// follow it rather than the app's own `$HOME` — otherwise a sandboxed session
+    /// would react to the user's real machines being edited.
+    func testRosterPathPrefersTheInjectedHome() {
+        let client = HerdrMachineClient(
+            executable: URL(fileURLWithPath: "/bin/true"),
+            home: nil
+        )
+        XCTAssertEqual(
+            client.rosterPath(environment: ["HOME": "/tmp/plain-home"]),
+            "/tmp/plain-home/.local/state/herdr/client/endpoints.json"
+        )
+    }
+
+    /// `XDG_STATE_HOME` wins over `$HOME` in herdr's `state_dir()` — measured:
+    /// with both set, `machine list` read the XDG file. A watch on the `$HOME` path
+    /// would then be watching a file herdr never reads.
+    func testRosterPathHonoursXDGStateHome() {
+        let client = HerdrMachineClient(
+            executable: URL(fileURLWithPath: "/bin/true"),
+            home: "/tmp/ignored-home"
+        )
+        XCTAssertEqual(
+            client.rosterPath(environment: [
+                "HOME": "/tmp/ignored-home",
+                "XDG_STATE_HOME": "/tmp/xdg-state",
+            ]),
+            "/tmp/xdg-state/herdr/client/endpoints.json"
+        )
+    }
+
+    /// A debug build of herdr keeps its state under `herdr-dev`, so watching
+    /// `herdr` there would watch the wrong tree.
+    func testRosterPathKnowsTheDevelopmentName() {
+        let client = HerdrMachineClient(
+            executable: URL(fileURLWithPath: "/bin/true"),
+            home: "/tmp/kraal-probe-home"
+        )
+        XCTAssertEqual(
+            client.rosterPath(development: true, environment: ["HOME": "/tmp/kraal-probe-home"]),
+            "/tmp/kraal-probe-home/.local/state/herdr-dev/client/endpoints.json"
+        )
+    }
 }
