@@ -48,6 +48,21 @@ public final class MouseForwarder {
 
     /// Points banked per pane between whole-row scrolls.
     private var scrollAccumulators: [String: PaneMouse.ScrollAccumulator] = [:]
+    /// Same idea as `scrollAccumulators`, for panes whose program owns the wheel.
+    /// Kept separate on purpose: the two paths take different units to the daemon,
+    /// and sharing a remainder between them would let one path spend the other's.
+    private var otherScrollAccumulators: [String: PaneMouse.ScrollAccumulator] = [:]
+
+    /// Where the last left/right press landed, per pane, so a drag can be told from
+    /// pointer jitter.
+    ///
+    /// macOS emits `leftMouseDragged` for a movement of a single point, which a
+    /// trackpad produces on almost every click. Forwarding those to a program makes
+    /// a click arrive as press → drag → drag → release, and a TUI that requires a
+    /// clean press/release pair then treats the click as a drag and ignores it — the
+    /// "clicking the TUI does nothing" half of issue #95. The threshold is one cell,
+    /// which is also the smallest movement a program could meaningfully respond to.
+    private var pressOrigins: [String: CGPoint] = [:]
 
     /// The pane whose context menu a consumed `rightMouseDown` just raised.
     ///
@@ -162,10 +177,36 @@ public final class MouseForwarder {
         }
 
         let kind = mouseKind(for: event)
+        // A click is press → release. macOS also sends `leftMouseDragged` for a
+        // one-point wobble, and a program that tracks drags then sees a drag where
+        // the user saw a click. Dropping movement below a cell keeps the click a
+        // click; anything larger is a real drag and goes through.
+        if let kind, case .drag = kind, let origin = pressOrigins[location.paneId] {
+            let cell = min(location.size.width, location.size.height) / 40
+            if !PaneMouse.PressTracking(cellSize: cell)
+                .isDrag(from: origin, to: location.point) {
+                return false
+            }
+        }
+        if let kind {
+            switch kind {
+            case .press: pressOrigins[location.paneId] = location.point
+            case .release: pressOrigins.removeValue(forKey: location.paneId)
+            default: break
+            }
+        }
         let modifiers = MouseModifiers.bits(from: event.modifierFlags)
-        let lines = event.type == .scrollWheel
-            ? PaneMouse.scrollLines(from: event.scrollingDeltaY)
-            : 0
+        // TUI panes get a wheel *event*, not a line count — the protocol carries
+        // `lines` but a program implementing SGR mouse input turns one event into
+        // one scroll step regardless. So a trackpad's per-frame deltas must be
+        // accumulated exactly as they are for the daemon-scrollback path, or the
+        // program scrolls one notch per frame and a flick flies past everything
+        // (issue #95). `nil` means "not a whole notch yet" and the event is dropped.
+        var lines: UInt16 = 0
+        if event.type == .scrollWheel {
+            lines = tuiScrollNotch(for: event, paneId: location.paneId, viewSize: location.size)
+            if lines == 0 { return false }
+        }
 
         // Only panes that asked for mouse reporting get the event; the terminal
         // view has already handled it locally either way.
@@ -183,33 +224,30 @@ public final class MouseForwarder {
 
     /// Scrolls the pane's own history by `pane.scroll`.
     ///
-    /// `pane.scroll` takes an absolute `offset_from_bottom`, not a delta, so the
-    /// target is computed from the offset the daemon last reported. Sending a
-    /// delta would be read as "jump to line N", which is a different movement.
+    /// `pane.scroll` takes an absolute `offset_from_bottom`, not a delta, so
+    /// something has to remember where the viewport is. That "something" is
+    /// `PaneScrollQueue`, not this function: a trackpad emits one event per frame,
+    /// and computing a target here meant every event in a flick read the same
+    /// stale snapshot, so they overwrote each other and roughly one in four was
+    /// refused for `endpoint_busy` and dropped (issue #94).
     private func scrollDaemonBacklog(for event: NSEvent, location: PaneLocation) {
         let paneId = location.paneId
         guard let metrics = store.paneGeometry(for: paneId)?.scroll else {
             // No metrics yet: the daemon has not reported this pane's history, so
-            // there is nothing to compute a target against.
+            // there is nothing to steer towards.
             return
         }
         let lines = scrollLines(for: event, paneId: paneId, viewSize: location.size)
-        guard PaneMouse.ScrollTarget.shouldSend(
-            current: metrics.offsetFromBottom,
+        // No `shouldSend` filter here: a gesture that clamps at the end of the
+        // history still has to reach the queue, because its accumulated movement is
+        // what the *next* request will carry. Filtering per event is what made a
+        // flick lose its first few notches.
+        store.scrollPaneBy(
+            paneId: paneId,
             lines: lines,
-            maxOffset: metrics.maxOffsetFromBottom
-        ) else { return }
-        // Bank what was actually asked for, not what was requested: asking for 20
-        // rows when only 5 remain would otherwise leave the accumulator thinking
-        // it moved 20 and swallow the next gesture.
-        let applied = Int(PaneMouse.ScrollTarget.offset(
             current: metrics.offsetFromBottom,
-            lines: lines,
             maxOffset: metrics.maxOffsetFromBottom
-        )) - Int(metrics.offsetFromBottom)
-        store.scrollPane(paneId: paneId, toOffsetFromBottom: UInt64(
-            Int(metrics.offsetFromBottom) + applied
-        ))
+        )
     }
 
     /// Whole lines for one scroll event, carrying the sub-line remainder.
@@ -234,6 +272,42 @@ public final class MouseForwarder {
         let lines = accumulator.lines(for: delta)
         scrollAccumulators[paneId] = accumulator
         return lines
+    }
+
+    /// Whole wheel notches for a pane whose program handles the mouse itself.
+    ///
+    /// Returns 0 while the accumulated movement is below one notch, so the caller
+    /// drops the event instead of sending a wheel report the program will treat as
+    /// a full step. A mouse wheel with detents reports whole notches already and
+    /// bypasses the accumulator; a trackpad reports points, and sending one report
+    /// per frame made a TUI scroll roughly six times faster than the hand moved
+    /// (measured against `herdr-gpui`, which has the same behaviour for the same
+    /// reason).
+    ///
+    /// The accumulator is per pane, like the one for the daemon scrollback path, so
+    /// two TUIs scrolling at once keep their own remainders.
+    private func tuiScrollNotch(
+        for event: NSEvent, paneId: String, viewSize: CGSize
+    ) -> UInt16 {
+        let delta = event.scrollingDeltaY
+        guard event.hasPreciseScrollingDeltas else {
+            otherScrollAccumulators[paneId]?.reset()
+            // One report per notch is what the program expects; a wheel that
+            // reports several notches in one event keeps its magnitude.
+            let notches = Int(abs(delta).rounded())
+            guard notches > 0 else { return 0 }
+            return UInt16(min(max(notches, 1), 20))
+        }
+        guard let rows = store.paneGeometry(for: paneId)?.innerRect.height, rows > 0 else {
+            return 0
+        }
+        let cellHeight = viewSize.height / CGFloat(rows)
+        var accumulator = otherScrollAccumulators[paneId]
+            ?? PaneMouse.ScrollAccumulator(cellHeight: cellHeight)
+        let lines = accumulator.lines(for: delta)
+        otherScrollAccumulators[paneId] = accumulator
+        guard lines != 0 else { return 0 }
+        return UInt16(min(abs(lines), 20))
     }
 
     /// Whether the program in this pane asked to receive mouse events itself.
@@ -277,10 +351,29 @@ public final class MouseForwarder {
         // against the content view rather than using the window point directly is
         // what keeps the two in the same space.
         let inView = contentView.convert(event.locationInWindow, from: nil)
-        // AppKit's origin is bottom-left; the surface grid counts from the top.
-        let topDown = CGPoint(
-            x: inView.x,
-            y: contentView.bounds.height - inView.y
+        // `convert(_:from:)` already answers in the content view's own space, so
+        // the only question left is which way that space points. It is **flipped**
+        // here — the content view is an `NSHostingView`, whose `isFlipped` is true —
+        // so `inView.y` counts from the top and needs no further inversion.
+        //
+        // This used to be `contentHeight - inView.y` on the strength of "AppKit's
+        // origin is bottom-left". That is true of an ordinary `NSView` and false of
+        // this one, and the cost was a second inversion: a wheel event over the top
+        // pane was routed to the bottom one, every time. Measured on the developer's
+        // own window (issue #88):
+        //
+        //     DIAG88 FLIP isFlipped=true windowY=1679 inViewY=850
+        //                  contentH=2530 sum=2530
+        //
+        // `windowY + inViewY == contentHeight` exactly, which is what "already
+        // top-down" looks like; subtracting turned 850 into 1680 and moved the hit
+        // to the other pane. The pane frames this is compared against are written by
+        // `PaneFrameMath.rect`, which produces top-down rects — so the reader and the
+        // writer disagreed about which end y is measured from. Now they agree.
+        let topDown = KraalUI.PaneFrameMath.contentPoint(
+            inView,
+            contentHeight: contentView.bounds.height,
+            isFlipped: contentView.isFlipped
         )
 
         for (paneId, rect) in store.paneViewFrames where rect.contains(topDown) {

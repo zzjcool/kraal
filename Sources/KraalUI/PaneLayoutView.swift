@@ -540,6 +540,25 @@ public enum PaneFrameMath {
     ) -> CGFloat {
         (points * scale).rounded(.up) / scale
     }
+    /// A point in the content view's own space, converted to this app's pane
+    /// coordinate space (top-left origin), given whether that view is flipped.
+    ///
+    /// Exists because the inverse of this was wrong for months in a way nobody
+    /// could see from the outside: a wheel event over the top pane scrolled the
+    /// bottom one, 100% of the time (issue #88). The content view is an
+    /// `NSHostingView`, whose `isFlipped` is `true`, so `convert(_:from:)` already
+    /// answers top-down — and the reader subtracted from `bounds.height` anyway,
+    /// inverting a point that was already inverted.
+    ///
+    /// Kept as a function of `isFlipped` rather than hard-coded to `true`, because
+    /// a future container (or a test) can legitimately be either, and the branch is
+    /// the thing worth stating: *flipped means no arithmetic*.
+    public static func contentPoint(
+        _ point: CGPoint, contentHeight: CGFloat, isFlipped: Bool
+    ) -> CGPoint {
+        isFlipped ? point : CGPoint(x: point.x, y: contentHeight - point.y)
+    }
+
     /// A pane's rectangle in content-view coordinates, top-left origin.
     ///
     /// `container` is in AppKit coordinates (origin bottom-left) and `pane` is in
