@@ -10,12 +10,21 @@ import SwiftUI
 import KraalSidebar
 
 struct ConnectionSheet: View {
-    @Environment(AppStore.self) private var store
+    /// Held directly, not through the environment.
+    ///
+    /// It arrives as an init parameter, and a sheet presented from `RootView` does
+    /// not inject the environment into its content — so the `@Environment` copy was
+    /// never populated. Reading it crashed the app with "No Observable object of
+    /// type AppStore found" the moment the connection sheet opened, which is one
+    /// toolbar button away. Two sources for one dependency is the bug; the
+    /// parameter is the one the caller always provides.
+    private let store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var draft: ConnectionSettings
     @State private var discoveredSessions: [String] = []
 
     init(store: AppStore) {
+        self.store = store
         _draft = State(initialValue: store.target)
     }
 
@@ -127,8 +136,16 @@ struct ConnectionSheet: View {
     }
 
     private var localSocketDescription: String {
-        guard let path = try? HerdrDiscovery.sessionSocket(name: draft.session) else {
-            return "Invalid session name"
+        // The error text, not a generic "Invalid session name": a name can be
+        // perfectly legal and still be unusable because the path it produces is too
+        // long for this machine's socket limit (issue #90). That message carries the
+        // name, the actual length, the platform limit and the budget, and it is the
+        // only place the user can see the third number.
+        let path: String
+        do {
+            path = try HerdrDiscovery.sessionSocket(name: draft.session)
+        } catch {
+            return (error as? DiscoveryError)?.description ?? "\(error)"
         }
         let exists = FileManager.default.fileExists(atPath: path)
         return exists ? path : "\(path)  (not found — is Herdr running?)"

@@ -531,6 +531,39 @@ func commandType(_ args: Arguments) -> Never {
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
         fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
     }
+    // Address the field directly when a selector is given.
+    //
+    // The focused-element path below only works when the field is *already*
+    // focused, and a SwiftUI `TextField` in a sheet is not: setting the value went
+    // to whatever had focus and the field kept its old text, which read as "typing
+    // did nothing". A selector makes the target explicit, which is also what a test
+    // wants — it should not depend on which element happened to be focused.
+    if args.string("value") != nil || args.string("desc") != nil {
+        var selector = Selector()
+        selector.value = args.string("value")
+        selector.desc = args.string("desc")
+        guard let element = app.find(selector, maxDepth: args.int("depth") ?? 30) else {
+            fail(.harness, "no element matching \(selector.humanReadable) to type into")
+        }
+        // Focus it first: a SwiftUI TextField binds to the field editor, and
+        // setting `AXValue` on an unfocused field writes to the backing store
+        // without telling SwiftUI — the UI keeps showing the old text (observed:
+        // the AX value changed while the label stayed `default`). Focusing first
+        // makes the write go through the field editor, which does notify.
+        _ = AXUIElementSetAttributeValue(
+            element, kAXFocusedAttribute as CFString, kCFBooleanTrue
+        )
+        usleep(200_000)
+        guard AXUIElementSetAttributeValue(
+            element, kAXValueAttribute as CFString, text as CFString
+        ) == .success else {
+            fail(.harness, "element \(selector.humanReadable) refused AXValue "
+                + "(it may not be a text field)")
+        }
+        print("typed into \(selector.humanReadable) via AX")
+        requireAlive(app, context: "type")
+        exit(Exit.success.rawValue)
+    }
     var focused: CFTypeRef?
     if AXUIElementCopyAttributeValue(
         app.element, kAXFocusedUIElementAttribute as CFString, &focused

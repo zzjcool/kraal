@@ -44,6 +44,15 @@ public enum SocketError: Error, CustomStringConvertible {
 
 /// One connected unix socket. Reads are blocking and are expected to run on a
 /// dedicated thread; writes may come from any thread and are serialized here.
+/// The largest socket path this platform accepts.
+///
+/// `sun_path` is 104 bytes on Darwin, one of which is the NUL terminator, so a
+/// path may be 103 bytes. Exposed as a constant because it is a *budget* other
+/// code has to plan against, not a detail of this file: issue #90 was a session
+/// name check that allowed 64 characters while the path those characters produce
+/// could not fit.
+public let unixSocketMaxPathBytes = MemoryLayout.size(ofValue: sockaddr_un().sun_path) - 1
+
 public final class UnixSocket: @unchecked Sendable {
     private var handle: Int32
     private let writeLock = NSLock()
@@ -77,7 +86,7 @@ public final class UnixSocket: @unchecked Sendable {
         address.sun_family = sa_family_t(AF_UNIX)
 
         let pathBytes = Array(path.utf8)
-        let maxLength = MemoryLayout.size(ofValue: address.sun_path) - 1
+        let maxLength = unixSocketMaxPathBytes
         guard pathBytes.count <= maxLength else {
             throw SocketError.pathTooLong(path)
         }
