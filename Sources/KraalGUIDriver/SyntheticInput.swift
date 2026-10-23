@@ -89,11 +89,31 @@ enum SyntheticInput {
         post(.leftMouseUp, at: end, button: button)
     }
 
+    /// A named key, e.g. `--name escape`.
+    ///
+    /// Named keys exist because `--char` cannot express them: it takes the *first
+    /// character* of its argument, so `--char escape` used to send the letter `e`
+    /// and exit 0 (issue #92). A silently wrong key is worse than a refused one —
+    /// the case looks green while testing something else entirely.
+    static func key(name: String, modifiers: CGEventFlags) -> Bool {
+        guard let code = namedKeyCodes[name.lowercased()] else { return false }
+        return post(code: code, modifiers: modifiers)
+    }
+
     /// A key with optional modifiers, e.g. `--mod cmd --char w`.
-    static func key(char: String, modifiers: CGEventFlags) -> Bool {
-        guard let scalar = char.lowercased().unicodeScalars.first,
+    ///
+    /// Refuses anything that is not a single character: a word here means the
+    /// caller wanted a named key, and picking its first letter would send a
+    /// different key than the one asked for (issue #92).
+    static func key(char: String, modifiers: CGEventFlags) -> KeyRequest {
+        let scalars = char.lowercased().unicodeScalars
+        guard scalars.count == 1, let scalar = scalars.first,
               let code = virtualKey(for: scalar)
-        else { return false }
+        else { return .refused(char) }
+        return post(code: code, modifiers: modifiers) ? .sent(code) : .refused(char)
+    }
+
+    private static func post(code: CGKeyCode, modifiers: CGEventFlags) -> Bool {
         for isDown in [true, false] {
             guard let keyEvent = CGEvent(
                 keyboardEventSource: nil, virtualKey: code, keyDown: isDown
@@ -137,6 +157,43 @@ enum SyntheticInput {
     /// US-layout virtual key codes — the only ones a positional lookup can give.
     /// Anything not listed must go through `keyboardSetUnicodeString` instead,
     /// which is what `type` does for arbitrary text.
+    /// What `key(char:)` did, so the caller can explain a refusal instead of
+    /// failing with a bare "could not send".
+    enum KeyRequest: Equatable {
+        case sent(CGKeyCode)
+        /// Nothing was posted. The string is what the caller asked for, so the
+        /// error can echo it back.
+        case refused(String)
+    }
+
+    /// Names for the keys `--char` cannot express.
+    ///
+    /// The values are the same US-layout virtual key codes the character table
+    /// below uses, so a named key and its character form (`--name space` and
+    /// `--char " "`) post identical events. Listed in `supportedKeyNames` so the
+    /// error message can enumerate them instead of leaving the caller guessing.
+    private static let namedKeyCodes: [String: CGKeyCode] = [
+        "escape": 53, "esc": 53,
+        "return": 36, "enter": 36,
+        "tab": 48, "space": 49, "backspace": 51, "delete": 51,
+        "forwarddelete": 117, "forward_delete": 117,
+        "up": 126, "down": 125, "left": 123, "right": 124,
+        "home": 115, "end": 119, "pageup": 116, "pagedown": 121,
+        "page_up": 116, "page_down": 121,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118,
+        "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+        "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+    ]
+
+    /// The canonical spelling of every name `key(name:)` accepts, for the usage
+    /// text and for "unknown key" errors. Aliases are deliberately absent: the
+    /// list is what a caller can type, not a second thing to keep in sync.
+    static let supportedKeyNames: [String] = [
+        "escape", "return", "tab", "space", "backspace", "forwardDelete",
+        "up", "down", "left", "right", "home", "end", "pageUp", "pageDown",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+    ]
+
     private static let keyCodes: [Character: CGKeyCode] = [
         "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
         "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
