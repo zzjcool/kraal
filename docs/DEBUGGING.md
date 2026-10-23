@@ -317,8 +317,22 @@ VM 里窗口在 `(0, 350)`，所以把 AX 的 `y=729` 直接传给 `click --at` 
 两个坐标系。
 
 **教训**：坐标类工具第一次用先做一次往返验证（点一个已知元素，从那边的日志/状态确认命中），
-不要拿它去诊断别的问题。用 `ax` 读元素 → 减窗口原点 → `click --at`，把减法写进脚本
-（`sidebar_row_point` 就是这么来的），不要心算。
+不要拿它去诊断别的问题。用 `ax` 读元素，把那个**屏幕**坐标原样交给 `click --at-screen`；
+只有自己按窗口几何算出偏移时才用 `click --at`（窗口相对）。
+
+**已修（issue #72）**：`click` 加了 `--at-screen`，且越界不再 clamp。原实现是
+
+```swift
+let clamped = CGPoint(x: window.frame.origin.x + min(max(offsetX, 0), width - 1), …)
+```
+
+越界点被拉到窗口边缘，点击「成功」、用例后面的断言失败，读起来像产品 bug。现在两种形式都
+先校验落点在窗口 frame 内，越界 `fail(.harness, …)` 退出码 2，消息里带窗口 frame 和实际
+算出的屏幕坐标。回归护栏是 `Scripts/gui.sh run click-coordinates`，它同时断言：
+`--at-screen` 原样点、`--at` 只加一次窗口原点、三种越界/混用各自被拒。
+
+判据用**窗口 frame**而不是内容区：AX 把 window 元素报成整个 frame（含标题栏），
+而 app 确实会往标题栏画东西，按内容区收窄会在没证据的前提下拒掉合法点。
 
 ---
 

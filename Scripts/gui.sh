@@ -1343,6 +1343,152 @@ PYEOF
 }
 
 
+# The coordinate contract behind issue #72: `click --at` is window-relative,
+# `click --at-screen` is a screen point, and a point outside the window is refused
+# instead of clamped onto its edge.
+#
+# Both halves are asserted, because each one alone is satisfiable by a driver that
+# is wrong:
+#
+#   * the *printed conversion* proves the two spaces are not the same arithmetic —
+#     `--at-screen X,Y` must report screen(X,Y) unchanged, `--at X,Y` must report
+#     screen(X+origin, Y+origin);
+#   * the *daemon state* proves the screen form actually landed on the row it
+#     named. Measured in the VM before the fix, with the window at (0,350): the row
+#     at screen y=468 was clicked at screen y=818 and the daemon's focused
+#     workspace did not move — and nothing in the output said the coordinate was
+#     in the wrong space.
+case_click_coordinates() {
+    requires() { echo focus; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        herdr workspace create >/dev/null 2>&1
+        sleep 1
+        # Distinct labels so a row is addressable by its own text, not by position:
+        # the sidebar shows the workspace label and nothing else.
+        herdr workspace rename w1 coord-one >/dev/null 2>&1 || return 1
+        herdr workspace rename w2 coord-two >/dev/null 2>&1 || return 1
+        herdr workspace focus w1 >/dev/null 2>&1
+        sleep 3
+        return 0
+    }
+    action() {
+        driver window >"$host_dir/window.txt" 2>&1
+        local point
+        point=$(sidebar_row_point coord-two) || {
+            echo "no sidebar row with value coord-two (issue #71: rows are AXValue only)"
+            return 1
+        }
+        printf '%s' "$point" >"$host_dir/row-point.txt"
+        # The row's screen point, straight from AX, through the screen form. This is
+        # the path issue #72 asked for: no subtraction at the call site.
+        driver click --at-screen "$point" >"$host_dir/click-screen.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/click-screen.txt"
+        sleep 3
+        herdr workspace list >"$host_dir/ws-after-screen.json" 2>&1
+
+        # The same offset form the other cases use, for comparison. It is not a
+        # duplicate of the above: the two runs are the A/B of the coordinate spaces.
+        local win_x win_y
+        win_x=$(sed -n 's/.* x=\(-\{0,1\}[0-9]*\) .*/\1/p' "$host_dir/window.txt")
+        win_y=$(sed -n 's/.* y=\(-\{0,1\}[0-9]*\) .*/\1/p' "$host_dir/window.txt")
+        driver click --at "120,200" >"$host_dir/click-offset.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/click-offset.txt"
+
+        # The three refusals. Recorded rather than asserted in `action`, because a
+        # refusal is a *harness* outcome (exit 2) and the assertion has to read the
+        # message and the exit code together.
+        local win_w win_h
+        win_w=$(sed -n 's/.* w=\([0-9]*\).*/\1/p' "$host_dir/window.txt")
+        win_h=$(sed -n 's/.* h=\([0-9]*\).*/\1/p' "$host_dir/window.txt")
+        # Exactly the mistake from the issue, in the offset form: an AX frame is
+        # larger than any legal offset in at least one axis once the window origin
+        # is added to it. `w,h` is the bound itself, which is out of range by
+        # definition (the range is half-open), so this does not depend on the
+        # window's position on screen.
+        driver click --at "$win_w,$win_h" >"$host_dir/refuse-offset.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/refuse-offset.txt"
+        local outside_x=$((win_x + win_w + 40))
+        local inside_y=$((win_y + 100))
+        driver click --at-screen "$outside_x,$inside_y" >"$host_dir/refuse-offwindow.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/refuse-offwindow.txt"
+        driver click --at "120,200" \
+            --at-screen "$((win_x + 120)),$((win_y + 200))" >"$host_dir/refuse-both.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/refuse-both.txt"
+    }
+    assert() {
+        local win_x win_y point
+        win_x=$(sed -n 's/.* x=\(-\{0,1\}[0-9]*\) .*/\1/p' "$host_dir/window.txt")
+        win_y=$(sed -n 's/.* y=\(-\{0,1\}[0-9]*\) .*/\1/p' "$host_dir/window.txt")
+        point=$(cat "$host_dir/row-point.txt" 2>/dev/null)
+
+        # 1. The screen form moved the daemon's focus to the workspace whose row was
+        #    clicked. A driver that treated `--at-screen` as window-relative would
+        #    land `win_y` points low and focus nothing.
+        local focused
+        focused=$(WSJSON="$host_dir/ws-after-screen.json" python3 -c '
+import json, os
+with open(os.environ["WSJSON"]) as handle:
+    workspaces = json.load(handle)["result"]["workspaces"]
+print(",".join(sorted(w["workspace_id"] for w in workspaces if w["focused"])))
+') || focused=""
+        check "click --at-screen on a sidebar row focuses that workspace" \
+            "$([ "$focused" = "w2" ] && echo 0 || echo 1)" \
+            "ax frame $point, focused workspace after the click: ${focused:-none} (expected w2)"
+
+        # 2. `--at-screen` passes the point through unchanged: the reported screen
+        #    coordinate is the AX frame itself, with no window origin added. This is
+        #    the A/B against assertion 3 — same window, same driver, different space.
+        local screen_log printed
+        screen_log=$(cat "$host_dir/click-screen.txt" 2>/dev/null)
+        printed=$(printf '%s' "$screen_log" | sed -n 's/^clicked screen(\(-\{0,1\}[0-9]*\),\(-\{0,1\}[0-9]*\)).*/\1,\2/p')
+        check "click --at-screen clicks the screen point unchanged" \
+            "$([ -n "$printed" ] && [ "$printed" = "$point" ] && echo 0 || echo 1)" \
+            "asked for $point, clicked $printed (the window origin must not be added)"
+
+        # 3. `--at` adds the window origin exactly once: the same numbers mean a
+        #    different screen point here, which is why mixing them was silent.
+        local offset_log offset_printed
+        offset_log=$(cat "$host_dir/click-offset.txt" 2>/dev/null)
+        offset_printed=$(printf '%s' "$offset_log" | sed -n 's/.* -> screen(\(-\{0,1\}[0-9]*\),\(-\{0,1\}[0-9]*\).*/\1,\2/p')
+        check "click --at adds the window origin exactly once" \
+            "$([ "$offset_printed" = "$((win_x + 120)),$((win_y + 200))" ] && echo 0 || echo 1)" \
+            "offset 120,200 at window origin $win_x,$win_y -> screen $offset_printed"
+
+        # 4. An out-of-window point in the offset form is refused, and the message
+        #    says both spaces are involved. Before the fix this was clamped to the
+        #    window edge and clicked there — a case then failed later, reading like
+        #    a product bug (issue #72).
+        local log
+        log=$(cat "$host_dir/refuse-offset.txt" 2>/dev/null)
+        check "an out-of-window --at point is refused, not clamped to the edge" \
+            "$(printf '%s' "$log" | grep -q '^exit=2$' \
+                && printf '%s' "$log" | grep -q 'is outside the window' \
+                && printf '%s' "$log" | grep -q 'would land at screen' \
+                && echo 0 || echo 1)" \
+            "$(printf '%s' "$log" | head -1 | cut -c1-120)"
+
+        # 5. A screen point outside the window is refused too, and the message
+        #    quotes the window frame so the reader can see which number is wrong.
+        log=$(cat "$host_dir/refuse-offwindow.txt" 2>/dev/null)
+        check "a screen point outside the window is refused, with the frame quoted" \
+            "$(printf '%s' "$log" | grep -q '^exit=2$' \
+                && printf '%s' "$log" | grep -q 'screen point .* is outside the window' \
+                && printf '%s' "$log" | grep -q 'window frame x=' \
+                && echo 0 || echo 1)" \
+            "$(printf '%s' "$log" | head -1 | cut -c1-120)"
+
+        # 6. Two spaces in one call is a caller mistake, not a preference: which one
+        #    did they mean? Refusing beats picking the first, which is how a whole
+        #    case can run against the wrong point.
+        log=$(cat "$host_dir/refuse-both.txt" 2>/dev/null)
+        check "passing --at and --at-screen together is refused" \
+            "$(printf '%s' "$log" | grep -q '^exit=2$' \
+                && printf '%s' "$log" | grep -q 'not both' && echo 0 || echo 1)" \
+            "$(printf '%s' "$log" | head -1 | cut -c1-120)"
+    }
+}
+
 # Drag the divider, then assert the daemon's ratio moved.
 #
 # This case replaced `KRAAL_PROBE_DIVIDER_DRAG`, which was the only end-to-end
@@ -1860,7 +2006,7 @@ machines_teardown() {
     esac
 }
 
-# The window-relative point to click for a sidebar row whose text is `label`.
+# The screen point to click for a sidebar row whose text is `label`.
 #
 # Two facts make this necessary rather than nice:
 #
@@ -1870,12 +2016,18 @@ machines_teardown() {
 #   2. `onTapGesture` responds to real clicks only; an `AXPress` does nothing, so
 #      the row cannot be "pressed" and the case must synthesise a click.
 #
-# Hence: read the row's screen frame from AX, subtract the window origin, click.
+# Hence: read the row's frame from AX and click it. The frame is a **screen**
+# coordinate (that is what AXPosition returns), so the value goes straight to
+# `click --at-screen` — no arithmetic at the call site. It used to be handed to
+# `click --at` after subtracting the window origin here, which is issue #72: one
+# subtraction per caller, silent when wrong, and a click 350pt off read like a
+# product bug. Output is `X,Y` because that is the argument shape both forms take.
+#
 # A hard-coded y broke the first version: with two workspaces on Local, the machine
 # rows sat lower and the click landed on Local's own row, so the case failed with
 # "the split landed on alpha-a" while the product was fine.
 sidebar_row_point() {
-    local label="$1" ax window_x window_y
+    local label="$1" ax
     ax=$(driver ax --json --depth 22 2>/dev/null) || return 1
     printf '%s' "$ax" | LABEL="$label" python3 -c '
 import json, os, sys
@@ -1891,7 +2043,7 @@ for node in nodes:
             break
 if hit is None:
     sys.exit(1)
-print(hit["x"] + 20, hit["y"] + hit["h"] // 2)
+print("{},{}".format(hit["x"] + 20, hit["y"] + hit["h"] // 2))
 ' || return 1
 }
 
@@ -1947,14 +2099,15 @@ case_machines_switch() {
         # workspace rows. Locate the row by its text instead of by a remembered y:
         # Local's workspace count changes the offsets, and the first version of this
         # case clicked a workspace row while everything else was correct.
-        local window_x window_y point
-        window_x=$(driver window 2>&1 | sed -n 's/.*x=\([-0-9]*\).*/\1/p')
-        window_y=$(driver window 2>&1 | sed -n 's/.*y=\([-0-9]*\).*/\1/p')
+        local point
         point=$(sidebar_row_point alpha-b) || {
             echo "no sidebar row with value alpha-b (issue #71: rows are AXValue only)"
             return 1
         }
-        driver click --at "$(( ${point% *} - window_x )),$(( ${point#* } - window_y ))"
+        # `--at-screen`: the AX frame is already a screen point, so nothing is
+        # offset here (issue #72). A driver that treated this form as
+        # window-relative would click 350pt low and land off the row.
+        driver click --at-screen "$point"
         sleep 3
     }
     assert() {
@@ -2454,7 +2607,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch machines-controls"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch machines-controls"; }
 
 # ---------------------------------------------------------------- entrypoint
 
