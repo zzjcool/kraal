@@ -267,6 +267,32 @@ kraal-gui: no element matching title=alpha-b
 **教训**：换一种元素类型就重新确认一遍属性面。一次 `ax --json --depth 20 | grep` 就能回答
 「这个控件到底把文字放在哪个属性上」，比猜三次快。
 
+**并且不要再猜「怎么写法才能出 `AXTitle`」。** 2026-10-23 在 macOS 27.0.1 / 26A434 上
+逐个实测了 20 种 SwiftUI `Button` 写法（朴素、`label:` 闭包、`.borderless`、`.help`、
+`Label`、`.bordered`、`.borderedProminent`、`.link`、`.keyboardShortcut`、
+`.accessibilityLabel`、`.accessibilityElement(children:)`、`.accessibilityRepresentation`、
+`.accessibilityValue` …），**全部** `title=''`，文字都在 `AXDescription` 里；同一个窗口里
+裸的 AppKit `NSButton` 则**带** title。为排除「title 存在但不是 String」这个混杂因素，
+还把 driver 临时改成打印 `CFTypeID` —— 那些属性的 `copy()` 直接返回 nil。
+
+所以在本项目里：
+
+| 元素 | 文字在 | 能不能 `press --title` |
+| --- | --- | --- |
+| SwiftUI `Text` | `AXValue` | 不适用 |
+| SwiftUI `Button` | `AXDescription` | **不能**，用 `--desc` |
+| AppKit `NSButton` | `AXTitle` | 能 |
+
+issue #71 当初的判断（`.borderless` + `.help()` 是原因、`.accessibilityLabel` 会写 title）
+**两条都不对**：`--title` 在 SwiftUI 上不可达，而 `.accessibilityLabel` 改的是 `desc`。
+所以那个 issue 的正解不是「补 title」，而是**让 desc 唯一**：机器面板的行内按钮现在叫
+`Rename <机器名>` / `Remove <机器名>`，rename sheet 打开时 `desc=Rename` 从 3 个候选降回
+1 个，`press --desc` 不再需要 `--index` 猜。
+
+**推论**：门禁不要断言不可达的属性。`Scripts/gui.sh` 的 `machines-controls` 因此
+**故意不测** `--title`，只测「每个控件有一个唯一稳定的 desc」—— 断言一个永远不可能成立
+的东西，比没有门禁更糟。
+
 `kraal-gui ax` 现在同时输出 `value`，`press`/`select` 也支持 `--value` —— 但**侧边栏行仍然
 点不动**：`onTapGesture` 不响应 `AXPress`，真实点击只能靠 CGEvent，而这就又回到了
 「先激活窗口，再算坐标」。定位可以用 `value`（`Scripts/gui.sh` 的 `sidebar_row_point`），

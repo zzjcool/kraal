@@ -557,13 +557,32 @@ private struct MachineRow: View {
                 .disabled(busy)
                 .help(entry.enabled ? "Disable this machine" : "Enable this machine")
 
+                // `.accessibilityLabel`, not `.help` or a `Label` spelling: measured
+                // (issue #71, macOS 27.0.1 / 26A434) that **no** SwiftUI `Button`
+                // carries `AXTitle` — a plain `Button("Rename") {}` and a bare AppKit
+                // `NSButton` in the same window differ only in that the NSButton
+                // reports `AXTitle=…`. Twenty spellings were measured; every SwiftUI
+                // one produced `title=''` and put its text in `AXDescription`. So the
+                // lever here is the *desc*, and the fix is about making it unique.
+                //
+                // The desc carries the machine's label because the panel has one
+                // Rename and one Remove **per row**: with a bare "Rename", three
+                // buttons answered `desc=Rename` once a sheet was open (two rows plus
+                // the sheet's own submit button), and a driver had to guess an
+                // `--index`. `Rename <label>` is a distinct string per row, and it
+                // leaves the sheet's plain "Rename" as the only match for that name —
+                // the `--index` guessing across a row and an open sheet was the
+                // reported symptom. VoiceOver also announces which machine the
+                // button belongs to, which the bare label did not.
                 Button("Rename", action: onRename)
                     .buttonStyle(.borderless)
                     .disabled(busy)
+                    .accessibilityLabel("Rename \(entry.displayLabel)")
                 Button("Remove", action: onRemove)
                     .buttonStyle(.borderless)
                     .foregroundStyle(.red)
                     .disabled(busy)
+                    .accessibilityLabel("Remove \(entry.displayLabel)")
             }
         }
         .padding(.horizontal, KraalTheme.Space.roomy)

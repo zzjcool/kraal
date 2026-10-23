@@ -15,6 +15,15 @@ import Foundation
 ///   `AXIdentifier` of `runCommand:` — 5 menu items use that same value, so it
 ///   cannot identify anything on its own
 ///
+/// `AXTitle` is an AppKit-only channel in this app, measured (issue #71): a bare
+/// `NSButton` reports the title it was given, while twenty spellings of SwiftUI
+/// `Button` all reported `title=''` and put their text in `AXDescription` —
+/// including plain `Button("X"){}`, `.bordered`, `.help`, `Label` and
+/// `.accessibilityLabel`. So a control whose text was added with
+/// `.accessibilityLabel` is found by `--desc`, never by `--title`. The machines
+/// panel relies on that: its row buttons are `desc="Rename <machine>"` so one row
+/// is addressable without `--index`.
+///
 /// Hence `desc` and `title` are first-class and `id` is not the default path.
 struct Selector {
     var id: String?
