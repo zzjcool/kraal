@@ -292,13 +292,24 @@ public extension AppStore {
     /// "N peers, one foreground" instead of "one live connection plus observers".
     /// A machine that is already connected is left alone, so this is safe to call
     /// after every catalog reload.
+    ///
+    /// "Already connected" needs **both** checks, and used to test only the first:
+    /// `connectEndpoint` clears `connectionTask` when the handshake lands and keeps
+    /// `connection`, so a healthy machine has `connectionTask == nil` *and*
+    /// `connection != nil`. Guarding on the task alone re-dialled every healthy
+    /// machine. That went unnoticed while this ran only at launch (nothing
+    /// connected yet) and after the machines dialog wrote a profile (rare); issue
+    /// #69 makes it run on every external roster change, so it would show up as the
+    /// pane blanking whenever anybody runs `herdr machine add`. Measured with the
+    /// old guard, local row dialling a peer that answers: `connection` replaced,
+    /// `connectionEpoch 1 -> 2`.
     func connectMissingEndpoints() {
         for endpoint in endpoints {
             guard endpoint.enabled else {
                 disconnectEndpoint(endpoint)
                 continue
             }
-            guard endpoint.connectionTask == nil else { continue }
+            guard endpoint.connectionTask == nil, endpoint.connection == nil else { continue }
             connectEndpoint(endpoint)
         }
     }
