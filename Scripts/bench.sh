@@ -26,6 +26,13 @@
 #
 # Both traps are written down in docs/PERFORMANCE.md §2.
 #
+# A third trap is shape, not code: a frame's *style count* changes the cost of
+# rendering it by 7x once issue #49 was fixed. `decodedFrame` cycles colours so
+# every cell starts a new style run (worst case); `uniformlyStyledFrame` is one
+# style for the whole screen (what a real full-text pane looks like). Both are
+# measured, and a self-check asserts they really do differ in style count -- if
+# they silently converge, the pair stops measuring anything.
+#
 # The harness compiles a small Swift program against the release static library.
 # It deliberately does not live in the test target: running it under `swift test`
 # would link a debug build and measure nothing useful.
@@ -72,6 +79,37 @@ func decodedFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -> FrameD
             symbol: symbol,
             foreground: UInt32(index % 8),
             background: 0x1E1E1E,
+            modifier: 0,
+            skip: false,
+            hyperlink: nil
+        ))
+    }
+    return FrameData(
+        cells: cells,
+        width: width,
+        height: height,
+        cursor: CursorState(column: 0, row: 0, visible: true, shape: 0),
+        hyperlinks: [],
+        graphics: Data()
+    )
+}
+
+/// A frame whose cells all share one style, like a terminal full of plain text.
+///
+/// `decodedFrame` cycles `foreground` through 8 named colours, so *every* cell
+/// differs from its neighbour in style. That is the worst case for the renderer
+/// (and issue #49's root cause: `StyleCode.encode` used to run per cell and its
+/// result was discarded). Real screens are mostly this shape instead -- one
+/// colour, thousands of cells -- which is why both are measured.
+func uniformlyStyledFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -> FrameData {
+    var cells = [CellData]()
+    cells.reserveCapacity(Int(width) * Int(height))
+    for index in 0 ..< Int(width) * Int(height) {
+        let symbol = String(UnicodeScalar(UInt8(97 + (index + Int(seed)) % 26)))
+        cells.append(CellData(
+            symbol: symbol,
+            foreground: 3,
+            background: 0x0100_0000,
             modifier: 0,
             skip: false,
             hyperlink: nil
@@ -158,12 +196,23 @@ if mode == "all" || mode == "render" {
                          first: frame, second: changed)
     }
     // Worst case: every row differs (tail -f, htop, full-screen scroll).
+    //
+    // Measured twice, because issue #49's claim is precisely that these two must
+    // *not* cost the same. `decodedFrame` cycles the foreground through 8 named
+    // colours, so every cell starts a new style run and the encoder genuinely has
+    // to run ~10000 times. `uniformlyStyledFrame` is one style across the screen,
+    // where it has to run ~once. Before the fix the ratio was 1.08x -- i.e. the
+    // encoder ran per cell and its result was thrown away.
     print("-- every row changed (scroll / tail -f) --")
     for (label, width, height) in sizes {
-        let first = decodedFrame(width, height)
-        let second = decodedFrame(width, height, seed: 1)
+        let varied = decodedFrame(width, height)
+        let variedNext = decodedFrame(width, height, seed: 1)
         measureRendering("\(label) every row changed", iterations: 800,
-                         first: first, second: second)
+                         first: varied, second: variedNext)
+        let uniform = uniformlyStyledFrame(width, height)
+        let uniformNext = uniformlyStyledFrame(width, height, seed: 1)
+        measureRendering("\(label) every row changed, uniform", iterations: 800,
+                         first: uniform, second: uniformNext)
     }
     // A frame that genuinely repeats (a polling snapshot): the renderer sees the
     // same content twice, which the daemon does send, so this case is real.
@@ -178,6 +227,30 @@ if mode == "all" || mode == "render" {
         let second = decodedFrame(width, height)
         measureRendering("\(label) no-op diff", iterations: 800,
                          first: first, second: second)
+    }
+}
+
+if mode == "all" || mode == "render" {
+    print("")
+    print("=== self-check: the two every-row frames must differ in style count ===")
+    // Issue #49's regression, as a self-check rather than a timing comparison.
+    // Timing one run against another measures the machine; counting distinct
+    // styles measures the probe. If these ever come out equal, the "uniform"
+    // case stopped being uniform and the comparison above silently measures
+    // nothing -- exactly the class of error that produced the 0.29 us no-op diff.
+    for (label, width, height) in sizes {
+        func distinctStyles(_ frame: FrameData) -> Int {
+            Set(frame.cells.map { "\($0.foreground),\($0.background),\($0.modifier)" }).count
+        }
+        let varied = distinctStyles(decodedFrame(width, height))
+        let uniform = distinctStyles(uniformlyStyledFrame(width, height))
+        let ok = varied > 1 && uniform == 1
+        print("  \(label) styles: varied=\(varied) uniform=\(uniform): \(ok ? "ok" : "BROKEN")")
+        if !ok {
+            FileHandle.standardError.write(
+                Data("bench self-check failed: uniform frame is not uniform for \(label)\n".utf8))
+            exit(1)
+        }
     }
 }
 

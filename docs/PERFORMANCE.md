@@ -141,6 +141,12 @@ func decodedFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -> FrameD
 统一样式仍然 1229 us → **「样式变了才输出」这个优化没有生效**。这一条对照直接
 定位了 issue #49 的根因：`StyleCode.encode` 在每格循环里无条件调用，结果被丢弃。
 
+这条对照原本是临时脚本，**没入库**——所以它既无法复跑，也没人会发现它失效。
+现在它是 `./Scripts/bench.sh render` 的一个正式用例（`every row changed, uniform`），
+并且配了一条自检：两种帧的样式数必须真的不同（`varied > 1 && uniform == 1`），
+否则打印 `BROKEN` 并 exit 1。注入回归（把 uniform case 的 `foreground: 3` 改回
+`index % 8`）已 A/B 验证会红。
+
 **C. 复现最小动作** —— 直接测 `[String]` 建 + `joined(";")` 10000 次 = 961 us，
 与整帧 1500 us 中的 ~1230 us 对上，确认这确实是主要成本。
 
@@ -163,6 +169,25 @@ func decodedFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -> FrameD
 注意「冗余快照」这一档**不是免费的**：内容完全不变时仍要全量扫行做比较，
 200×50 要 86.9 us、300×80 要 209 us —— 和「1 格变化」几乎同价。这条曾经被记成
 0.29 us（共享存储导致的假象，见 §1b），据此得出的「no-op 可以忽略」是错的。
+
+### 4b. #49 修掉之后的数字（2026-10-23 实测）
+
+「整屏滚动」这一档还要再分一次，因为**样式数是独立的一个维度**：
+
+| render 200×50，每行都变 | 修前 | 修后 | 倍数 |
+|---|---|---|---|
+| 统一样式（一整屏一个颜色） | 1378 us | **209 us** | **6.6×** |
+| 样式每格都变（8 个命名色循环） | 1488 us | 1458 us | 1.02× |
+
+修前这两行只差 1.08 倍 —— 这就是 §3 B 那个对照的定量版本：样式数几乎没有影响，
+说明编码器对每格都在跑。修后差 7 倍，说明它只在样式真的变化时跑。
+
+**`every row changed` 那一档没有变快，这是正确的。** `bench.sh` 的 `decodedFrame`
+把前景色按 `index % 8` 循环，所以相邻格样式都不同 —— 10000 格里有 10000 次真实的
+样式变化，编码器必须跑 10000 次。剩下的 ~0.14 us/格 是 `StyleCode.encode` 自己的
+成本（建 `[String]` + `joined`），要再快得改 `encode` 内部的字符串拼接，与 #49
+的「结果被丢弃」不是同一件事。而统一样式（真实终端最常见的形态：一整屏同色文本）
+降到 0.02 us/格，那部分才是纯浪费，已经消掉。
 
 ## 5. 折算成帧预算
 
@@ -264,7 +289,7 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 
 | 热点 | 位置 | 200×50 成本 | issue |
 |---|---|---|---|
-| `StyleCode.encode` 每格建 `[String]` + `joined` | `SurfaceANSIRenderer.swift:222` | ~1230 us/帧（整屏变化时） | #49 |
+| ~~`StyleCode.encode` 每格建 `[String]` + `joined`~~ | `SurfaceANSIRenderer.swift:222` | ~~~1230 us/帧（整屏变化时）~~ → 统一样式 209 us（**已修**） | #49 |
 | patch 应用时整屏 CoW 深拷贝 | `AppStore+Events.swift:146` | 37.4 us/patch（4 pane = 54% 预算） | #50 |
 | 每键多发一条 `pane.focus` | `KraalMacMain.swift:97` | 每键 0.036 → 0.248 ms（7×） | #55 |
 | 日志格式化在 enabled 检查前求值 | `KraalLog.swift:108` | 每键 0.96 us（关闭时照付） | #56 |
