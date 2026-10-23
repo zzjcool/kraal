@@ -977,6 +977,145 @@ case_popup() {
 # The decisive assertion is the clipboard's content: the pane is filled with
 # numbered lines, the mode is scrolled into history, one line is selected with
 # `V`, copied with `y`, and the clipboard must contain that exact number.
+# Assert that scrolling actually moves the picture, not just the scrollbar.
+#
+# The reported symptom was exact: the scrollbar thumb moved, the terminal content
+# did not. Both come from the same surface frame, so this is the sharpest possible
+# client-side bug — the frame arrived and was thrown away.
+#
+# Why it happens: `pane.scroll` is a *view* operation. It renders a different
+# viewport into `cells` but never bumps `content_seq` (`pane.rs:3408-3413`), so
+# `content_revision` is unchanged, and the grid is unchanged too. `apply(surface:)`
+# only repainted for a changed revision or a changed grid, so it returned early and
+# the new viewport was dropped. The scrollbar reads `scroll.offset_from_bottom`, a
+# different field, and moved correctly — which is why the two disagreed.
+#
+# The assertion has to be on the *rendered text*, not on the offset: the offset was
+# never the broken part.
+case_scroll() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ] || return 1
+        # Numbered lines give every row an identity, so "which lines are on screen"
+        # is answerable. Retried and verified against the daemon rather than slept
+        # on: `pane run` sometimes lands before the shell is ready and is dropped.
+        local maxoff
+        for _ in 1 2 3 4 5; do
+            herdr pane run "$(first_pane_id)" "seq -f 'line-%g' 1 200" \
+                >/dev/null 2>&1 || true
+            sleep 1
+            maxoff=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+panes = json.load(sys.stdin)["result"]["panes"]
+print((panes[0].get("scroll") or {}).get("max_offset_from_bottom", 0))
+' 2>/dev/null)
+            if [ -n "$maxoff" ] && [ "$maxoff" -gt 0 ] 2>/dev/null; then
+                echo "scrollback ready: max_offset=$maxoff"
+                return 0
+            fi
+        done
+        echo "no scrollback accumulated" >&2
+        return 1
+    }
+    action() {
+        # What the pane shows at the bottom of the scrollback, straight from the
+        # daemon. This is the oracle for "which rows are visible".
+        FIRST_VISIBLE=$(herdr pane read "$(first_pane_id)" --source visible 2>/dev/null \
+            | grep -o 'line-[0-9]*' | head -1)
+        echo "before scroll, first visible: ${FIRST_VISIBLE:-none}"
+
+        # `pane.scroll` is socket-only; `herdr pane` has no scroll verb.
+        run_py herdr-api.py --socket "$API_SOCKET" --method pane.scroll \
+            --params "{\"pane_id\": \"$(first_pane_id)\", \"offset_from_bottom\": 30}" \
+            >/dev/null || { echo "pane.scroll refused" >&2; return 1; }
+        sleep 2
+
+        AFTER_VISIBLE=$(herdr pane read "$(first_pane_id)" --source visible 2>/dev/null \
+            | grep -o 'line-[0-9]*' | head -1)
+        echo "after scroll, first visible: ${AFTER_VISIBLE:-none}"
+        return 0
+    }
+    assert() {
+        collect_app_log "$host_dir"
+
+        # The daemon's own idea of the visible rows must have moved. If this fails
+        # the scroll never happened and the rest of the case proves nothing.
+        check "the daemon scrolled the pane's viewport" \
+            "$([ -n "$AFTER_VISIBLE" ] && [ "$AFTER_VISIBLE" != "$FIRST_VISIBLE" ] && echo 0 || echo 1)" \
+            "before=${FIRST_VISIBLE:-none} after=${AFTER_VISIBLE:-none}"
+
+        # And the client must have painted that frame. Before the fix the same
+        # frame arrived with an unchanged revision and was dropped, so the log shows
+        # the scroll being applied and no repaint following it.
+        local painted
+        painted=$(grep 'scroll repaint:' "$host_dir/kraal.log" 2>/dev/null | tail -1)
+        check "the scrolled frame was repainted" \
+            "$([ -n "$painted" ] && echo 0 || echo 1)" \
+            "${painted:-no scroll repaint logged}"
+    }
+}
+
+
+# Assert copy mode reaches the daemon's history, not just the local screen.
+#
+# Why this cannot be a unit test: the state machine is tested exhaustively in
+# `CopyModeTests`, but that proves nothing about the *link* — whether ⌘F actually
+# enters, whether a key reaches the monitor rather than Ghostty, and whether the
+# text that lands on the clipboard came from the daemon's scrollback. All three
+# are wiring, and all three can be broken while every unit test passes.
+#
+# The decisive assertion is the clipboard's content: the pane is filled with
+# numbered lines, the mode is scrolled into history, one line is selected with
+# `V`, copied with `y`, and the clipboard must contain that exact number.
+case_scrollprobe() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ] || return 1
+        # Enough scrollback that `max_offset_from_bottom` is non-zero. Retried and
+        # verified against the daemon, not slept on: `pane run` sometimes lands
+        # before the shell is ready and is silently dropped.
+        local maxoff
+        for _ in 1 2 3 4 5; do
+            herdr pane run "$(first_pane_id)" "seq -f 'line-%g' 1 200" \
+                >/dev/null 2>&1 || true
+            sleep 1
+            maxoff=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+panes = json.load(sys.stdin)["result"]["panes"]
+print((panes[0].get("scroll") or {}).get("max_offset_from_bottom", 0))
+' 2>/dev/null)
+            if [ -n "$maxoff" ] && [ "$maxoff" -gt 0 ] 2>/dev/null; then
+                echo "scrollback ready: max_offset=$maxoff"
+                return 0
+            fi
+        done
+        echo "no scrollback accumulated" >&2
+        return 1
+    }
+    action() {
+        # `herdr pane` has no scroll verb; `pane.scroll` is socket-only.
+        local pane
+        pane=$(first_pane_id)
+        run_py herdr-api.py --socket "$API_SOCKET" --method pane.scroll \
+            --params "{\"pane_id\": \"$pane\", \"offset_from_bottom\": 30}" \
+            >/dev/null || { echo "cannot scroll" >&2; return 1; }
+        sleep 2
+        return 0
+    }
+    assert() {
+        collect_app_log "$host_dir"
+        grep 'probe:' "$host_dir/kraal.log" 2>/dev/null | tail -8
+        return 0
+    }
+}
+
+
 case_copy_mode() {
     # Synthetic keys need a frontmost app, so this is a focus-requiring case.
     requires() { echo focus; }
@@ -1714,7 +1853,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll"; }
 
 # ---------------------------------------------------------------- entrypoint
 

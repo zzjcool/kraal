@@ -118,15 +118,32 @@ public enum SurfaceGeometry {
     /// width rewrites every row without touching a single cell of text, and the
     /// already-painted frame is then the wrong width. Keying repaints on the
     /// revision alone skipped exactly those frames.
+    ///
+    /// Scrolling is the other case, and the one that survived longest: the daemon
+    /// renders the scrolled viewport into `cells`, but scrolling is a *view*
+    /// operation — it never calls `content_seq.fetch_add` (`pane.rs:3408-3413`), so
+    /// the revision stays put and the grid does not change. The frame therefore
+    /// looked identical by every cheap measure and was dropped, while the scrollbar
+    /// — which comes from `scroll.offset_from_bottom`, a different field — moved
+    /// correctly. Measured: `rev=66 last=66 sameCells=false off=30/166`, i.e. the
+    /// cells had changed and nothing repainted them.
+    ///
+    /// `cellsDiffer` is what closes that gap. It is only consulted when the cheap
+    /// reasons are all false, so a normal printing frame never pays for it.
     public static func needsRepaint(
         contentRevisionChanged: Bool,
         previousGrid: (width: Int, height: Int)?,
-        currentGrid: (width: Int, height: Int)
+        currentGrid: (width: Int, height: Int),
+        cellsDiffer: @autoclosure () -> Bool = false
     ) -> Bool {
-        guard !contentRevisionChanged else { return true }
+        if contentRevisionChanged { return true }
         guard let previousGrid else { return true }
-        return previousGrid.width != currentGrid.width
-            || previousGrid.height != currentGrid.height
+        if previousGrid.width != currentGrid.width
+            || previousGrid.height != currentGrid.height { return true }
+        // Last, and lazily: comparing every cell is only worth it once the cheap
+        // reasons have been ruled out. `@autoclosure` keeps a frame that repainted
+        // for one of those reasons from paying for a comparison nobody asked.
+        return cellsDiffer()
     }
 
     /// Whether the cells changed, ignoring the cursor.

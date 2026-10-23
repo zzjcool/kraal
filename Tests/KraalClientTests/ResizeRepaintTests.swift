@@ -130,6 +130,59 @@ struct ResizeRepaintTests {
         #expect(lastPaintedGrid?.width == 111)
     }
 
+    /// Scrolling changes the cells without touching the revision or the grid.
+    ///
+    /// This is the case that made the scrollbar move while the terminal picture
+    /// stayed frozen: `pane.scroll` renders a different viewport into `cells`, but
+    /// it is a view operation and never bumps `content_seq`, so `contentRevision`
+    /// came back identical and the grid did not change either. Both cheap reasons
+    /// for a repaint said no, and the frame — which *did* differ — was dropped.
+    ///
+    /// Measured in the VM before the fix:
+    /// `probe: rev=66 last=66 sameCells=false off=30/166`.
+    @Test("scrolling repaints even though the revision and grid are unchanged")
+    func scrollRepaints() {
+        let grid = (width: 98, height: 35)
+        let needs = SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: grid,
+            currentGrid: grid,
+            cellsDiffer: true
+        )
+        #expect(needs, "the viewport moved, so the cells must be painted")
+
+        // And the same inputs without a cell change stay a no-op: this is a cursor
+        // blink or a repeated frame, and repainting it would waste the whole grid.
+        let quiet = SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: grid,
+            currentGrid: grid,
+            cellsDiffer: false
+        )
+        #expect(!quiet)
+    }
+
+    /// `cellsDiffer` must not be consulted when a cheap reason already decided.
+    ///
+    /// Comparing every cell is the expensive part of the decision, and a frame that
+    /// prints something determines the answer without it. Proven by passing a
+    /// closure that fails the test if it ever runs.
+    @Test("a repaint decided by the revision never compares cells")
+    func revisionShortCircuitsCellComparison() {
+        var compared = false
+        let needs = SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: true,
+            previousGrid: (width: 98, height: 35),
+            currentGrid: (width: 98, height: 35),
+            cellsDiffer: {
+                compared = true
+                return true
+            }()
+        )
+        #expect(needs)
+        #expect(!compared, "the cell comparison is the expensive fallback, not a default")
+    }
+
     /// Cells are computed from the pane's point size, so a bigger pane must ask
     /// for more cells. This is what makes the resize visible to the daemon.
     @Test("a larger pane area asks for more cells")
