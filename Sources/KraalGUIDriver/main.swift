@@ -788,26 +788,6 @@ func commandMenu(_ args: Arguments) -> Never {
     exit(Exit.success.rawValue)
 }
 
-// MARK: - P1: synthetic event commands
-
-/// Sends a key chord to the app, e.g. `--mod cmd --char w` for ⌘W.
-func commandKey(_ args: Arguments) -> Never {
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
-    guard let char = args.string("char") else { fail(.harness, "key needs --char") }
-    let modifiers = CGEventFlags.parse(args.string("mod"))
-    guard activateAndConfirm(app) else {
-        fail(.harness, "could not bring '\(app.name)' to the front for a key event")
-    }
-    guard SyntheticInput.key(char: char, modifiers: modifiers) else {
-        fail(.harness, "no virtual key code for '\(char)' on a US layout")
-    }
-    print("sent key '\(char)' mods=\(modifiers.rawValue)")
-    requireAlive(app, context: "key")
-    exit(Exit.success.rawValue)
-}
-
 // MARK: - Entry point
 
 let argv = Array(CommandLine.arguments.dropFirst())
@@ -831,8 +811,11 @@ guard let command = argv.first else {
       scroll --at X,Y | --at-screen X,Y [--lines N]
                                      synthetic wheel at a point; the app decides
                                      which pane is under it, unlike pane.scroll
-      key   --char C [--mod cmd,shift]
-                                     key chord (needs the app frontmost)
+      key   --name N | --char C [--mod cmd,shift]
+                                     key chord (needs the app frontmost);
+                                     --name escape|return|tab|space|backspace|
+                                     forwardDelete|up|down|left|right|home|end|
+                                     pageUp|pageDown|f1..f12
       menu  --menu T --item T [--index N]
                                      open a menu bar menu, then press an item
       launch --app PATH [--env K=V] [--wait-window T] [--match NAME]

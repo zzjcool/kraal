@@ -197,7 +197,27 @@ vm_start() {
 #
 # herdr is pushed too: the guest has no Homebrew and its network is unreliable,
 # and the point of the run is to exercise Kraal, not to provision a machine.
+# Rebuild the driver before it is pushed anywhere.
+#
+# `build-app.sh` builds `KraalMac` only, so a driver edit was invisible: the
+# previously built binary was pushed, and an A/B on driver code went green because
+# *the change never reached the guest*. Measured during issue #92 — reverting
+# `--char` to its old first-character behaviour left the case passing until this
+# build was added, after which it failed with the bug's exact signature
+# (`exit=0 sent key 'escape' (keycode 14)`, i.e. the letter `e`).
+#
+# Cheap (a no-op build is ~1 s) and it removes a silent-false-pass mode, which is
+# worth more than the second.
+build_driver() {
+    local swift=/usr/bin/swift
+    [ -x "$swift" ] || swift=$(command -v swift) || die "no swift toolchain"
+    DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer} \
+        "$swift" build --product KraalGUIDriver >/dev/null 2>&1 \
+        || die "failed to build KraalGUIDriver"
+}
+
 vm_deploy() {
+    build_driver
     [ -x "$DRIVER" ] || die "no driver at $DRIVER; run: swift build --product KraalGUIDriver"
     [ -d "$ROOT/build/Kraal.app" ] || die "no build/Kraal.app; run: ./Scripts/build-app.sh"
     say "deploying to vm $VM"
@@ -225,9 +245,9 @@ vm_deploy() {
     # The mouse probe. A TUI that reports what it receives is the only way to tell
     # "the app never sent the event" from "the app sent it and the program ignored
     # it" — both look like a dead click from the outside (issue #95).
-    tar -czf - -C "$ROOT/Scripts" tui-mouse-probe.py \
+    tar -czf - -C "$ROOT/Scripts" tui-mouse-probe.py key-probe.py \
         | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf -" \
-        || die "failed to push tui-mouse-probe.py into the guest"
+        || die "failed to push the probes into the guest"
 
     # The `kraal` CLI. The machines fixture reads a daemon's `boot` id with it: pane
     # ids repeat across daemons (both machines have a `w1:p1`), so the boot id is the
@@ -396,7 +416,11 @@ cmd_probe() {
         mkdir -p "$SCRATCH"
         [ -d "$ROOT/build/Kraal.app" ] || die "no build/Kraal.app; run: ./Scripts/build-app.sh"
         vm_start
-        vm_deploy
+        vm_deploy                      # builds the driver, then pushes it
+    else
+        # The local backend runs the host's driver in place, so it needs the same
+        # rebuild — otherwise a driver edit is tested against the previous binary.
+        build_driver
     fi
     driver probe
 }
@@ -2753,6 +2777,130 @@ PYEOF
     }
 }
 
+# Named keys really reach the program (issue #92).
+#
+# `kraal-gui key --char escape` used to take the first character of its argument
+# and post the letter `e` — successfully, exit 0. A case that meant to press ESC
+# pressed `e` and reported success, which is the same class of trap as issue #72:
+# the harness sent something other than what it was asked to, and nothing said so.
+#
+# The assertion is on the bytes the program in the pane received. "The key was
+# sent" is not observable from outside — and the whole defect was that the driver
+# believed it had sent it.
+case_key_named() {
+    requires() { echo focus; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        local target
+        target=$(first_pane_id) || return 1
+        printf '%s' "$target" >"$host_dir/target-pane.txt"
+        # The probe switches the terminal to raw mode and writes a `.ready` marker.
+        # Keys sent before that are interpreted by the terminal itself — ESC would be
+        # eaten there and never reach the program, which is a false failure that
+        # looks exactly like the bug.
+        herdr pane run "$target" "python3 $VM_ROOT/key-probe.py 40 $dir/key-events.txt" \
+            >/dev/null 2>&1 || return 1
+        local tries=0
+        while [ "$tries" -lt 40 ]; do
+            if tart exec "$VM" /bin/bash -lc "test -s $dir/key-events.txt.ready" 2>/dev/null; then
+                return 0
+            fi
+            tries=$((tries + 1))
+            sleep 0.25
+        done
+        echo "key probe never entered raw mode (pane $target)"
+        return 1
+    }
+    action() {
+        # ESC first: it is the key the issue is about, and it is the one a wrong
+        # `--char` turns into a printable letter.
+        driver key --name escape >"$host_dir/key-escape.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/key-escape.txt"
+        sleep 1
+        driver key --name tab >"$host_dir/key-tab.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/key-tab.txt"
+        sleep 1
+        # And a plain character, to show the two channels did not collapse into one.
+        driver key --char a >"$host_dir/key-a.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/key-a.txt"
+        sleep 1
+        # A wrong name must be refused, loudly. Run last so its failure cannot be
+        # confused with the keys above.
+        driver key --name notakey >"$host_dir/key-bad.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/key-bad.txt"
+        sleep 1
+        # And a key *name* passed to --char: the original mistake, which used to
+        # succeed by sending a letter.
+        driver key --char escape >"$host_dir/key-barchar.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/key-barchar.txt"
+        sleep 1
+    }
+    assert() {
+        local events="$host_dir/key-events.txt"
+        if [ "$BACKEND" = "vm" ]; then
+            tart exec -i "$VM" /bin/bash -lc "cat $dir/key-events.txt 2>/dev/null" \
+                >"$events" 2>/dev/null
+        else
+            cp "$dir/key-events.txt" "$events" 2>/dev/null
+        fi
+
+        # ESC is 0x1b. Tab is 0x09, and `a` is 0x61. The program saw the raw bytes,
+        # so this is the program's own account rather than the driver's belief.
+        local seen
+        seen=$(python3 - "$events" <<'PYEOF'
+import ast
+import sys
+
+blob = b""
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                blob += ast.literal_eval(line)
+except OSError:
+    pass
+print(" ".join(f"{byte:02x}" for byte in blob))
+PYEOF
+)
+        printf '%s' "$seen" >"$host_dir/seen-bytes.txt"
+
+        check "the program received ESC as a real escape byte" \
+            "$(printf '%s' "$seen" | tr ' ' '\n' | grep -qx '1b' && echo 0 || echo 1)" \
+            "bytes seen: ${seen:-none}"
+
+        # Tab, not the letter `t`: the same failure mode, one key over.
+        check "the program received TAB and not the letter t" \
+            "$(printf '%s' "$seen" | tr ' ' '\n' | grep -qx '09' && echo 0 || echo 1)" \
+            "bytes seen: ${seen:-none}"
+
+        # And `--char a` still works, so the fix did not route everything through
+        # the name table.
+        check "the program received a plain character" \
+            "$(printf '%s' "$seen" | tr ' ' '\n' | grep -qx '61' && echo 0 || echo 1)" \
+            "bytes seen: ${seen:-none}"
+
+        # The two refusals. `exit=` was captured right after each command, so a
+        # silent success cannot hide here.
+        local bad_exit bad_char_exit
+        bad_exit=$(sed -n 's/^exit=//p' "$host_dir/key-bad.txt" 2>/dev/null | tail -1)
+        bad_char_exit=$(sed -n 's/^exit=//p' "$host_dir/key-barchar.txt" 2>/dev/null | tail -1)
+        check "an unknown key name is refused, not posted as something else" \
+            "$([ "${bad_exit:-0}" != "0" ] && echo 0 || echo 1)" \
+            "exit=$bad_exit $(grep -a 'no key named' "$host_dir/key-bad.txt" 2>/dev/null | head -1)"
+
+        # The original mistake: a key name in `--char`. It must say what to do
+        # instead, because silently sending `e` is how this issue happened.
+        check "a key name passed to --char is refused with a pointer to --name" \
+            "$([ "${bad_char_exit:-0}" != "0" ] \
+                && grep -aq 'use --name' "$host_dir/key-barchar.txt" 2>/dev/null \
+                && echo 0 || echo 1)" \
+            "exit=$bad_char_exit $(head -1 "$host_dir/key-barchar.txt" 2>/dev/null)"
+    }
+}
+
 case_machines_roster() {
     requires() { echo ax; }
     fixture() {
@@ -3413,7 +3561,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named"; }
 
 # ---------------------------------------------------------------- entrypoint
 
