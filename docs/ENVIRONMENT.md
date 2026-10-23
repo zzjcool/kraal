@@ -213,6 +213,103 @@ KRAAL_HERDR_HOME=/tmp/my-test-home ./Scripts/dev-session.sh start
 但那样加的机器会进你自己的名册，验完记得删。想彻底不碰真实名册，就复制一份
 到临时目录再指过去。
 
+#### `machine add` 有两个隔离面：名册 vs session 目录（2026-10-23 实测）
+
+上面讲的是**名册**。`herdr machine add` 同时还做第二件事：它起一台远端
+session 的 daemon。这两件事**看的是两侧不同的变量**，只隔离 `$HOME` 会得到
+一个"名册干净、daemon 落在真实账户里"的半隔离状态（issue #75）。
+
+| 隔离面 | 谁写的 | 落在 | 看的变量 |
+| --- | --- | --- | --- |
+| 名册 | 本地 `herdr machine` | `client/endpoints.json` | 本地 `XDG_STATE_HOME` |
+| session | 远端 bridge | `sessions/<name>/` | 远端 `XDG_CONFIG_HOME` |
+
+两者都优先 XDG、否则回落到 `$HOME` 下的固定子目录（名册在
+`.local/state/herdr/`，session 在 `.config/herdr/`）。
+
+路径来源（上游，herdr 0.9.5）：名册走 `config::state_dir()`
+（`src/client/endpoint/catalog.rs:373-377`），session 目录走
+`config::config_dir().join("sessions")`（`src/session.rs:191`、`:331`），
+两者的 XDG 优先顺序在 `src/config/io.rs:30-41`。
+
+**为什么本地设 `XDG_CONFIG_HOME` 不管用**：写 `sessions/<name>/` 的那个进程
+不在本机。`machine add` 通过 `ssh <target> '/bin/sh -s'` 在远端拉起
+`herdr --session <name> remote-client-bridge`，目录是**远端**那个进程用
+**远端**的 `config_dir()` 建的。本地 export 再多次也传不过去——ssh 只带
+`LANG LC_*`（本机 `/etc/ssh/sshd_config.d/100-macos.conf` 实测）。
+
+三个对照实验（scratch HOME `R=/tmp/m75-roster`，目标是本机
+`zheng@127.0.0.1`，远端登录后 `HOME=/Users/<me>`）：
+
+| 实验 | 设置 | 名册 | session 目录 |
+| --- | --- | --- | --- |
+| A | 只 `HOME=$R` | 隔离 ✅ | 真实 home ❌ |
+| B | A + 本地 `XDG_CONFIG_HOME=$R` | 隔离 ✅ | 真实 home ❌ |
+| C | A + 本地 `HERDR_SOCKET_PATH=/tmp/x.sock` | 隔离 ✅ | 真实 home ❌ |
+
+A 的名册具体落在 `$R/.local/state/herdr/client/endpoints.json`，session 目录落在
+`~/.config/herdr/sessions/<name>/`。C 额外一个事实：`/tmp/x.sock` **根本没被
+创建**。
+
+名册侧换 `XDG_STATE_HOME` 也成立（实测名册落到
+`$R/state/herdr/client/endpoints.json`）。
+
+**`HERDR_SOCKET_PATH` 管什么、不管什么**：它只改**本地**那台 daemon 的 socket
+路径（见 `Scripts/gui.sh` 顶部的注释）。实验 C 证明它与
+`machine add --remote-session` 的远端 session 毫无关系——连
+`/tmp/x.sock` 都不会被创建，因为 `machine add` 不开本地 daemon。
+
+**怎么真正隔离 session 目录**：只能在**远端侧**让那个进程的环境里带
+`XDG_CONFIG_HOME`。实测有效的做法是自己去远端起 daemon：
+
+```bash
+# 远端侧（这里用 ssh 到本机模拟）。daemon 需要伪终端，否则报
+# "cannot attach without a usable terminal". 注意 macOS 的 script 没有 -c。
+ssh <target> 'XDG_CONFIG_HOME=/tmp/m75-rx nohup script -q /dev/null \
+  /bin/bash -c "stty rows 40 cols 120; exec herdr --session iso1" \
+  >/tmp/rx.log 2>&1 &'
+sleep 12
+ssh <target> 'XDG_CONFIG_HOME=/tmp/m75-rx herdr session list'
+```
+
+```text
+name    status   directory
+iso1    running  /tmp/m75-rx/herdr/sessions/iso1
+```
+
+真实 home 里没有这个 session 目录。
+
+⚠️ **但 `machine add` 不会接管既有 daemon**。实测：远端已经有一台
+`XDG_CONFIG_HOME=/tmp/m75-rx` 下的 daemon 时，`machine add --remote-session`
+仍然报 "Remote server is ready" 却在**真实 home** 另起一台同名 session，两台
+并存（手工起的 daemon 也一样，不是 XDG 特有的）。所以想让它写进 XDG，可控的
+只有让**远端进程环境本身**带 `XDG_CONFIG_HOME`（远端 shell 启动文件里 export，
+或 sshd `AcceptEnv` + `SendEnv`）。
+
+**清理**：`machine add` 留下的是真实账户里的东西，`rm -rf $R` 清不掉。
+
+```bash
+herdr machine remove <profile-id>              # 名册条目
+herdr session stop <name> && herdr session delete <name>
+# 或按 socket 停：
+HERDR_SOCKET_PATH=~/.config/herdr/sessions/<name>/herdr.sock herdr server stop
+```
+
+`session delete` 会把目录一起删掉（实测）。`Scripts/gui.sh` 的 machines
+fixture 的 `machines_teardown` 已经对 `fx-alpha`/`fx-beta` 做了这件事：先按
+socket 停 daemon，再 `rm -rf "$HOME/.config/herdr/sessions/$s"`。
+
+**未验证的部分**：
+
+- **非本机 ssh（真正跨网络）**是否同样行为。理论上一样（远端跑的是同一份
+  上游代码），但**没测过**；上面的实验全是 loopback。
+- 远端 `~/.zshenv` 里 export `XDG_CONFIG_HOME` 能否让 `machine add` 起的
+  bridge 继承。只验证了「非交互 ssh 会 source `~/.zshenv`」（远端 PATH 里确实
+  带 `.zshenv` 设的 `$HOME/.local/bin`，是个能区分对错的样本），**没有**为
+  此改真实 dotfile 做端到端。
+- `SendEnv` 路线：本机 sshd 只收 `LANG LC_*`，`SendEnv=MARKER` 实测被丢弃，
+  因此改用 `AcceptEnv` 的方案未端到端验证。
+
 也就是说 pane id 只在单台 daemon 内唯一。凡是按 `paneId` 建索引的地方——终端池、
 SwiftUI 的 `ForEach` 身份、复用判断——都可能把两台机器当成同一台。而两台机器的
 **几何完全相同**（第一个 workspace 的第一个 pane 都是 `w1:p1`、同样的分屏比例、
