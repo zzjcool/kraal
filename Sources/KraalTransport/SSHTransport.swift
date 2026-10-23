@@ -12,6 +12,16 @@
 import Foundation
 import KraalProtocol
 
+/// What the failure path managed to collect from the bridge's stderr.
+///
+/// `ended` says the stream was read to its end, so an empty `text` really means
+/// "the remote wrote nothing". Without that bit, "nothing yet" and "nothing ever"
+/// look identical, and one of them is the evidence for "no herdr installed".
+struct StderrDrain {
+    var text: String
+    var ended: Bool
+}
+
 public enum SSHTransportError: Error, CustomStringConvertible {
     case sshNotFound
     /// The bridge accepted the connection but produced no ready banner in time.
@@ -222,7 +232,8 @@ public final class SSHProcessTransport: @unchecked Sendable {
         // candidate's diagnostics to stderr and nothing else, so a non-empty
         // stderr means a `herdr` was found and then refused to report its status
         // — saying "not installed" there would be false (issue #74).
-        let stderr = drainStderr()
+        let drained = drainStderr()
+        let stderr = drained.text
         if process.isRunning {
             process.terminate()
         }
@@ -237,6 +248,16 @@ public final class SSHProcessTransport: @unchecked Sendable {
         }
         if !stderr.isEmpty {
             throw SSHTransportError.remoteHerdrFailed(stderr)
+        }
+        // Only "the stream ended and it was empty" may claim nothing is installed.
+        // If the grace period ran out with the pipe still open, the remote may be
+        // in the middle of saying something — reporting that as "no herdr" is the
+        // misdiagnosis this issue is about.
+        guard drained.ended else {
+            throw SSHTransportError.remoteHerdrFailed(
+                "the bridge closed without a banner and its error output did not finish "
+                    + "arriving within \(SSHTransportError.secondsText(Self.stderrGrace))"
+            )
         }
         throw SSHTransportError.noRemoteHerdr("")
     }
@@ -265,12 +286,18 @@ public final class SSHProcessTransport: @unchecked Sendable {
         seconds: TimeInterval,
         statusLines: [String]
     ) -> SSHTransportError {
-        let stderr = drainStderr()
+        let drained = drainStderr()
+        let stderr = drained.text
         if process.isRunning {
             process.terminate()
         }
         let said = statusLines.suffix(3).joined(separator: " | ")
-        let detail = [said, stderr].filter { !$0.isEmpty }.joined(separator: " — ")
+        var detail = [said, stderr].filter { !$0.isEmpty }.joined(separator: " — ")
+        if !drained.ended {
+            let note = "stderr was still open after "
+                + "\(SSHTransportError.secondsText(Self.stderrGrace)); the remote may be mid-write"
+            detail = detail.isEmpty ? note : "\(detail) — \(note)"
+        }
         return .handshakeTimedOut(seconds: seconds, detail: detail)
     }
 
@@ -327,21 +354,65 @@ public final class SSHProcessTransport: @unchecked Sendable {
         stderrPipe.fileHandleForReading.closeFile()
     }
 
-    /// Whatever stderr already has, without waiting for more.
+    /// Collects stderr, waiting for the bridge to finish writing it.
     ///
-    /// Must never block: it runs on the failure path, and a bridge that is silent
-    /// on both streams is exactly the case being handled. `availableData` here
-    /// used to wait forever, so the "timed out" error could not even be built.
-    private func drainStderr() -> String {
+    /// The previous version waited 50 ms once and reported whatever it had. On a
+    /// slow link the handshake's stdout read sees end-of-stream *before* the
+    /// remote's error text arrives, so a `herdr` that was installed and failed was
+    /// reported as "not installed, or older than 0.9.0" — the exact misdiagnosis
+    /// issue #74 set out to remove, reintroduced by the window (issue #91).
+    /// Reproduced with an `ssh` stand-in that closes stdout, sleeps 200 ms, then
+    /// writes to stderr: the old code answered "not installed".
+    ///
+    /// So: wait for the process to exit, then keep reading until the stream ends.
+    /// The wait is bounded — a bridge that never exits must not hang the failure
+    /// path — and reaching that bound is *reported*, not silently turned into
+    /// "there was no stderr". "A herdr that hung" and "a host without one" need
+    /// different actions from the user.
+    private func drainStderr() -> StderrDrain {
+        // Reading and waiting are interleaved rather than sequential: a bridge can
+        // write more than one pipe buffer, and it blocks on write until this side
+        // reads. Waiting for exit first would deadlock that bridge against a full
+        // pipe.
+        let deadline = Date().addingTimeInterval(Self.stderrGrace)
         let descriptor = stderrPipe.fileHandleForReading.fileDescriptor
-        guard Self.waitForReadable(descriptor, seconds: 0.05) else {
-            return tailString()
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                // Out of budget with the pipe still open. Whatever arrived is all
+                // this side is going to get, and the caller has to be told that the
+                // stream did not end — otherwise "still arriving" reads as "empty".
+                return StderrDrain(text: tailString(), ended: false)
+            }
+            // Read first, then decide: a bridge can be blocked writing (a full pipe
+            // means it cannot exit), so waiting for exit before draining would
+            // deadlock it. The wait is short so the loop stays responsive to both
+            // events.
+            if Self.waitForReadable(descriptor, seconds: min(remaining, 0.05)) {
+                let data = stderrPipe.fileHandleForReading.availableData
+                if data.isEmpty {
+                    // End of stream: no writer left, so this really is all.
+                    return StderrDrain(text: tailString(), ended: true)
+                }
+                stderrTail.append(data)
+                continue
+            }
+            // Nothing to read right now. If the process has gone, its pipes are
+            // closed too, so an unreadable descriptor is the end of the stream
+            // rather than a reason to wait out the rest of the grace period.
+            if !process.isRunning {
+                return StderrDrain(text: tailString(), ended: true)
+            }
         }
-        let data = stderrPipe.fileHandleForReading.availableData
-        guard !data.isEmpty else { return "" }
-        stderrTail.append(data)
-        return tailString()
     }
+
+    /// How long the failure path will wait for stderr to finish arriving.
+    ///
+    /// Generous compared to the 50 ms it replaces, because the cost of being wrong
+    /// is a misdiagnosis the user acts on ("install herdr" against a host that has
+    /// it). Still bounded, because this runs while a connection attempt is being
+    /// abandoned and must not become a second hang.
+    static let stderrGrace: TimeInterval = 1.5
 
     private func tailString() -> String {
         (String(bytes: stderrTail.suffix(800), encoding: .utf8) ?? "")

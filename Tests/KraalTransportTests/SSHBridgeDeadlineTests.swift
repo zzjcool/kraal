@@ -244,6 +244,125 @@ struct SSHBridgeDeadlineTests {
         )
     }
 
+    // MARK: - Issue #91: stderr that arrives late is not "no stderr"
+
+    /// The 50 ms race, made deterministic.
+    ///
+    /// `drainStderr` used to wait 50 ms and then report whatever it had — so a
+    /// remote that wrote its error to stderr *after* the bridge closed was
+    /// classified as "nothing installed", the one diagnosis #74 existed to
+    /// prevent. A `sleep` between the write and the exit is what a slow link
+    /// looks like from here; nothing about it is exotic.
+    ///
+    /// 300 ms is far beyond the old window and far inside any sane budget, so the
+    /// test is about correctness, not about a race that may or may not fire.
+    @Test("stderr written after the bridge exits is still read")
+    func lateStderrIsStillRead() throws {
+        // stdout closes first, stderr 200 ms later. That is what a slow remote
+        // looks like from this side: the handshake's read loop sees end-of-stream
+        // and gives up on the banner, while the error text is still on its way.
+        // 200 ms is four times the window the old code gave it.
+        let executable = try stub("""
+        exec 1>&-
+        sleep 0.2
+        printf 'boom: cannot read config\n' >&2
+        exit 3
+        """)
+        do {
+            _ = try SSHProcessTransport.connect(
+                user: nil,
+                host: "example.invalid",
+                port: nil,
+                session: "default",
+                timeout: 5,
+                executable: executable
+            )
+            Issue.record("the handshake succeeded against a bridge that failed")
+        } catch let error as SSHTransportError {
+            print("late stderr: \(error)")
+            guard case let .remoteHerdrFailed(detail) = error else {
+                let detail = "late stderr was classified as \(error) — a herdr that exists"
+                    + " must not be reported as missing merely because its error arrived"
+                    + " slowly (issue #91)"
+                Issue.record("\(detail)")
+                return
+            }
+            #expect(detail.contains("boom: cannot read config"),
+                    "the remote's own words must survive: \(detail)")
+        } catch {
+            Issue.record("expected SSHTransportError, got \(error)")
+        }
+    }
+
+    /// Silence still means "not installed" — the fix must not turn the third
+    /// category into a fourth one by accident.
+    @Test("a bridge that writes nothing at all is still not installed")
+    func silentBridgeIsStillNotInstalled() throws {
+        let executable = try stub("exit 3")
+        do {
+            _ = try SSHProcessTransport.connect(
+                user: nil,
+                host: "example.invalid",
+                port: nil,
+                session: "default",
+                timeout: 5,
+                executable: executable
+            )
+            Issue.record("the handshake succeeded against a silent bridge")
+        } catch let error as SSHTransportError {
+            print("silent: \(error)")
+            guard case .noRemoteHerdr = error else {
+                Issue.record("expected .noRemoteHerdr, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("expected SSHTransportError, got \(error)")
+        }
+    }
+
+    /// When the bridge never exits, waiting for it would hang. The wait has a
+    /// ceiling, and reaching that ceiling is reported as such — not silently
+    /// degraded into "no stderr, therefore not installed". A `herdr` that hung is
+    /// a different fact from a host that has none, and the user's next action
+    /// differs (kill the process vs install the binary).
+    @Test("a bridge that never closes is not reported as not installed")
+    func hungBridgeIsNotReportedAsMissing() throws {
+        let executable = try stub("""
+        printf '%s\n' 'starting' >&2
+        sleep 30
+        """)
+        do {
+            _ = try SSHProcessTransport.connect(
+                user: nil,
+                host: "example.invalid",
+                port: nil,
+                session: "default",
+                timeout: 0.5,
+                executable: executable
+            )
+            Issue.record("the handshake succeeded against a bridge that never closed")
+        } catch let error as SSHTransportError {
+            print("hung: \(error)")
+            if case .noRemoteHerdr = error {
+                Issue.record(
+                    "a bridge that hung was reported as not installed (issue #91): \(error)"
+                )
+            }
+            // The two acceptable answers both say the remote is at fault and both
+            // carry what it managed to say.
+            switch error {
+            case .handshakeTimedOut:
+                break
+            case .remoteHerdrFailed:
+                break
+            default:
+                Issue.record("expected a timeout or a herdr-failed, got \(error)")
+            }
+        } catch {
+            Issue.record("expected SSHTransportError, got \(error)")
+        }
+    }
+
     private func isTimeout(_ error: SSHTransportError) -> Bool {
         if case .handshakeTimedOut = error { return true }
         return false
