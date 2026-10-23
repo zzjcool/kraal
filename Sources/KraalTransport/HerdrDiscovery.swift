@@ -78,6 +78,57 @@ public enum HerdrDiscovery {
         guard isValidSessionName(name) else {
             throw DiscoveryError.invalidSessionName(name)
         }
+        let path = socketPath(
+            name: name, development: development, environment: environment
+        )
+        // A name can be legal and still produce a path the socket cannot carry: the
+        // two limits are unrelated (issue #90). Checked here, where both the name
+        // and the path are known, and refused with an error that names the field the
+        // user actually typed into — a bare `pathTooLong` would arrive far from the
+        // input and say nothing about it.
+        let bytes = path.utf8.count
+        guard bytes <= unixSocketMaxPathBytes else {
+            throw DiscoveryError.sessionNameTooLongForSocket(
+                name: name,
+                pathBytes: bytes,
+                limit: unixSocketMaxPathBytes,
+                budget: maxSessionNameLength(development: development, environment: environment)
+            )
+        }
+        return path
+    }
+
+    /// How long a session name can be before its socket path overflows.
+    ///
+    /// Not a constant, because it depends on `$HOME` and on whether this is a
+    /// development build: the same name is fine on one machine and too long on
+    /// another (measured — a 12-byte home allows 49 characters, a 20-byte one
+    /// allows 41). Returns 0 when even an empty name would overflow, which can
+    /// happen with a pathologically long home directory.
+    public static func maxSessionNameLength(
+        development: Bool = false,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        // Measured with a one-character name and extrapolated: everything around
+        // the name is fixed for a given configuration, and the alphabet this rule
+        // allows is ASCII-only, so one character is one byte.
+        let probe = "a"
+        let fixed = socketPath(
+            name: probe, development: development, environment: environment
+        ).utf8.count - probe.utf8.count
+        return min(64, max(0, unixSocketMaxPathBytes - fixed))
+    }
+
+    /// The path for a session, without the length check.
+    ///
+    /// Split out so `sessionSocket` and `maxSessionNameLength` cannot disagree
+    /// about how a path is built — the budget is only meaningful if both compute
+    /// the same string.
+    private static func socketPath(
+        name: String,
+        development: Bool,
+        environment: [String: String]
+    ) -> String {
         var directory = configDirectory(development: development, environment: environment)
         if name != defaultSession {
             directory = (directory as NSString)
@@ -157,11 +208,22 @@ public enum HerdrDiscovery {
 public enum DiscoveryError: Error, CustomStringConvertible {
     case invalidSessionName(String)
 
+    /// The name is legal but the socket path it produces is too long.
+    ///
+    /// Carries the numbers because the user cannot act on "path too long" — they
+    /// need to know which name, by how much, and what the ceiling is. The ceiling
+    /// depends on `$HOME`, so it is not something the UI can compute on its own.
+    case sessionNameTooLongForSocket(name: String, pathBytes: Int, limit: Int, budget: Int)
+
     public var description: String {
         switch self {
         case let .invalidSessionName(name):
             "\"\(name)\" is not a valid session name (letters, digits, '.', '-', '_'; "
                 + "at most 64 characters)"
+        case let .sessionNameTooLongForSocket(name, pathBytes, limit, budget):
+            "\"\(name)\" is a valid session name, but its socket path is \(pathBytes) "
+                + "bytes and this platform allows \(limit). Shorten the name to at most "
+                + "\(budget) characters for this machine."
         }
     }
 }

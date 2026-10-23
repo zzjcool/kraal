@@ -2666,6 +2666,93 @@ print(max(panes, key=lambda p: p["rect"]["y"])["pane_id"])
     }
 }
 
+# A session name that is legal but whose socket path overflows (issue #90).
+#
+# Two limits, one input field: `isValidSessionName` allows 64 characters, while the
+# path those characters produce has a platform ceiling that depends on `$HOME`. A
+# 64-character name used to pass validation and then fail somewhere else with a
+# `pathTooLong` that said nothing about the field the user typed in. The fix refuses
+# it where both facts are known, and the message has to carry the budget — the one
+# number the user can act on, and the only place it is visible.
+# A session name that is legal but whose socket path overflows (issue #90).
+#
+# Two limits, one input field: `isValidSessionName` allows 64 characters, while the
+# path those characters produce has a platform ceiling that depends on `$HOME`. A
+# 64-character name used to pass validation and then fail somewhere else with a
+# `pathTooLong` that said nothing about the field the user typed in. The fix refuses
+# it where both facts are known, and the message has to carry the budget — the one
+# number the user can act on, and the only place it is visible.
+#
+# The UI surface is the **connection sheet**, not the machines settings: the settings
+# panel has no session field, and the sheet only appears while disconnected, so this
+# case launches the app against a socket that does not exist.
+case_session_name_budget() {
+    requires() { echo ax; }
+    fixture() {
+        # Nothing to prepare in the daemon: this case never reaches it.
+        return 0
+    }
+    action() {
+        # The connection sheet's trigger is the toolbar's network button, reachable
+        # by its help text because the button has no title.
+        # The accessibility description of a SwiftUI toolbar button is its system image
+        # name (`network`), not the `.help` text — verified from the AX dump, the
+        # same way issue #71 established that a Button has no AXTitle here.
+        driver press --desc "network" >"$host_dir/press-network.log" 2>&1 || true
+        sleep 2
+        driver ax --json --depth 26 >"$host_dir/ax-sheet.json" 2>/dev/null
+        local long_name
+        long_name=$(python3 -c 'print("z" * 64)')
+        printf '%s' "$long_name" >"$host_dir/long-name.txt"
+        # Set the field's value directly. A SwiftUI `TextField` in a sheet is not
+        # focused, so the focused-element path of `type` wrote nowhere and the field
+        # kept its old text (observed: value stayed `default`). Addressed by its
+        # current value instead, which is how the AX dump identifies it.
+        driver type --value "default" --text "$long_name" \
+            >"$host_dir/type.log" 2>&1 || true
+        sleep 2
+        driver ax --json --depth 26 >"$host_dir/ax-after.json" 2>/dev/null
+    }
+    assert() {
+        local budget
+        budget=$(python3 -c '
+import os
+home = os.path.expanduser("~")
+fixed = len(home) + len("/.config/herdr/sessions/") + len("/herdr-client.sock")
+print(min(64, max(0, 103 - fixed)))
+')
+        printf '%s' "$budget" >"$host_dir/budget.txt"
+
+        local shown
+        shown=$(python3 - "$host_dir/ax-after.json" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    tree = json.load(handle)
+text = []
+for node in tree["nodes"]:
+    for key in ("value", "desc", "title"):
+        field = node.get(key)
+        if isinstance(field, str) and field:
+            text.append(field)
+print("\n".join(text))
+PYEOF
+)
+        check "the sheet shows a refusal rather than a socket path" \
+            "$(printf '%s' "$shown" | grep -q 'Shorten the name' && echo 0 || echo 1)" \
+            "$(printf '%s' "$shown" | grep -a 'Shorten the name' | head -1)"
+
+        check "the refusal states the budget for this machine" \
+            "$(printf '%s' "$shown" | grep -q "at most ${budget} characters" && echo 0 || echo 1)" \
+            "expected 'at most $budget characters', saw: $(printf '%s' "$shown" | grep -a 'at most' | head -1)"
+
+        check "the refusal states the platform limit" \
+            "$(printf '%s' "$shown" | grep -q 'allows 103' && echo 0 || echo 1)" \
+            "$(printf '%s' "$shown" | grep -a 'allows' | head -1)"
+    }
+}
+
 case_machines_roster() {
     requires() { echo ax; }
     fixture() {
@@ -3326,7 +3413,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget"; }
 
 # ---------------------------------------------------------------- entrypoint
 
