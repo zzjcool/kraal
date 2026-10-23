@@ -1801,17 +1801,40 @@ ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
 # is not, and a teardown that only deletes $ROSTER_HOME leaves live daemons and
 # stale entries in `herdr session list` behind (issue #75).
 machines_teardown() {
+    # Two loops and two name sources, on purpose.
+    #
+    # The **names** cannot come from the roster: `case_machines_*_app_setup` calls
+    # this function *before* it adds anything, so `roster_labels` is empty at that
+    # point and a roster-driven loop would be dead code there. The fixture only
+    # ever creates these two, so they are the list.
+    #
+    # The **path** must be `$HOME`, not `$ROSTER_HOME`, and that distinction is
+    # the whole of issue #75. `$HOME` moves the roster; the session directory and
+    # its socket are created by the bridge on the *remote* side (here 127.0.0.1,
+    # the same account), so they land under the real home. Pointing this at
+    # `$ROSTER_HOME/.config/herdr/sessions/...` was a silent no-op — measured:
+    #
+    #     server is not running or cannot be reached at
+    #       /tmp/kraal-gui-501/roster-home/.config/herdr/sessions/fx-verify75/herdr.sock
+    #       No such file or directory (os error 2)
+    #
+    # ...while the real `~/.config/herdr/sessions/fx-verify75` was untouched.
+    #
+    # The `roster_labels` loop stays for any future fixture that adds entries
+    # before calling teardown, and because it is the only path that knows names
+    # the fixed list does not.
     local session
-    roster_labels 2>/dev/null | while IFS=$'\t' read -r _ session; do
+    { roster_labels 2>/dev/null; printf 'fx-alpha\t%s\nfx-beta\t%s\n' fx-alpha fx-beta; } \
+        | while IFS=$'\t' read -r _ session; do
         [ -n "$session" ] || continue
         case "$BACKEND" in
         local)
-            env HERDR_SOCKET_PATH="$ROSTER_HOME/.config/herdr/sessions/$session/herdr.sock" \
+            env HERDR_SOCKET_PATH="$HOME/.config/herdr/sessions/$session/herdr.sock" \
                 herdr server stop >/dev/null 2>&1
             ;;
         vm)
             tart exec "$VM" /bin/bash -lc \
-                "HERDR_SOCKET_PATH=$ROSTER_HOME/.config/herdr/sessions/$session/herdr.sock $VM_ROOT/bin/herdr server stop" \
+                "HERDR_SOCKET_PATH=\$HOME/.config/herdr/sessions/$session/herdr.sock $VM_ROOT/bin/herdr server stop" \
                 >/dev/null 2>&1
             ;;
         esac
@@ -1820,9 +1843,10 @@ machines_teardown() {
     local) rm -rf "$ROSTER_HOME" ;;
     vm) tart exec "$VM" /bin/bash -lc "rm -rf $ROSTER_HOME" >/dev/null 2>&1 ;;
     esac
-    # The part `$HOME` does not move: the real account's session directories.
+    # The part `$HOME` does not move: the real account's session directories. The
+    # stop already happened in the loop above; this removes what is left on disk
+    # (and catches a session whose daemon was already gone).
     local sessions='for s in fx-alpha fx-beta; do
-        HERDR_SOCKET_PATH="$HOME/.config/herdr/sessions/$s/herdr.sock" herdr server stop >/dev/null 2>&1
         rm -rf "$HOME/.config/herdr/sessions/$s"
     done'
     case "$BACKEND" in
@@ -1830,7 +1854,6 @@ machines_teardown() {
     vm)
         tart exec "$VM" /bin/bash -lc \
             "for s in fx-alpha fx-beta; do
-                 $VM_ROOT/bin/herdr --session \$s server stop >/dev/null 2>&1
                  rm -rf \$HOME/.config/herdr/sessions/\$s
              done" >/dev/null 2>&1
         ;;
