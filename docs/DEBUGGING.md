@@ -244,6 +244,58 @@ ps -Ao comm | grep foo        # 实际在跑的
 
 ---
 
+## 11. 一个观察面代替不了另一个：AXTitle ≠ AXValue
+
+要自动化地「点某一行」，会自然地去找那一行的 `AXTitle`。SwiftUI `Text` 不给：
+
+```text
+$ kraal-gui ax --json --depth 20
+AXStaticText title='' desc='' id='' value='alpha-b'
+```
+
+一行文本的内容在 **`AXValue`** 里，而 `AXTitle`/`AXDescription` 都是空的。产品代码也没写
+`accessibilityIdentifier`（`Selector.swift` 开头就写明零个）。所以按 title 找元素时：
+
+```text
+$ kraal-gui press --title "alpha-b"
+kraal-gui: no element matching title=alpha-b
+```
+
+这看起来像「界面没画出来」，实际上是**读错了属性**。同样的分叉出现在按钮上：面板里的
+`Rename` / `Remove` 只有 `AXDescription`、`AXTitle` 为空（`press --desc Rename` 就成功）。
+
+**教训**：换一种元素类型就重新确认一遍属性面。一次 `ax --json --depth 20 | grep` 就能回答
+「这个控件到底把文字放在哪个属性上」，比猜三次快。
+
+`kraal-gui ax` 现在同时输出 `value`，`press`/`select` 也支持 `--value` —— 但**侧边栏行仍然
+点不动**：`onTapGesture` 不响应 `AXPress`，真实点击只能靠 CGEvent，而这就又回到了
+「先激活窗口，再算坐标」。定位可以用 `value`（`Scripts/gui.sh` 的 `sidebar_row_point`），
+点击不行。
+
+---
+
+## 12. 坐标有两个坐标系，混用不报错，只是点错地方
+
+`kraal-gui ax` 的 `frame` 是**屏幕坐标**（`CGWindow` 那个空间），`kraal-gui click --at` 的参数
+是**窗口相对坐标**：
+
+```swift
+let clamped = CGPoint(x: window.frame.origin.x + offsetX, y: window.frame.origin.y + offsetY)
+```
+
+VM 里窗口在 `(0, 350)`，所以把 AX 的 `y=729` 直接传给 `click --at` 得到的是
+`screen(590,1087)` —— 已经在窗口内容区之外。而**它不会报错**，只会点到别的东西或者什么都不点。
+
+实测症状：重命名 sheet 的输入框“点不中”，`type` 报 `typed via AX` 但名单没变，看日志像
+「提交按钮没触发」。真实原因是焦点从未到达输入框 —— 三层错误叠在一起，而最底层那个是
+两个坐标系。
+
+**教训**：坐标类工具第一次用先做一次往返验证（点一个已知元素，从那边的日志/状态确认命中），
+不要拿它去诊断别的问题。用 `ax` 读元素 → 减窗口原点 → `click --at`，把减法写进脚本
+（`sidebar_row_point` 就是这么来的），不要心算。
+
+---
+
 ## 附：观察工具
 
 ```bash

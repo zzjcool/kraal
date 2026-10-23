@@ -149,8 +149,27 @@ public final class AppStore {
     /// knowing that connections are per-machine.
     var connection: EndpointConnection? { activeEndpoint?.connection }
     @ObservationIgnored private var healthTask: Task<Void, Never>?
-    @ObservationIgnored var inputDecoders: [String: TerminalInputDecoder] = [:]
+    /// One decoder per `(machine, terminal)`, not per pane id.
+    ///
+    /// A decoder is stateful: it holds half-received escape sequences between
+    /// calls (`TerminalInputDecoder.pending`). Pane ids are scoped to one daemon —
+    /// two machines may both contain `w1:p1` — so keying on the pane id alone let
+    /// a partial CSI typed on one machine be completed by a byte typed on the
+    /// other, which delivered a key nobody pressed. `PaneTerminalPool` was fixed
+    /// the same way for the same reason; this is the input half of that bug.
+    /// See `Tests/KraalClientTests/CrossMachineInputTests.swift`.
+    @ObservationIgnored var inputDecoders: [InputDecoderKey: TerminalInputDecoder] = [:]
     @ObservationIgnored var intentionalStop = false
+    /// The identity of an input decoder: which machine's terminal.
+    ///
+    /// `machine` is the daemon's `boot_id`, the same namespace `PaneTerminalPool`
+    /// uses, so a reconnect to the *same* daemon keeps its decoders and a switch to
+    /// a different one starts clean.
+    struct InputDecoderKey: Hashable {
+        let machine: String
+        let terminal: String
+    }
+
     /// In-flight `client_shell_resize` sender, so a drag coalesces.
     @ObservationIgnored var resizeTask: Task<Void, Never>?
 

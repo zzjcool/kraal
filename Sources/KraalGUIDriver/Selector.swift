@@ -20,6 +20,14 @@ struct Selector {
     var id: String?
     var desc: String?
     var title: String?
+    /// `AXValue` — the text SwiftUI `Text` puts its string in.
+    ///
+    /// Needed because this repo writes no `accessibilityIdentifier`s and SwiftUI
+    /// leaves `AXTitle`/`AXDescription` empty for `Text`: every sidebar row, every
+    /// machine name and every footer label is only reachable through `AXValue`.
+    /// Without it, "click the machine called alpha-b" can only be expressed as
+    /// "click (60,181)", which breaks the moment a workspace row is added above it.
+    var value: String?
     var role: String?
     var index: Int = 0
     /// Restricts the search to the subtree under the first element matching this
@@ -39,13 +47,14 @@ struct Selector {
     /// True when nothing narrows the search; refusing is better than pressing a
     /// random element.
     var isEmpty: Bool {
-        id == nil && desc == nil && title == nil && role == nil && within == nil
+        id == nil && desc == nil && title == nil && value == nil && role == nil && within == nil
     }
 
     func matches(_ element: AXUIElement) -> Bool {
         if let id, element.string("AXIdentifier") != id { return false }
         if let desc, element.string(kAXDescriptionAttribute) != desc { return false }
         if let title, element.string(kAXTitleAttribute) != title { return false }
+        if let value, element.string(kAXValueAttribute) != value { return false }
         if let role, element.string(kAXRoleAttribute) != role { return false }
         return true
     }
@@ -55,6 +64,7 @@ struct Selector {
         if let id { parts.append("id=\(id)") }
         if let desc { parts.append("desc=\(desc)") }
         if let title { parts.append("title=\(title)") }
+        if let value { parts.append("value=\(value)") }
         if let role { parts.append("role=\(role)") }
         if let within { parts.append("within[\(within.selector.humanReadable)]") }
         if index != 0 { parts.append("index=\(index)") }

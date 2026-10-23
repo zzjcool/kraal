@@ -420,6 +420,75 @@ assert() {
 **这个写法有一个很好的性质：`herdr` CLI 同时是 fixture 构造器和断言 oracle**，
 两边都不依赖 Kraal 的 UI 实现。UI 换了写法，测试照样有效——这正是回归测试想要的。
 
+### 8.1 多机（machines / SSH）用例怎么造环境
+
+不需要第二个 VM，也不需要容器。**一个 guest 里就能造出多台机器**，做法是把
+`herdr --session <name>` 当成一台独立机器 —— 它有自己的 socket、自己的 `boot_id`、
+自己的 pane 集合，正是 `machine add` 要的那种目标。
+
+实测（2026-10-23，guest `kraal-agent`，herdr 0.9.5）从零到「App 里三台机器全在线」**34 秒**。
+
+```bash
+# 1. 回环 SSH：guest 的 sshd 本来就开着，只缺 key 和 known_hosts
+ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519
+cp ~/.ssh/id_ed25519.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+ssh-keyscan -t ed25519 127.0.0.1 >> ~/.ssh/known_hosts && sort -u -o ~/.ssh/known_hosts ~/.ssh/known_hosts
+
+# 2. 每台「机器」= 一个 named session；add 会顺手把它的 daemon 起起来
+HOME=$ROSTER herdr machine add admin@127.0.0.1 --remote-session mach-a --label alpha-a
+HOME=$ROSTER herdr machine add admin@127.0.0.1 --remote-session mach-b --label alpha-b
+
+# 3. App 用同一份名册
+KRAAL_HERDR_HOME=$ROSTER KRAAL_HERDR_SOCKET=... KraalMac-bin
+```
+
+落地的用例：`./Scripts/gui.sh run machines-roster` 与 `machines-switch`
+（`Scripts/gui.sh` 的 machines 段）。
+
+#### 五条实测出来的路，不写下来一定会重踩
+
+| # | 事实 | 证据 / 后果 |
+| --- | --- | --- |
+| 1 | **`machine add` 只认它自己起的 daemon** | 手起一个 `HERDR_SOCKET_PATH=…/sessions/x/herdr.sock herdr server`，再用 add 指向它 → `error: remote server is not ready for saved machines`。补 `HERDR_MACOS_SERVER_CONTEXT=user` + `HERDR_SESSION` 也拒。**规则：要重置就 `herdr --session X server stop` + 删目录，让 add 去起** |
+| 2 | **`known_hosts` 必须先种** | saved machine 走严格 host-key 检查（Kraal 自己 SSH 时才用 `accept-new`）。不种 → `Host key verification failed` + `machine was not saved` |
+| 3 | **`HOME` 只隔离名册，不隔离 session 目录** | `HOME=$R herdr machine add …` 把 `endpoints.json` 写进 `$R`，但 daemon 落在**真实** `~/.config/herdr/sessions/<name>`。`XDG_CONFIG_HOME` 和 `HERDR_SOCKET_PATH` 都搬不动它（issue #75） |
+| 4 | **`herdr pane list` 要 API socket，不是 client socket** | 指向 `herdr-client.sock` → `EmptyResponse`；指向同目录的 `herdr.sock` → 正常 JSON。一个 `<session>/` 目录里两个 socket，各走各的协议 |
+| 5 | **同一 session 反复 add 会留下重复名册项** | 三次 `add` 同一 `--remote-session` 得三条 profile（id 不同、session 相同）。fixture 必须先 teardown 再 add |
+
+#### 断言怎么下
+
+机器行是 SwiftUI `Text`，在 AX 里**只有 `AXValue`**（无 title/desc/identifier，见 issue #71），
+而 `onTapGesture` 不响应 `AXPress`。所以「点击某台机器」必须合成点击，而定位要**从 AX 读
+坐标**，不能写死：
+
+```bash
+# 读 value=alpha-b 那一行的屏幕坐标，减去窗口原点 => 窗口相对坐标
+point=$(sidebar_row_point alpha-b)   # Scripts/gui.sh
+```
+
+写死 y 的版本失败过：Local 多一个 workspace，机器行整体下移，点击落到 workspace 行上，
+用例报「split 落到了 alpha-a」，而产品是对的。
+
+**断言必须落在 daemon 上**：点 alpha-b 后按 Split Right，必须是 **alpha-b** 的 pane 数 +1、
+alpha-a 不变。只断言「App 认为切换了」无法区分「切了」和「切了但命令还发往旧连接」。
+
+#### 这个用例抓住过什么
+
+故意把 `selectEndpoint` 里的 `target = endpoint.settings` 删掉（模拟「切了但不改命令目标」），
+`machines-switch` 立刻红：`alpha-a 1->1, alpha-b 1->1`，退出码 1。恢复后绿。
+这是 §0.3 要求的 A/B。
+
+#### 不能用两个容器：guest 没有嵌套虚拟化
+
+```text
+guest: kern.hv_support = 0
+guest: docker/podman/colima/lima/tart 全部 missing
+```
+
+宿主是 M1 Pro（`hv_support=1`），理论上能 `tart run --nested` 重建镜像再在 guest 里跑
+Linux 容器，但那是重造整个验证环境（80 GB 磁盘、guest 内再装一套运行时），换来的只是
+「多台机器」——而 named session 已经给了这个，代价是零。
+
 ---
 
 ## 9. 分阶段计划

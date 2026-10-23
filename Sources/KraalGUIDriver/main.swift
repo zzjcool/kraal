@@ -85,19 +85,21 @@ struct Arguments {
             id: string("id"),
             desc: string("desc"),
             title: string("title"),
+            value: string("value"),
             role: string("role"),
             index: int("index") ?? 0
         )
         // `--within-<attr> VALUE` scopes the search to the first element matching
         // that attribute. Needed because titles repeat across menus and the two
         // copies do different things.
-        for attr in ["title", "desc", "id", "role"] {
+        for attr in ["title", "desc", "id", "role", "value"] {
             if let value = string("within-\(attr)") {
                 var scope = Selector()
                 switch attr {
                 case "title": scope.title = value
                 case "desc": scope.desc = value
                 case "id": scope.id = value
+                case "value": scope.value = value
                 default: scope.role = value
                 }
                 found.within = ScopeBox(scope)
@@ -174,6 +176,7 @@ func commandAX(_ args: Arguments) -> Never {
                 role: element.string(kAXRoleAttribute) ?? "?",
                 title: element.string(kAXTitleAttribute) ?? "",
                 desc: element.string(kAXDescriptionAttribute) ?? "",
+                value: element.string(kAXValueAttribute) ?? "",
                 identifier: element.string("AXIdentifier") ?? "",
                 enabled: element.copy(kAXEnabledAttribute) as? Bool,
                 actions: actions,
@@ -205,6 +208,9 @@ struct AXNode: Encodable {
     let role: String
     let title: String
     let desc: String
+    /// `AXValue`. SwiftUI `Text` puts its string here and nowhere else, so this is
+    /// the only way to address a sidebar row or a machine name by content.
+    let value: String
     let identifier: String
     let enabled: Bool?
     let actions: [String]
@@ -214,7 +220,7 @@ struct AXNode: Encodable {
     var pressable: Bool { actions.contains(kAXPressAction) }
 
     enum CodingKeys: String, CodingKey {
-        case path, depth, role, title, desc, identifier, enabled, actions, frame, pressable
+        case path, depth, role, title, desc, value, identifier, enabled, actions, frame, pressable
     }
 
     func encode(to encoder: Encoder) throws {
@@ -224,6 +230,7 @@ struct AXNode: Encodable {
         try container.encode(role, forKey: .role)
         try container.encode(title, forKey: .title)
         try container.encode(desc, forKey: .desc)
+        try container.encode(value, forKey: .value)
         try container.encode(identifier, forKey: .identifier)
         try container.encodeIfPresent(enabled, forKey: .enabled)
         try container.encode(actions, forKey: .actions)
@@ -250,7 +257,7 @@ private func textTree(_ nodes: [AXNode]) -> String {
     nodes.map { node in
         let indent = String(repeating: "  ", count: node.depth)
         var line = "\(indent)\(node.role) title=\(node.title) desc=\(node.desc) "
-            + "id=\(node.identifier)"
+            + "value=\(node.value) id=\(node.identifier)"
         if node.enabled == false { line += " [disabled]" }
         line += " actions=\(node.actions)"
         return line
@@ -265,7 +272,7 @@ private func textTree(_ nodes: [AXNode]) -> String {
 /// the reason `AX` is the default strategy and synthetic events are the fallback.
 func commandPress(_ args: Arguments) -> Never {
     let selector = args.selector()
-    if selector.isEmpty { fail(.harness, "press needs --title, --desc, --id or --role") }
+    if selector.isEmpty { fail(.harness, "press needs --title, --desc, --id, --value or --role") }
 
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
         fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
@@ -845,7 +852,8 @@ guard let command = argv.first else {
 
       probe                          check AX + Screen Recording; exit 2 if not ready
       ax [--out FILE] [--depth N]    dump the accessibility tree
-      press --title|--desc|--id X    AXPress an element (does NOT activate the app)
+      press --title|--desc|--id|--value X
+                                     AXPress an element (does NOT activate the app)
       wait  --title X [--timeout S]  poll until the element exists
       window                         print window frame + window number
       shot  -o FILE [--full]         screenshot one window
