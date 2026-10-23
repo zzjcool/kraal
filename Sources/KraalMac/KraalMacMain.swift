@@ -193,7 +193,15 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// interchangeable: sending a popup's keys down the pane path types them into
     /// whatever is focused underneath, and focusing "pane \(terminalId)" would fail
     /// and drop the focus the popup was opened over.
-    private func routeInput(target: String, data: Data) {
+    ///
+    /// `nonisolated` on purpose: Ghostty hands us these bytes from its own
+    /// output thread, not the main actor. The only work done before the hop
+    /// below is a log line, and `KraalLog` is locked and `@unchecked Sendable`.
+    /// Declaring this main-actor-isolated made that call an isolation
+    /// violation the compiler can only warn about in Swift 5 mode — and it
+    /// turns into a real data race the moment anything that reads `store`
+    /// moves above the hop.
+    nonisolated private func routeInput(target: String, data: Data) {
         kraalLog("input: target=\(target) bytes=\(data.count) "
             + "raw=\(data.map { String(format: "%02x", $0) }.joined(separator: " "))")
         Task { @MainActor [weak self] in

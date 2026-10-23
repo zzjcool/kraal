@@ -86,7 +86,7 @@ private let valueFlags: [String: WritableKeyPath<Options, String?>] = [
 
 func parse() -> Options {
     var options = Options()
-    var arguments = Array(CommandLine.arguments.dropFirst())
+    let arguments = Array(CommandLine.arguments.dropFirst())
     guard !arguments.isEmpty else {
         printUsage()
         exit(0)
