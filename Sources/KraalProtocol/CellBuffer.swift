@@ -25,16 +25,31 @@
 //     would write through into the renderer's `previous` and the view's copy.
 //     `changedRows` would then compare a frame against itself, see nothing
 //     changed, and skip the repaint: a stale screen with no error anywhere.
-//     It also makes an `@Observable` assignment a no-op, because no property is
-//     written. Rejected on correctness, not cost.
+//     Rejected on correctness, not cost.
+//
+//     Note the argument that is *not* made any more: a class would supposedly
+//     also stop `@Observable` from invalidating anything. It would not. The
+//     patch path assigns `store.surface` whether its payload is a value or a
+//     reference, and a nested-class mutation reached through `surface?.apply(...)`
+//     still goes through the tracked property's `_modify` accessor, which fires
+//     `willSet`/`didSet`. The real cost of aliasing is the write-through above.
 //
 //   one CoW array per row  — what this is. Unchanged rows are shared by buffer
 //     reference (an O(1) retain), so a patch copies one row and the value
-//     semantics that keep the diff and the observation graph honest survive.
+//     semantics that keep the diff honest survive.
 //     200x50 one-cell patch: 36.6 us -> 1.6 us.
 //
 // The chunking is an implementation detail: equality compares cells, not layout,
 // and every accessor is expressed in flat frame terms.
+//
+// Residual cost, measured after the change: writing one cell still relocates the
+// *outer* `rows` array, i.e. `height` row handles, so the cost stays linear in
+// pane height -- roughly 10 ns/row plus ~0.7 us of fixed cost for the copy and
+// the read-back (200x10: 0.83 us, 200x300: 3.84 us, 200x600: 6.90 us,
+// 200x1200: 12.3 us). The *width* dimension is what the change eliminated.
+// 300x80 costs ~1.7 us per patch, 2% of a frame budget: acceptable, and *not*
+// O(1). Boxing the row array to get rid of it would add a reference indirection
+// to every render read; see docs/PERFORMANCE.md §8.
 
 public struct CellBuffer: Equatable, Sendable {
     /// One CoW array per row, `rowWidth` cells each (the last may be short).
@@ -62,6 +77,26 @@ public struct CellBuffer: Equatable, Sendable {
         self.rows = rows
         rowWidth = stride
         cellCount = cells.count
+    }
+
+    /// Wraps an already-chunked grid, without re-copying it row by row.
+    ///
+    /// The callers that already loop over rows -- `PaneTerminalModel.paneFrame`
+    /// crops the surface row by row -- have the arrays this type wants in hand.
+    /// Handing them over costs one retain of the outer array instead of
+    /// `Array(slice)` per row, which does not share storage with its source and
+    /// so is a second full copy of the pane. Measured on the storage step alone,
+    /// 200x50: 40.8-42.3 us -> 0.05-0.07 us (docs/PERFORMANCE.md §8).
+    ///
+    /// - Parameters:
+    ///   - rows: one array per row, in frame order.
+    ///   - width: cells per row, i.e. the grid width these rows were cropped for.
+    ///     Zero or negative falls back to the longest row, for the same reason the
+    ///     flat initialiser does: index arithmetic must stay total.
+    public init(rows: [[CellData]], width: Int) {
+        self.rows = rows
+        rowWidth = width > 0 ? width : max(rows.lazy.map(\.count).max() ?? 0, 1)
+        cellCount = rows.reduce(0) { $0 + $1.count }
     }
 
     /// A buffer of `count` blank cells, for a frame that arrives without any.
@@ -100,8 +135,10 @@ public struct CellBuffer: Equatable, Sendable {
     ///
     /// Expressed in the buffer's own chunking rather than in `FrameData.width`, so
     /// a frame whose width was reassigned after it was built cannot make reads land
-    /// in the wrong row. `validate()` rejects such a frame (its cell count no longer
-    /// matches its grid), but indexing must not depend on that having run.
+    /// in the wrong row. That reassignment is *not* caught by validation in every
+    /// case (4x4 reassigned to 8x2 keeps the cell count), so indexing must not
+    /// depend on a check having run -- and a patch that this chunking cannot place
+    /// is refused rather than half-written (``write(_:at:)``).
     public func cell(column: Int, row: Int) -> CellData? {
         guard column >= 0, row >= 0, row < rows.count else { return nil }
         let rowCells = rows[row]
@@ -145,15 +182,16 @@ public struct CellBuffer: Equatable, Sendable {
         // replace instead of `cells.count` separate writes.
         let row = start / rowWidth
         let column = start - row * rowWidth
-        if row < rows.count, column + cells.count <= rows[row].count {
-            rows[row].replaceSubrange(column ..< column + cells.count, with: cells)
-            return true
+        guard row < rows.count, column >= 0, column + cells.count <= rows[row].count else {
+            // A run this buffer cannot place as one row. That only happens when the
+            // frame's `width` was reassigned after it was built, so its flat index
+            // arithmetic no longer agrees with the chunking -- writing "somewhere"
+            // per cell would land cells in the wrong row and still report success.
+            // Refusing is what makes `PaneSurfaceFrame.apply` reject such a patch
+            // with the buffer untouched.
+            return false
         }
-        // A buffer whose chunking disagrees with the frame width can still take
-        // the write; it just costs a copy per cell instead of one per row.
-        for (offset, cell) in cells.enumerated() {
-            write(cell, at: start + offset)
-        }
+        rows[row].replaceSubrange(column ..< column + cells.count, with: cells)
         return true
     }
 
@@ -174,8 +212,16 @@ public struct CellBuffer: Equatable, Sendable {
     /// timing assertion cannot prove that and a value-equality assertion cannot
     /// see it — `scripts/bench.sh` and the tests use this instead (see
     /// docs/PERFORMANCE.md §2 on probes that measure the wrong thing).
+    ///
+    /// Public rather than `internal` + `@testable` because `Scripts/bench.sh`
+    /// links the release library and imports it like any other client, so its
+    /// self-checks see only the public surface.
     public func sharesRow(_ index: Int, with other: CellBuffer) -> Bool {
         guard index >= 0, index < rows.count, index < other.rows.count else { return false }
+        // Two empty rows have no buffer at all (`baseAddress` is nil on both
+        // sides), so "same address" would report sharing for unrelated rows. A
+        // zero-width frame is the only way to get here, and it proves nothing.
+        guard !rows[index].isEmpty, !other.rows[index].isEmpty else { return false }
         return rows[index].withUnsafeBufferPointer { mine in
             other.rows[index].withUnsafeBufferPointer { theirs in
                 mine.baseAddress == theirs.baseAddress

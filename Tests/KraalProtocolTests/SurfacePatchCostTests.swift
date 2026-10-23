@@ -99,14 +99,55 @@ private func decodedPatch(
     return patch
 }
 
+/// One row of a multi-row patch.
+private struct PatchRowSpec {
+    var row: UInt16
+    var column: UInt16
+    var cells: [CellData]
+}
+
+/// A patch carrying several rows, for the cases where the *order* of the rows
+/// matters.
+private func decodedMultiRowPatch(
+    rows: [PatchRowSpec],
+    base: UInt64
+) throws -> PaneSurfacePatch {
+    var writer = BincodeWriter()
+    writer.writeVarint(19)
+    writer.writeString("boot-a")
+    writer.writeVarint(3)
+    writer.writeVarint(base)
+    writer.writeVarint(base &+ 1)
+    writer.writeVarint(UInt64(rows.count))
+    for entry in rows {
+        writer.writeVarint(UInt64(entry.column))
+        writer.writeVarint(UInt64(entry.row))
+        writer.writeArray(entry.cells) { writer, cell in
+            writer.writeString(cell.symbol)
+            writer.writeVarint(UInt64(cell.foreground))
+            writer.writeVarint(UInt64(cell.background))
+            writer.writeVarint(UInt64(cell.modifier))
+            writer.writeBool(cell.skip)
+            writer.writeOptional(cell.hyperlink) { writer, link in writer.writeVarint(UInt64(link)) }
+        }
+    }
+    writer.writeVarint(0)                        // panes
+    writer.writeBool(false)                      // cursor: None
+    guard case let .paneSurfacePatch(patch) = try ServerMessageDecoder.decode(Data(writer.bytes)) else {
+        throw TestHelperError.wrongMessage("expected a patch")
+    }
+    return patch
+}
+
 @Suite("Patch does not copy the screen (issue #50)")
 struct PatchCopyOnWriteTests {
     /// The mechanism. A flat `[CellData]` has one buffer for the whole screen, so
     /// any write relocates every row; the row-chunked buffer relocates the one row
     /// the patch touched and shares the rest by reference.
     ///
-    /// This is the assertion that fails on the pre-#50 storage, independent of the
-    /// machine it runs on.
+    /// This is the assertion that goes red when the storage is a single flat
+    /// array, or when the rows are made to share one class instance rather than a
+    /// CoW buffer — i.e. when the mechanism the fix depends on is gone.
     @Test("a one-row patch leaves every other row sharing storage")
     func untouchedRowsShared() throws {
         var surface = try decodedSurface(width: 200, height: 50)
@@ -155,7 +196,11 @@ struct PatchCopyOnWriteTests {
 
     /// A patch writes rows; unchanged rows must stay byte-for-byte equal, which is
     /// what keeps `Array`'s `==` short-circuiting on storage identity.
-    @Test("an unchanged row still compares equal after a patch")
+    ///
+    /// Equality alone would also pass for a deep copy of every row, so the
+    /// *sharing* is asserted too — that is the property the renderer's row diff
+    /// spends its speed on.
+    @Test("an unchanged row stays equal and stays shared after a patch")
     func equalitySurvivesPatch() throws {
         var surface = try decodedSurface(width: 40, height: 10)
         let before = surface.frame
@@ -166,7 +211,56 @@ struct PatchCopyOnWriteTests {
         ))
         for row in 0 ..< 10 where row != 2 {
             #expect(surface.frame.buffer.row(row) == before.buffer.row(row))
+            #expect(surface.frame.buffer.sharesRow(row, with: before.buffer),
+                    Comment(rawValue: "row \(row) is equal but was copied: the row diff now "
+                        + "has to scan it instead of comparing storage identity"))
         }
+    }
+
+    /// A patch applied to a frame whose `width` was reassigned must be **refused**,
+    /// not partly written.
+    ///
+    /// `width` is a public stored property. `validatePatch` checks a row against
+    /// it, while the write places the row in the buffer's own chunking, so a frame
+    /// whose cell count still adds up (`4x4` reassigned to `8x2` is still 16 cells,
+    /// so `validateGrid` passes) gets past validation and then indexes the wrong
+    /// rows. The write used to fall back to per-cell writes whose out-of-range
+    /// single-cell write returned silently, and the loop still reported success.
+    ///
+    /// The patch deliberately carries **two** rows and the placeable one comes
+    /// first: that is what distinguishes "refused" from "refused after writing the
+    /// rows it could". A single bad row would pass this test even with a
+    /// non-atomic `apply`.
+    @Test("a patch that cannot be placed is refused and leaves the buffer untouched")
+    func mismatchedChunkingRefused() throws {
+        var surface = try decodedSurface(width: 4, height: 4)
+        // Same cell count, different chunking: 8x2 over a 4-wide buffer.
+        surface.frame.width = 8
+        surface.frame.height = 2
+        let before = surface
+        // The cell count still adds up, so the grid check — the only arrival-side
+        // check the patch path inherited — passes.
+        #expect(throws: Never.self) { try surface.frame.validateGrid() }
+
+        func cells(_ symbol: String) -> [CellData] {
+            (0 ..< 2).map { _ in
+                CellData(symbol: symbol, foreground: 9, background: 9,
+                         modifier: 0, skip: false, hyperlink: nil)
+            }
+        }
+        // In the 8-wide grid: row 1 column 0 is flat 8, which the 4-wide buffer sees
+        // as row 2 column 0 — placeable. Row 1 column 3 is flat 11: row 2 column 3,
+        // and the two-cell run 3..<5 does not fit in a 4-wide row — not placeable.
+        // `validatePatch` cannot tell them apart: 0 + 2 <= 8 and 3 + 2 <= 8.
+        let patch = try decodedMultiRowPatch(rows: [
+            PatchRowSpec(row: 1, column: 0, cells: cells("A")),
+            PatchRowSpec(row: 1, column: 3, cells: cells("B")),
+        ], base: 1)
+
+        #expect(throws: SurfaceError.patchRowBounds) { try surface.apply(patch) }
+        #expect(surface == before,
+                Comment(rawValue: "a refused patch left a partial write behind: the screen "
+                    + "would show cells the daemon never composed"))
     }
 }
 
@@ -298,6 +392,66 @@ struct CellBufferTests {
         let buffer = CellBuffer([.blank, .blank], width: 0)
         #expect(buffer.count == 2)
         #expect(buffer.cell(at: 0) != nil)
+    }
+
+    /// Two unrelated empty rows have no storage at all, so comparing
+    /// `baseAddress` would report them as shared. Nothing depends on that answer
+    /// being true, and reporting "shared" for unrelated rows is exactly the kind
+    /// of false positive the self-check in `Scripts/bench.sh` reads.
+    @Test("two empty rows do not count as shared storage")
+    func emptyRowsAreNotShared() throws {
+        let surface = try decodedSurface(width: 40, height: 4)
+        var empty = surface
+        empty.frame.buffer = CellBuffer(rows: Array(repeating: [], count: 4), width: 40)
+        #expect(!surface.frame.buffer.sharesRow(0, with: empty.frame.buffer))
+        #expect(!empty.frame.buffer.sharesRow(0, with: empty.frame.buffer),
+                "a buffer reported an empty row as sharing storage with itself")
+        // Rows that do have cells still answer by storage identity.
+        #expect(surface.frame.buffer.sharesRow(0, with: surface.frame.buffer))
+        var copied = surface
+        copied.frame.buffer.write(.blank, at: 0)
+        #expect(!surface.frame.buffer.sharesRow(0, with: copied.frame.buffer))
+    }
+
+    /// The path `paneFrame` uses: rows already built, handed over as-is, so the
+    /// initialiser neither re-chunks nor copies them.
+    @Test("the row initialiser takes the rows it is given, without copying")
+    func rowsInitialiserSharesStorage() {
+        let rows: [[CellData]] = (0 ..< 3).map { row in
+            (0 ..< 4).map { column in
+                CellData(symbol: "\(row)\(column)", foreground: 0, background: 0,
+                         modifier: 0, skip: false, hyperlink: nil)
+            }
+        }
+        let buffer = CellBuffer(rows: rows, width: 4)
+        #expect(buffer.count == 12)
+        #expect(buffer.rowCount == 3)
+        // The initialiser took the row arrays themselves: a second buffer built from
+        // the same `rows` shares every row's storage with the first. A defensive
+        // `row.map { Array($0) }` inside the initialiser would break this, and that
+        // defensive copy is precisely the cost this initialiser exists to avoid.
+        #expect(buffer.sharesRow(0, with: CellBuffer(rows: rows, width: 4)))
+        #expect(buffer.sharesRow(2, with: CellBuffer(rows: rows, width: 4)))
+        // And the rows are the caller's values, not a builder's leftovers.
+        #expect(buffer.flattened.map(\.symbol) == rows.flatMap { $0.map(\.symbol) })
+        var mutable = rows
+        mutable[0][0] = CellData(symbol: "X", foreground: 0, background: 0,
+                                 modifier: 0, skip: false, hyperlink: nil)
+        #expect(buffer.cell(column: 0, row: 0)?.symbol == "00",
+                Comment(rawValue: "writing to the caller's array changed the buffer: rows "
+                    + "were aliased, not shared copy-on-write"))
+    }
+
+    /// A row that is shorter than the declared width keeps `count` and indexing
+    /// honest, which is what the crop relies on for a malformed frame.
+    @Test("the row initialiser handles ragged rows")
+    func rowsInitialiserRagged() {
+        let rows: [[CellData]] = [Array(repeating: .blank, count: 3), [.blank]]
+        let buffer = CellBuffer(rows: rows, width: 3)
+        #expect(buffer.count == 4)
+        #expect(buffer.rowCount == 2)
+        #expect(buffer.cell(column: 2, row: 1) == nil)
+        #expect(buffer.cell(column: 0, row: 1) != nil)
     }
 
     @Test("buffers with different chunking are still equal when their cells are")

@@ -297,6 +297,29 @@ public struct FrameData: Equatable, Sendable {
         self.graphics = graphics
     }
 
+    /// A frame whose cells are already in rows, e.g. a pane crop.
+    ///
+    /// The `cells:` initialiser chunks a flat array, which copies every row out of
+    /// the slice it came from (`Array(slice)` does not share storage). A caller
+    /// that already loops per row — `PaneTerminalModel.paneFrame` does — should use
+    /// this one and skip both the flattening and the re-chunking; see
+    /// docs/PERFORMANCE.md §8.
+    public init(
+        buffer: CellBuffer,
+        width: UInt16,
+        height: UInt16,
+        cursor: CursorState?,
+        hyperlinks: [String],
+        graphics: Data
+    ) {
+        self.buffer = buffer
+        self.width = width
+        self.height = height
+        self.cursor = cursor
+        self.hyperlinks = hyperlinks
+        self.graphics = graphics
+    }
+
     /// The cells in frame order, as a plain array.
     ///
     /// **Not** for hot paths: it allocates one `CellData` per cell. It exists for

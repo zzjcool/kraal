@@ -8,15 +8,18 @@
 // assertion:
 //
 //   1. the two guards the issue said must stay (boot id, projection revision),
-//   2. observation — a patch that does not make the store's `surface` *change*
-//      from SwiftUI's point of view leaves the screen frozen with no error, and
-//   3. recovery — a rejected patch means our baseline diverged, and the screen
-//      cannot repair itself by waiting for the next patch.
+//   2. recovery — a rejected patch means our baseline diverged, and the screen
+//      cannot repair itself by waiting for the next patch, and
+//   3. recovery not becoming a stampede — a diverged baseline rejects *every*
+//      patch, so the request for a fresh surface has to be latched.
 //
-// (2) is why this file exists at all. `@Observable` is driven by writes to the
-// tracked property; whether an assignment is "a write" is invisible to a test that
-// only reads the value afterwards. `withObservationTracking` observes what a real
-// view would.
+// There is also a fourth, narrower thing below: `patchIsObserved` pins the
+// copy-assign implementation detail. It is not an argument about storage shape —
+// see its own note.
+//
+// On (2): `@Observable` is driven by writes to the tracked property; whether an
+// assignment is "a write" is invisible to a test that only reads the value
+// afterwards. `withObservationTracking` observes what a real view would.
 
 import Foundation
 import Observation
@@ -80,11 +83,20 @@ struct StorePatchTests {
         #expect(store.surface?.frame.buffer[0] == baseline.frame.buffer[0])
     }
 
-    /// Requirement (2) from the file header. A view body reads
-    /// `store.surface?.surfaceRevision` and `store.surface?.frame`; if a patch did
-    /// not register as a change to the tracked property, the view would never be
-    /// invalidated and the pane would keep painting the old cells forever — the
-    /// exact failure a "just mutate it in place" fix risks.
+    /// Pins the copy-assign implementation detail of `handleSurfacePatch`.
+    ///
+    /// A view body reads `store.surface?.surfaceRevision`; if a patch stopped
+    /// assigning the tracked property, the view would never be invalidated. This
+    /// test keeps the patch path assigning rather than mutating through a reference
+    /// held elsewhere.
+    ///
+    /// **What it does not prove**: that a `final class` storage would be invisible
+    /// to `@Observable`. It would not be. A nested-class mutation reached through
+    /// `surface?.apply(...)` still goes through the tracked property's `_modify`
+    /// accessor, which fires `willSet`/`didSet`, so SwiftUI is notified either way.
+    /// The reason that storage was rejected is the write-through into
+    /// `renderer.previous` (see `PatchCopyOnWriteTests.publishedCopyIsIndependent`),
+    /// not observation.
     @Test("a patch invalidates an observer of store.surface")
     @MainActor
     func patchIsObserved() throws {
@@ -151,6 +163,95 @@ struct StorePatchTests {
                 "a frame with a cell count that disagrees with its grid was adopted")
         #expect(store.lastError?.contains("surface rejected") == true,
                 "the rejection was silent: \(store.lastError ?? "nil")")
+    }
+
+    /// A cursor parked past the last column is **not** a corrupt frame.
+    ///
+    /// Terminal pending-wrap state is `cursor.column == width`: the cursor sits
+    /// one past the last cell until the next character wraps it. It is legal,
+    /// common and sent by the daemon; `validateGrid()` calls it out of bounds
+    /// because the *patch* path must refuse a daemon that moves the cursor
+    /// outside the grid.
+    ///
+    /// Refusing the whole frame for it is the failure this test exists for: a
+    /// surface that is dropped is never adopted (`self.surface` stays nil at
+    /// startup, i.e. black, or keeps the previous tab's cells forever) and the
+    /// only symptom is a tab-bar icon. The renderer already clamps the host
+    /// cursor it paints, so the frame is adopted with the cursor clamped.
+    ///
+    /// The other half of the arrival check — a cell count that disagrees with the
+    /// grid is still **refused** — is `invalidSurfaceRejected` below. Clamping the
+    /// cursor must not have turned the check into a rubber stamp.
+    @Test("a pending-wrap cursor is adopted, not rejected")
+    @MainActor
+    func pendingWrapCursorAdopted() throws {
+        let store = try makeStore(at: 1)
+        let good = try #require(store.surface)
+        #expect(store.lastError == nil)
+
+        var wrapped = good
+        wrapped.surfaceRevision = 7
+        var cursor = try #require(wrapped.frame.cursor)
+        cursor.column = wrapped.frame.width      // == width, the pending-wrap state
+        cursor.row = wrapped.frame.height &- 1
+        wrapped.frame.cursor = cursor
+
+        // The old code refused this frame here; assert it is genuinely out of
+        // bounds by the strict rule, or the test would pass for the wrong reason.
+        #expect(throws: SurfaceError.self) { try wrapped.frame.validateGrid() }
+
+        store.handleSurface(wrapped)
+
+        #expect(store.surface?.surfaceRevision == 7,
+                Comment(rawValue: "a pending-wrap cursor caused the whole frame to be dropped: "
+                    + "the screen would freeze on the previous frame with only a tab-bar icon"))
+        #expect(store.lastError == nil,
+                Comment(rawValue: "the frame was adopted but still reported an error: "
+                    + "\(store.lastError ?? "nil")"))
+        // Adopted with the cursor pulled back into the grid, so the rest of the
+        // client (pane cropping, debug output) agrees with what is painted.
+        #expect(store.surface?.frame.cursor?.column == wrapped.frame.width &- 1)
+        #expect(store.surface?.frame.cursor?.row == wrapped.frame.height &- 1)
+        #expect(store.surface?.frame.cursor?.visible == true)
+    }
+
+    /// The latch. Once a resync has been requested, a diverged baseline keeps
+    /// rejecting patches — up to 60/s — and each one used to send another round
+    /// of two commands: the in-flight guard cleared as soon as the request
+    /// finished, long before the fresh surface landed, and the reconnect branch
+    /// had no guard at all while resetting the backoff every time.
+    @Test("repeated rejections request exactly one resync")
+    @MainActor
+    func repeatedRejectionsCoalesce() throws {
+        let store = try makeStore(at: 5)
+        for _ in 0 ..< 5 {
+            store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        }
+        #expect(store.surfaceResyncRequests == 1,
+                Comment(rawValue: "\(store.surfaceResyncRequests) resyncs were requested for "
+                    + "5 rejected patches; a diverged baseline would send one round of two "
+                    + "commands per frame"))
+    }
+
+    /// The latch must not be permanent: a fresh surface is what pays it off, and
+    /// the next divergence has to be able to ask again or the screen strands on
+    /// the second failure.
+    @Test("adopting a fresh surface resets the resync latch")
+    @MainActor
+    func latchResetsOnFreshSurface() throws {
+        let store = try makeStore(at: 5)
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "G"))
+        #expect(store.surfaceResyncRequests == 1)
+
+        // The re-projected surface lands.
+        store.handleSurface(try surface(revision: 6))
+        #expect(store.surfaceResyncLatched == false, "the latch survived a fresh surface")
+
+        // It diverges again later: the store must be able to ask a second time.
+        store.handleSurfacePatch(try patch(base: 1, row: 0, column: 0, symbol: "H"))
+        #expect(store.surfaceResyncRequests == 2,
+                Comment(rawValue: "only \(store.surfaceResyncRequests) resyncs: the latch "
+                    + "never reset, so a second divergence cannot recover"))
     }
 
     // MARK: - Fixtures

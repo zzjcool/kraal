@@ -411,6 +411,13 @@ public final class PaneTerminalModel {
     /// The terminal only ever knows about its own pane, so the surrounding
     /// borders and sibling panes must not be fed to it — otherwise a patch in a
     /// neighbouring pane would repaint ours.
+    ///
+    /// Rows are handed to the frame already chunked (`CellBuffer(rows:width:)`)
+    /// rather than flattened into one array and re-split. The flatten-then-chunk
+    /// shape copied the pane twice — once into `[CellData]`, once per row by
+    /// `Array(slice)` inside `CellBuffer.init(_:width:)`, which does not share
+    /// storage with the slice it comes from. Measured 200x50 full width 99.4 us ->
+    /// 63.1 us, half width 50.9 -> 33.1 us (docs/PERFORMANCE.md §8).
     private func paneFrame(
         from surface: PaneSurfaceFrame,
         geometry: PaneSurfacePane
@@ -419,8 +426,8 @@ public final class PaneTerminalModel {
         let width = Int(area.width)
         let height = Int(area.height)
         let frameWidth = Int(surface.frame.width)
-        var cells: [CellData] = []
-        cells.reserveCapacity(width * height)
+        var rows: [[CellData]] = []
+        rows.reserveCapacity(height)
 
         // Row at a time: a row of the surface is one array, so this is one retain
         // per row instead of one per cell. The bounds check is per cell because a
@@ -431,14 +438,17 @@ public final class PaneTerminalModel {
             let sourceRow = Int(area.originY) + row
             let rowCells = surface.frame.buffer.row(sourceRow)
             let available = rowCells.count
+            var cropped: [CellData] = []
+            cropped.reserveCapacity(width)
             for column in 0 ..< width {
                 let sourceColumn = Int(area.originX) + column
                 if sourceColumn < frameWidth, sourceColumn < available {
-                    cells.append(rowCells[rowCells.startIndex + sourceColumn])
+                    cropped.append(rowCells[rowCells.startIndex + sourceColumn])
                 } else {
-                    cells.append(.blank)
+                    cropped.append(.blank)
                 }
             }
+            rows.append(cropped)
         }
 
         var cursor: CursorState?
@@ -456,7 +466,7 @@ public final class PaneTerminalModel {
         }
 
         return FrameData(
-            cells: cells,
+            buffer: CellBuffer(rows: rows, width: width),
             width: UInt16(width),
             height: UInt16(height),
             cursor: cursor,

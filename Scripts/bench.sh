@@ -196,6 +196,55 @@ func decodedPatch(_ width: UInt16, row: UInt16, cells: Int) -> PaneSurfacePatch 
     return patch
 }
 
+// Machine-readable mode. Set by `Scripts/bench.sh --json`.
+//
+// The shell used to post-process stdout with awk (`$NF == "fps"`), which only
+// matched the render rows: every patch measurement ends with
+// `(2% of 16.7ms)` instead, so the core number of issue #50 was invisible to
+// `--json` (it printed the three `validate()` rows and nothing else). Emitting
+// the JSON here, where the label and the fields are both in hand, removes that
+// whole class of bug -- no column counting, no trailing-text matching.
+let jsonMode = ProcessInfo.processInfo.environment["KRAAL_BENCH_JSON"] == "1"
+
+/// A section header, suppressed in JSON mode (it is not a measurement).
+func header(_ line: String) {
+    guard !jsonMode else { return }
+    print(line)
+}
+
+/// One measurement.
+///
+/// - Parameters:
+///   - fps: set for per-frame costs (rendering).
+///   - perFrameMs / budgetPercent: set for per-patch costs (60fps x 4 panes).
+func emit(
+    _ label: String,
+    us: Double,
+    fps: Double? = nil,
+    perFrameMs: Double? = nil,
+    budgetPercent: Double? = nil
+) {
+    if jsonMode {
+        var fields = ["\"label\":\"\(label)\"", String(format: "\"us\":%.3f", us)]
+        if let fps { fields.append(String(format: "\"fps\":%.0f", fps)) }
+        if let perFrameMs { fields.append(String(format: "\"ms_per_frame\":%.3f", perFrameMs)) }
+        if let budgetPercent {
+            fields.append(String(format: "\"percent_of_budget\":%.0f", budgetPercent))
+        }
+        print("{" + fields.joined(separator: ",") + "}")
+        return
+    }
+    let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
+    if let fps {
+        print(String(format: "%@ %9.2f us  %8.0f fps", padded, us, fps))
+    } else if let perFrameMs, let budgetPercent {
+        print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
+                     padded, us, perFrameMs, budgetPercent))
+    } else {
+        print(String(format: "%@ %9.2f us", padded, us))
+    }
+}
+
 /// Measures a renderer fed **alternating** frames through one instance.
 ///
 /// Alternating is not cosmetic. With one renderer and one unchanging input, the
@@ -220,8 +269,7 @@ func measureRendering(
     }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start)
     let micros = elapsed / Double(iterations) / 1000.0
-    let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-    print(String(format: "%@ %9.2f us  %8.0f fps", padded, micros, 1_000_000.0 / micros))
+    emit(label, us: micros, fps: 1_000_000.0 / micros)
 }
 
 func measure(_ label: String, iterations: Int, _ body: () -> Void) {
@@ -230,8 +278,7 @@ func measure(_ label: String, iterations: Int, _ body: () -> Void) {
     for _ in 0 ..< iterations { body() }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start)
     let micros = elapsed / Double(iterations) / 1000.0
-    let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-    print(String(format: "%@ %9.2f us  %8.0f fps", padded, micros, 1_000_000.0 / micros))
+    emit(label, us: micros, fps: 1_000_000.0 / micros)
 }
 
 let sizes: [(String, UInt16, UInt16)] = [
@@ -243,9 +290,9 @@ let sizes: [(String, UInt16, UInt16)] = [
 let mode = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "all"
 
 if mode == "all" || mode == "render" {
-    print("=== render: VT encoding (SurfaceANSIRenderer) ===")
+    header("=== render: VT encoding (SurfaceANSIRenderer) ===")
     // First frame: a pane appearing. Full repaint, nothing to diff against.
-    print("-- first frame (pane appears) --")
+    header("-- first frame (pane appears) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         measure("\(label) first frame", iterations: 400) {
@@ -255,7 +302,7 @@ if mode == "all" || mode == "render" {
     }
     // Typing: one cell changes, one row is repainted. Alternating between the
     // two frames is what stops the optimiser (see measureRendering).
-    print("-- one cell changed (typing) --")
+    header("-- one cell changed (typing) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         var changed = frame
@@ -274,7 +321,7 @@ if mode == "all" || mode == "render" {
     // to run ~10000 times. `uniformlyStyledFrame` is one style across the screen,
     // where it has to run ~once. Before the fix the ratio was 1.08x -- i.e. the
     // encoder ran per cell and its result was thrown away.
-    print("-- every row changed (scroll / tail -f) --")
+    header("-- every row changed (scroll / tail -f) --")
     for (label, width, height) in sizes {
         let varied = decodedFrame(width, height)
         let variedNext = decodedFrame(width, height, seed: 1)
@@ -292,7 +339,7 @@ if mode == "all" || mode == "render" {
     // always gets fresh storage, and `Array` comparison short-circuits when two
     // values share a buffer -- passing one value as both arguments measured
     // 0.15 us instead of 60 us, a 400x understatement. See docs/PERFORMANCE.md.
-    print("-- identical frame repeated (redundant snapshot) --")
+    header("-- identical frame repeated (redundant snapshot) --")
     for (label, width, height) in sizes {
         let first = decodedFrame(width, height)
         let second = decodedFrame(width, height)
@@ -302,8 +349,8 @@ if mode == "all" || mode == "render" {
 }
 
 if mode == "all" || mode == "render" {
-    print("")
-    print("=== self-check: the two every-row frames must differ in style count ===")
+    header("")
+    header("=== self-check: the two every-row frames must differ in style count ===")
     // Issue #49's regression, as a self-check rather than a timing comparison.
     // Timing one run against another measures the machine; counting distinct
     // styles measures the probe. If these ever come out equal, the "uniform"
@@ -318,7 +365,7 @@ if mode == "all" || mode == "render" {
         let varied = distinctStyles(decodedFrame(width, height))
         let uniform = distinctStyles(uniformlyStyledFrame(width, height))
         let ok = varied > 1 && uniform == 1
-        print("  \(label) styles: varied=\(varied) uniform=\(uniform): \(ok ? "ok" : "BROKEN")")
+        header("  \(label) styles: varied=\(varied) uniform=\(uniform): \(ok ? "ok" : "BROKEN")")
         if !ok {
             FileHandle.standardError.write(
                 Data("bench self-check failed: uniform frame is not uniform for \(label)\n".utf8))
@@ -332,8 +379,8 @@ if mode == "all" || mode == "render" {
 // look 400x cheaper than it is. Check storage identity directly -- a ratio check
 // on timings measures the probe, not the hazard.
 if mode == "all" || mode == "render" {
-    print("")
-    print("=== self-check: no-op frames must not share storage ===")
+    header("")
+    header("=== self-check: no-op frames must not share storage ===")
     for (label, width, height) in sizes {
         let first = decodedFrame(width, height)
         let second = decodedFrame(width, height)
@@ -341,7 +388,7 @@ if mode == "all" || mode == "render" {
         // in one array per row, and per row is exactly the granularity at which
         // storage must differ for the renderer's row diff to see a change.
         let sameBuffer = first.buffer.sharesRow(0, with: second.buffer)
-        print("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
+        header("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
         if sameBuffer {
             FileHandle.standardError.write(Data("bench self-check failed for \(label)\n".utf8))
             exit(1)
@@ -350,8 +397,8 @@ if mode == "all" || mode == "render" {
 }
 
 if mode == "all" || mode == "patch" {
-    print("")
-    print("=== patch: PaneSurfaceFrame.apply, as AppStore.handleSurfacePatch drives it ===")
+    header("")
+    header("=== patch: PaneSurfaceFrame.apply, as AppStore.handleSurfacePatch drives it ===")
     // Measured through the **public wire API** on purpose, twice over.
     //
     //  1. It is the real path: a patch is decoded from bytes exactly as the socket
@@ -370,7 +417,7 @@ if mode == "all" || mode == "patch" {
     // The view's copy is what makes this honest: with no second reference alive
     // the optimiser can prove the published copy is unobservable and the loop
     // measures nothing (docs/PERFORMANCE.md §2).
-    print("-- one patch, 1 cell, with a view holding a copy of the surface --")
+    header("-- one patch, 1 cell, with a view holding a copy of the surface --")
     for (label, width, height) in sizes {
         var surface = decodedSurface(width, height)
         var viewHolds = surface
@@ -399,11 +446,10 @@ if mode == "all" || mode == "patch" {
             / Double(iterations) / 1000.0
         // 4 panes at 60 patches/s is the multi-pane case issue #50 measured.
         let perFrame = micros * 60 * 4 / 1000.0
-        let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-        print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
-                     padded, micros, perFrame, perFrame / 16.7 * 100))
+        emit("\(label) 1-cell patch", us: micros,
+             perFrameMs: perFrame, budgetPercent: perFrame / 16.7 * 100)
     }
-    print("-- one patch carrying a whole row (a line echoed back) --")
+    header("-- one patch carrying a whole row (a line echoed back) --")
     for (label, width, height) in sizes {
         var surface = decodedSurface(width, height)
         var viewHolds = surface
@@ -423,11 +469,10 @@ if mode == "all" || mode == "patch" {
         let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
             / Double(iterations) / 1000.0
         let perFrame = micros * 60 * 4 / 1000.0
-        let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-        print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
-                     padded, micros, perFrame, perFrame / 16.7 * 100))
+        emit("\(label) whole-row patch", us: micros,
+             perFrameMs: perFrame, budgetPercent: perFrame / 16.7 * 100)
     }
-    print("-- frame.validate() (a full-surface arrival still runs the whole scan) --")
+    header("-- frame.validate() (a full-surface arrival still runs the whole scan) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         measure("\(label) validate()", iterations: 3000) {
@@ -437,30 +482,24 @@ if mode == "all" || mode == "patch" {
     }
 }
 
-print("")
-print("(checksum \(sink) — printed so no measurement can be optimised away)")
+// The checksum goes to stderr: it is the reason no measurement can be optimised
+// away, not a measurement, and on stdout it would make `--json` unparseable.
+FileHandle.standardError.write(
+    Data("(checksum \(sink) — printed so no measurement can be optimised away)\n".utf8))
 SWIFT
 
 echo "compiling probe against $BUILD ..." >&2
 /usr/bin/swiftc -O -o "$WORK/bench" "$WORK/bench.swift" \
     -I "$BUILD" -L "$BUILD" -lKraalProtocol 2>&1 | grep -E "error" && exit 1
 
+# JSON mode is the probe's own, not a stdout filter here.
+#
+# It used to be awk on `$NF == "fps"`, which matched only the render rows: every
+# patch row ends with `(2% of 16.7ms)`, so `--json` printed the three validate()
+# rows and silently dropped the number issue #50 is about. The probe now emits
+# the JSON itself, where the label and the fields are both in hand.
 if [ "$JSON" -eq 1 ]; then
-    # Convert "<label> <us> us <fps> fps" into JSON lines with awk: sed cannot
-    # reliably split the right-aligned numeric columns (the us field carries a
-    # decimal point and the label carries trailing spaces).
-    # "<label...>   <us> us   <fps> fps" -> JSON. The numeric columns are the
-    # last four fields (us, "us", fps, "fps"), so the label is everything before
-    # them; sed cannot do this reliably because the label carries trailing spaces.
-    "$WORK/bench" "$MODE" | awk '
-        $NF == "fps" {
-            fps = $(NF-1)
-            us  = $(NF-3)
-            label = ""
-            for (i = 1; i <= NF-4; i++) label = label (i > 1 ? " " : "") $i
-            gsub(/"/, "", label)
-            printf "{\"label\":\"%s\",\"us\":%s,\"fps\":%s}\n", label, us, fps
-        }'
+    KRAAL_BENCH_JSON=1 "$WORK/bench" "$MODE"
 else
     "$WORK/bench" "$MODE"
 fi

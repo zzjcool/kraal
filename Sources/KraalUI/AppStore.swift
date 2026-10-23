@@ -775,12 +775,20 @@ public final class AppStore {
     @ObservationIgnored var resyncPending = false
     /// Guards `reprojectSurface` against overlapping toggles.
     @ObservationIgnored var reprojectInFlight = false
-    /// Guards `resyncSurface` against stacking a re-projection per rejected patch.
+    /// Set when a resync has been requested and not yet paid off by a fresh
+    /// surface; cleared only in `handleSurface` when one is adopted.
     ///
-    /// A rejection is not one event: once the baseline has diverged, every patch
-    /// that follows is rejected too, so without this a diverged screen would queue
-    /// a re-projection per frame until the fresh surface lands.
-    @ObservationIgnored var resyncInFlight = false
+    /// This replaces an earlier `resyncInFlight` flag, which could not do the job:
+    /// it cleared as soon as the *request* completed, which is before the fresh
+    /// surface lands, so a baseline that was already diverged (every patch
+    /// rejected, up to 60/s) re-armed it immediately. The reconnect branch had no
+    /// in-flight state at all, and `resetBackoff: true` made every rejection
+    /// restart the handshake — a reconnect per frame, forever.
+    ///
+    /// A `resyncPending` flag already existed for the "daemon cannot re-project"
+    /// case in `handleSurface`; it covers a stale *surface*, not a rejected patch,
+    /// so the two are kept apart rather than merged.
+    @ObservationIgnored var surfaceResyncLatched = false
     /// How many times a rejected patch has asked for a fresh surface.
     ///
     /// Diagnostic state, and the only *synchronous* evidence that the recovery path

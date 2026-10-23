@@ -151,7 +151,19 @@ extension AppStore {
         // only from the patch path, so the scan that ran on every patch was also
         // the only scan that ever ran. Moving it here keeps the same total
         // coverage (every frame validated exactly once) at 1/60th the frequency.
-        if let error = surface.frame.firstValidationError() {
+        //
+        // The cursor is clamped *before* the check, not rejected by it. A terminal
+        // parked in its pending-wrap state reports `column == width`, which is
+        // legal and common, and `validateGrid()` calls that out of bounds. Refusing
+        // the frame for it would drop the whole screen — nothing else adopts a
+        // surface, so `self.surface` would stay nil (black) or keep the previous
+        // tab's cells forever, with only a tab-bar icon to show for it. The
+        // renderer already clamps the host cursor it paints
+        // (`SurfaceANSIRenderer.resolveHostCursor`), so clamping here just makes
+        // the stored value agree with what is drawn.
+        var incoming = surface
+        incoming.frame.clampCursor()
+        if let error = incoming.frame.firstValidationError() {
             // Refuse the frame rather than paint a grid we cannot trust: a cell
             // whose hyperlink index is out of range makes `linkURI` return nil and
             // silently drops the link, and a count that disagrees with the grid
@@ -161,9 +173,12 @@ extension AppStore {
             return
         }
         let previousPanes = Set(self.surface?.panes.map(\.paneId) ?? [])
-        self.surface = surface
+        self.surface = incoming
         surfaceIsStale = false
-        let paneIds = Set(surface.panes.map(\.paneId))
+        // The baseline is whole again: whatever triggered the re-projection (or
+        // the reconnect) has been paid for, so a later rejection may ask again.
+        surfaceResyncLatched = false
+        let paneIds = Set(incoming.panes.map(\.paneId))
         if paneIds != previousPanes {
             onPaneSetChanged?(paneIds)
         }
@@ -186,8 +201,14 @@ extension AppStore {
             // base revision we are missing is only recoverable by asking for the
             // whole surface again.
             lastError = "surface patch rejected: \(error)"
-            kraalLog("surface: patch rejected (\(error)), requesting a fresh surface")
-            resyncSurface()
+            if surfaceResyncLatched {
+                // A fresh surface is already on its way; asking again per rejected
+                // frame would be 60 rounds of commands a second. Logged, not sent.
+                kraalLog("surface: patch rejected (\(error)), resync already requested")
+            } else {
+                kraalLog("surface: patch rejected (\(error)), requesting a fresh surface")
+                resyncSurface()
+            }
         }
     }
 
@@ -196,12 +217,25 @@ extension AppStore {
     /// Toggling `client_shell.surface.set` off and on is the only lever the
     /// protocol offers; a daemon that does not serve that method cannot be asked,
     /// so the handshake is redone instead (which re-projects as a side effect).
-    /// One call at a time: the connection serves one command per tick and a second
-    /// lands as `endpoint_busy`.
+    ///
+    /// **Latched**: the first request sets `surfaceResyncLatched`, and nothing is
+    /// requested again until a fresh surface is actually adopted in
+    /// ``handleSurface``. An in-flight flag cannot do this — it would clear as soon
+    /// as the request finished, long before the fresh surface landed, and a
+    /// diverged baseline (every patch rejected, up to 60/s) would re-arm it
+    /// immediately.
+    ///
+    /// The reconnect branch is the one that used to be worst: with
+    /// `resetBackoff: true` every rejection zeroed `reconnectAttempt` and tore the
+    /// endpoint down. The latch now guards it the same way.
+    ///
+    /// This is what `resyncPending` in ``handleSurface`` does for the "daemon
+    /// cannot re-project" case, extended to cover the whole patch-rejection round
+    /// trip; the two flags stay separate because they answer different questions.
     func resyncSurface() {
+        guard !surfaceResyncLatched else { return }
+        surfaceResyncLatched = true
         surfaceResyncRequests += 1
-        guard !resyncInFlight else { return }
-        resyncInFlight = true
         Task { [weak self] in
             guard let self else { return }
             if supportsSurfaceInterest {
@@ -209,7 +243,6 @@ extension AppStore {
             } else {
                 scheduleReconnect(resetBackoff: true)
             }
-            resyncInFlight = false
         }
     }
 }
