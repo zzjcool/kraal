@@ -177,8 +177,8 @@ struct SurfacePatchAtomicityTests {
             cursor: nil
         )
         try surface.apply(patch)
-        #expect(surface.frame.cells[0].symbol == "A")
-        #expect(surface.frame.cells[2].symbol == "C")
+        #expect(surface.frame.buffer[0].symbol == "A")
+        #expect(surface.frame.buffer[2].symbol == "C")
     }
 
     private static func baseline() -> PaneSurfaceFrame {

@@ -775,6 +775,19 @@ public final class AppStore {
     @ObservationIgnored var resyncPending = false
     /// Guards `reprojectSurface` against overlapping toggles.
     @ObservationIgnored var reprojectInFlight = false
+    /// Guards `resyncSurface` against stacking a re-projection per rejected patch.
+    ///
+    /// A rejection is not one event: once the baseline has diverged, every patch
+    /// that follows is rejected too, so without this a diverged screen would queue
+    /// a re-projection per frame until the fresh surface lands.
+    @ObservationIgnored var resyncInFlight = false
+    /// How many times a rejected patch has asked for a fresh surface.
+    ///
+    /// Diagnostic state, and the only *synchronous* evidence that the recovery path
+    /// ran: the request itself is asynchronous (one command per connection tick),
+    /// so a test cannot assert on the wire without a daemon. Incremented where the
+    /// decision is made, which is also where a real failure would be invisible.
+    @ObservationIgnored public internal(set) var surfaceResyncRequests = 0
 }
 
 /// Coalescing state for a divider drag.

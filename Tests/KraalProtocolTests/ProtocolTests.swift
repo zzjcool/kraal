@@ -181,7 +181,7 @@ struct SurfaceFixtureTests {
 
         #expect(surface.frame.width == 120)
         #expect(surface.frame.height == 40)
-        #expect(surface.frame.cells.count == 4800)
+        #expect(surface.frame.buffer.count == 4800)
         #expect(surface.panes.count == 1)
         #expect(try surface.validateSucceeds())
 
@@ -409,9 +409,9 @@ struct SurfacePatchTests {
         var surface = baseline()
         try surface.apply(patch())
         #expect(surface.surfaceRevision == 8)
-        #expect(surface.frame.cells[2].symbol == "X")
-        #expect(surface.frame.cells[3].symbol == "Y")
-        #expect(surface.frame.cells[0].symbol == " ")
+        #expect(surface.frame.buffer[2].symbol == "X")
+        #expect(surface.frame.buffer[3].symbol == "Y")
+        #expect(surface.frame.buffer[0].symbol == " ")
         #expect(surface.frame.cursor?.column == 1)
     }
 

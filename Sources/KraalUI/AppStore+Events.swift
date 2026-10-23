@@ -141,6 +141,25 @@ extension AppStore {
         kraalLog("surface: \(surface.frame.width)x\(surface.frame.height) "
             + "panes=\(surface.panes.map(\.paneId).joined(separator: ",")) "
             + "rev=\(surface.surfaceRevision)")
+        // Validate the whole frame here, once, where the cells are new.
+        //
+        // This is the other half of the patch path's speedup (issue #50).
+        // `PaneSurfaceFrame.apply` no longer re-scans every cell for a hyperlink
+        // index, because a patch cannot add hyperlinks and so cannot invalidate the
+        // rows it does not touch — but that argument only holds if *something*
+        // checked the baseline. Nothing did: `FrameData.validate()` was reachable
+        // only from the patch path, so the scan that ran on every patch was also
+        // the only scan that ever ran. Moving it here keeps the same total
+        // coverage (every frame validated exactly once) at 1/60th the frequency.
+        if let error = surface.frame.firstValidationError() {
+            // Refuse the frame rather than paint a grid we cannot trust: a cell
+            // whose hyperlink index is out of range makes `linkURI` return nil and
+            // silently drops the link, and a count that disagrees with the grid
+            // means every row after the first is offset.
+            lastError = "surface rejected: \(error)"
+            kraalLog("surface: rejected, \(error)")
+            return
+        }
         let previousPanes = Set(self.surface?.panes.map(\.paneId) ?? [])
         self.surface = surface
         surfaceIsStale = false
@@ -159,7 +178,38 @@ extension AppStore {
         } catch {
             // A rejected patch means our baseline diverged; ask for a fresh
             // surface rather than showing a corrupt screen.
+            //
+            // The comment has always said this, but the code only recorded an
+            // error: `lastError` is rendered as an icon in the tab bar, and the
+            // screen stayed on the diverged baseline while the daemon kept
+            // patching *its* version of it. A rejection is not self-healing — the
+            // base revision we are missing is only recoverable by asking for the
+            // whole surface again.
             lastError = "surface patch rejected: \(error)"
+            kraalLog("surface: patch rejected (\(error)), requesting a fresh surface")
+            resyncSurface()
+        }
+    }
+
+    /// Asks the daemon to re-project the tab we are showing.
+    ///
+    /// Toggling `client_shell.surface.set` off and on is the only lever the
+    /// protocol offers; a daemon that does not serve that method cannot be asked,
+    /// so the handshake is redone instead (which re-projects as a side effect).
+    /// One call at a time: the connection serves one command per tick and a second
+    /// lands as `endpoint_busy`.
+    func resyncSurface() {
+        surfaceResyncRequests += 1
+        guard !resyncInFlight else { return }
+        resyncInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            if supportsSurfaceInterest {
+                await reprojectSurface()
+            } else {
+                scheduleReconnect(resetBackoff: true)
+            }
+            resyncInFlight = false
         }
     }
 }

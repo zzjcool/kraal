@@ -117,7 +117,9 @@ struct SurfaceANSIRendererTests {
             skip: false,
             hyperlink: nil
         )
-        frame.cells = cells
+        // Fresh storage, not an in-place write: the point of these cases is that the
+        // renderer sees genuinely different cells, not a buffer it already holds.
+        frame.buffer = CellBuffer(cells, width: Int(frame.width))
         let delta = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
         #expect(delta.contains("[3;1H"))
         #expect(!delta.contains("[2;1H"), "an unchanged row must not be repainted")
@@ -184,7 +186,9 @@ struct SurfaceANSIRendererTests {
 
         // Clear the row that had content.
         cells[4] = .blank
-        frame.cells = cells
+        // Fresh storage, not an in-place write: the point of these cases is that the
+        // renderer sees genuinely different cells, not a buffer it already holds.
+        frame.buffer = CellBuffer(cells, width: Int(frame.width))
         let delta = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
         #expect(delta.contains("[2;1H"), "a row that became blank must still be repainted")
     }
@@ -229,7 +233,7 @@ struct SurfaceANSIRendererTests {
         _ = renderer.render(first)
 
         var changed = first
-        changed.cells[5] = CellData(
+        changed.buffer[5] = CellData(
             symbol: "z",
             foreground: 0,
             background: 0,
@@ -367,7 +371,9 @@ struct SurfaceANSIRendererTests {
             skip: false,
             hyperlink: nil
         )
-        frame.cells = cells
+        // Fresh storage, not an in-place write: the point of these cases is that the
+        // renderer sees genuinely different cells, not a buffer it already holds.
+        frame.buffer = CellBuffer(cells, width: Int(frame.width))
         let diff = String(bytes: renderer.render(frame), encoding: .utf8) ?? ""
 
         let syncOpen = diff.range(of: "\u{1B}[?2026h")

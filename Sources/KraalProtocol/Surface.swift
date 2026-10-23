@@ -49,15 +49,43 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
 }
 
 public extension FrameData {
+    /// Every invariant: cell count, every cell's hyperlink index, cursor bounds.
+    ///
+    /// The cell scan is deliberately kept here — it belongs to a *surface
+    /// arriving whole*, where the cells are new and untrusted. The patch path uses
+    /// ``validateGrid()`` instead; see its note for why the scan is redundant
+    /// there (issue #50).
     func validate() throws {
-        let expected = Int(width) * Int(height)
-        guard cells.count == expected else {
-            throw SurfaceError.cellCount(expected: expected, actual: cells.count)
-        }
-        for cell in cells {
-            if let index = cell.hyperlink, Int(index) >= hyperlinks.count {
-                throw SurfaceError.hyperlinkIndex(index: index, count: hyperlinks.count)
+        try validateGrid()
+        for index in 0 ..< buffer.rowCount {
+            for cell in buffer.row(index) {
+                if let link = cell.hyperlink, Int(link) >= hyperlinks.count {
+                    throw SurfaceError.hyperlinkIndex(index: link, count: hyperlinks.count)
+                }
             }
+        }
+    }
+
+    /// The part of ``validate()`` a patch can actually disturb, at O(1).
+    ///
+    /// Two invariants, and neither needs the cells:
+    ///
+    ///   count — must be `width * height`. A patch writes into an existing grid,
+    ///           so this can only be *found* wrong here, never made wrong; it is a
+    ///           cheap tripwire on a baseline that was built badly.
+    ///   cursor — bounds, against the frame's own grid.
+    ///
+    /// Hyperlink indices are the expensive one to check (a full scan, 3.1 us at
+    /// 200x50) and are the one thing a patch provably cannot break: ``PaneSurfacePatch``
+    /// carries no hyperlinks and cannot replace the array, so every index in the
+    /// baseline was already checked against the very same array when the surface
+    /// arrived, and every index a patch introduces is checked by
+    /// `validatePatch`. Re-scanning the untouched rows on every patch is what made
+    /// this repeat work expensive.
+    func validateGrid() throws {
+        let expected = Int(width) * Int(height)
+        guard buffer.count == expected else {
+            throw SurfaceError.cellCount(expected: expected, actual: buffer.count)
         }
         if let cursor, cursor.visible, cursor.column >= width || cursor.row >= height {
             throw SurfaceError.cursorBounds(
@@ -69,14 +97,25 @@ public extension FrameData {
         }
     }
 
-    /// The cell at a grid position, or `nil` outside the frame.
-    subscript(column: Int, row: Int) -> CellData? {
-        guard column >= 0, row >= 0, column < Int(width), row < Int(height) else {
+    /// The first invariant ``validate()`` would reject on, if any.
+    ///
+    /// A non-throwing form, for callers that report the reason rather than
+    /// propagate it — `AppStore.handleSurface` has no `throws` in its path, and
+    /// turning a corrupt frame into a UI message is the whole point of checking.
+    func firstValidationError() -> SurfaceError? {
+        do {
+            try validate()
+            return nil
+        } catch let error as SurfaceError {
+            return error
+        } catch {
             return nil
         }
-        let index = row * Int(width) + column
-        guard index < cells.count else { return nil }
-        return cells[index]
+    }
+
+    /// The cell at a grid position, or `nil` outside the frame.
+    subscript(column: Int, row: Int) -> CellData? {
+        buffer.cell(column: column, row: row)
     }
 }
 
@@ -92,12 +131,10 @@ public extension PaneSurfaceFrame {
 
         for row in patch.rows {
             let start = Int(row.row) * Int(frame.width) + Int(row.column)
-            for (offset, cell) in row.cells.enumerated() {
-                let index = start + offset
-                guard index < frame.cells.count else {
-                    throw SurfaceError.patchRowBounds
-                }
-                frame.cells[index] = cell
+            guard frame.buffer.write(row.cells, at: start) else {
+                // Unreachable: `validatePatch` already refused this row. Kept so a
+                // patch that somehow slipped through still cannot land partially.
+                throw SurfaceError.patchRowBounds
             }
         }
         for patched in patch.panes {
@@ -109,6 +146,16 @@ public extension PaneSurfaceFrame {
         surfaceRevision = patch.surfaceRevision
     }
 
+    /// Whether a patch may be applied, and whether it may be applied *at all*.
+    ///
+    /// The baseline check is ``FrameData/validateGrid()``, not the full
+    /// ``FrameData/validate()``. The full version scans every cell for a hyperlink
+    /// index that a patch cannot invalidate — `PaneSurfacePatch` carries no
+    /// hyperlinks and cannot replace the frame's array, so the untouched rows'
+    /// indices were checked against this very array when the surface arrived
+    /// (`AppStore.handleSurface`). The rows a patch *does* introduce are checked
+    /// below, cell by cell. Rescanning the rest was 3.1 us of every 37.4 us patch
+    /// at 200x50, for a check that could not fail (issue #50).
     private func validatePatch(_ patch: PaneSurfacePatch) throws {
         guard patch.bootId == bootId,
               patch.projectionRevision == projectionRevision,
@@ -118,7 +165,7 @@ public extension PaneSurfaceFrame {
         else {
             throw SurfaceError.patchIdentity
         }
-        try frame.validate()
+        try frame.validateGrid()
         for row in patch.rows {
             guard row.row < frame.height,
                   Int(row.column) + row.cells.count <= Int(frame.width)

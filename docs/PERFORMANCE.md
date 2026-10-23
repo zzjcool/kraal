@@ -283,14 +283,14 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 - `Scripts/gui.sh:70` 与 `Scripts/agent-vm.sh:203` **硬编码 Debug 路径**，不认
   `-c release` —— 想用 release 产物跑 GUI 用例需要自己改，别以为传 `-c release` 就行
 
-## 附：本仓库的性能现状（2026-10-22 实测）
+## 附：本仓库的性能现状（2026-10-23 实测）
 
-已确认的两个热点，各有独立 issue：
+已确认的热点，各有独立 issue：
 
 | 热点 | 位置 | 200×50 成本 | issue |
 |---|---|---|---|
 | ~~`StyleCode.encode` 每格建 `[String]` + `joined`~~ | `SurfaceANSIRenderer.swift:222` | ~~~1230 us/帧（整屏变化时）~~ → 统一样式 209 us（**已修**） | #49 |
-| patch 应用时整屏 CoW 深拷贝 | `AppStore+Events.swift:146` | 37.4 us/patch（4 pane = 54% 预算） | #50 |
+| ~~patch 应用时整屏 CoW 深拷贝~~ | ~~`AppStore+Events.swift:146`~~ → `CellBuffer.swift` | ~~37.4 us/patch（4 pane = 54% 预算）~~ → **1.4 us/patch（2%）**（**已修**） | #50 |
 | 每键多发一条 `pane.focus` | `KraalMacMain.swift:97` | 每键 0.036 → 0.248 ms（7×） | #55 |
 | 日志格式化在 enabled 检查前求值 | `KraalLog.swift:108` | 每键 0.96 us（关闭时照付） | #56 |
 | `DateFormatter` 每条日志新建 | `KraalLog.swift:102` | 32.3 us（共享版 0.67 us） | #56 |
@@ -300,24 +300,134 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 
 | 观察 | 位置 | 实测成本 |
 |---|---|---|
-| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:100` | 19.3 us（半宽）/ 30.8 us（全宽），200×50 |
-| `render` 每帧新建 `Data()` 无 `reserveCapacity` | `SurfaceANSIRenderer.swift:57-58` | 未单独测（整屏 300×80 输出约 90 KB，会有多次扩容） |
-| `linkURI` 每个 cell 都调用，带链接时每次重新 sanitize 整个 URI | `SurfaceANSIRenderer.swift:217,261-263` | 未单独测（同一行同一 URI 出现 N 次就 sanitize N 次） |
-| `changedRows` 无单元格级 diff，一行变一格整行重写 | `SurfaceANSIRenderer.swift:164-178` | 已含在「1 格变化」29.7-257 us 里 |
+| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:130` | 19.3 us（半宽）/ 30.8 us（全宽），200×50 |
+| `render` 每帧新建 `Data()` 无 `reserveCapacity` | `SurfaceANSIRenderer.swift:58` | 未单独测（整屏 300×80 输出约 90 KB，会有多次扩容） |
+| `linkURI` 每个 cell 都调用，带链接时每次重新 sanitize 整个 URI | `SurfaceANSIRenderer.swift:297` | 未单独测（同一行同一 URI 出现 N 次就 sanitize N 次） |
+| `changedRows` 无单元格级 diff，一行变一格整行重写 | `SurfaceANSIRenderer.swift:164` | 已含在「1 格变化」29.7-257 us 里 |
 
 健康、不需要动的部分（同样实测）：
 
 | 路径 | 成本 |
 |---|---|
 | 构造一个 200×50 解码帧 | 57 us |
-| `FrameData.validate()` | 3.1 us |
+| `FrameData.validate()`（整帧到达时一次，不再每 patch 一次） | 3.1 us |
 | retain 一个帧（CoW 共享） | 0.01 us |
-| 行级 diff 检测（10000 格） | 61 us |
+| 行级 diff 检测（10000 格，行未改动时 O(1)） | 61 us |
 | 解码一个按键（`TerminalInputDecoder`） | 0.115 us |
 | `inputDecoders` 字典取存一个 decoder | 0.038 us |
 | `Task { }` 创建 + hop | 5.8 us |
 
 > 记下健康数据同样重要：下次有人怀疑这些地方慢时，不必重测。
+
+### #50 修掉之后的数字（2026-10-23 实测）
+
+### 症状与分项
+
+patch 只改 1 格，成本却只跟 pane 面积有关，与 patch 大小无关：
+
+| pane 尺寸 | 修前每 patch | 60fps × 4 panes |
+|---|---|---|
+| 80×24 | 10.8 us | 2.60 ms/帧（16%） |
+| 200×50 | 40.3 us | 9.66 ms/帧（58%） |
+| 300×80 | 95.3 us | 22.9 ms/帧（137%，掉帧） |
+
+分项（200×50）：整屏 CoW 深拷贝 ~38 us；`frame.validate()` 全量扫描 ~3 us。
+
+### 第一件必须先排掉的事：`surface?.apply(patch)` 并不能修它
+
+issue 建议「用 inout 直接改 store 的 surface」。**这条不成立**，实测过：
+
+```
+in-place write, sole owner                       0.001 us
+in-place write, second ref alive (contents read) 0.004 us   ← 慢的不是 write，是写的那一刻的 CoW
+copy-mutate-assign, copy held opaquely           → buffer moved: true
+```
+
+指针比对（`withUnsafeBufferPointer` 的 `baseAddress`）证明：只要还有第二个引用，
+**原地写同样会搬迁整块 buffer**。而 patch 到达的那一刻至少有三个引用活着 ——
+
+- store 的 `surface`
+- 每个 `GhosttyPaneView` 拿到的 `PaneSurfaceFrame`
+- `SurfaceANSIRenderer.previous`
+- `PaneTerminalModel.frameGrid`
+
+所以复制不是 copy-assign 造成的，是**值的存储形态**造成的。只有让存储本身廉价可复制，
+才能消掉这笔钱。
+
+### 为什么不是 `final class CellBuffer`（issue 的另一条建议）
+
+引用类型让复制免费，但也让语义变了：patch 会**写穿**到 renderer 已经画过的
+`previous` 里，`changedRows` 于是拿新内容跟它自己比，判定「没变化」，不重绘 ——
+屏幕停在旧画面上，任何地方都不报错。`@Observable` 那一侧同理：没有属性被写，
+SwiftUI 不会 invalidation，`GhosttyPaneView.onChange(of: surface.surfaceRevision)`
+永远等不到。
+
+这条不是推理，是有测试钉住的：`PatchCopyOnWriteTests.publishedCopyIsIndependent`
+在注入「行共享一个 class」后立刻变红（本轮的 A/B 注入之一）。
+
+### 实际修法
+
+`CellBuffer`（`Sources/KraalProtocol/CellBuffer.swift`）：**一行一个 CoW 数组**。
+
+- 复制 → 共享未改动的行（O(1) retain），只有被 patch 的那一行真的复制；
+- 值语义保留，diff 与 `@Observable` 都不受影响；
+- 分块是内部实现，相等性比较 cell 而非布局。
+
+`FrameData.cells: [CellData]` 变成 `FrameData.buffer: CellBuffer`，且 `flatCells`
+**故意不给 setter** —— 这样编译器会强制每个调用点显式面对存储形态，不会有人
+顺手又写回一个整屏数组写。
+
+### 修后实测（同一个探针源码，编译在父提交与本提交上各跑一次）
+
+探针 `Scripts/bench.sh patch` 只走**公开 wire API**（`ServerMessageDecoder` +
+`apply`），所以同一份源码能编在两棵树上，before/after 才是可比的。
+
+| pane | 修前 | 修后 | 倍数 |
+|---|---|---|---|
+| 80×24，1 格 | 8.1–10.8 us | 0.72–1.09 us | **~11×** |
+| 200×50，1 格 | 40.3–40.4 us | 1.42–1.52 us | **~27×** |
+| 300×80，1 格 | 95.3–97.9 us | 1.76–2.04 us | **~52×** |
+| 200×50，整行（200 格） | 40.2–41.5 us | 2.29–2.37 us | **~17×** |
+
+折算成帧预算（60fps × 4 panes，200×50）：**9.66 ms → 0.37 ms**，占 16.7 ms 的
+58% → 2%。
+
+**面积相关性消失了**：修前 300×80 是 80×24 的 12 倍，修后只差 2 倍（那 2 倍是
+真正的写入量，不是整屏复制）。
+
+### 第二笔：`validate()` 不再每 patch 全量扫
+
+`PaneSurfaceState.apply` → `validatePatch` 过去调 `frame.validate()`，会遍历全部
+cell 检查 hyperlink 索引。而 `PaneSurfacePatch` **不携带 hyperlinks、也无法替换
+hyperlinks 数组**，所以它不可能让未被触碰的行的索引失效。
+
+改成 `validateGrid()`（O(1)：cell 数 + cursor 边界），patch 自己写入的行仍逐格校验。
+全量扫描搬到它本来该在的地方 —— **整帧到达时**（`AppStore.handleSurface`）。
+
+这里有个必须说清的坑：搬之前查过，`FrameData.validate()` 唯一的调用点就是 patch
+路径 —— 也就是说那次「每 patch 全量扫描」也是**唯一**一次校验，根本没有别处在校验
+到达的 surface。所以这次不是「删掉一个检查」，而是「把检查从每帧一次搬到每 surface
+一次」，覆盖率不变、频率降两个数量级。`AppStore.handleSurface` 现在会拒绝校验失败
+的整帧并给出原因（`surface rejected: ...`），`arrivalRejectsDanglingLink` 盯着这条。
+
+### 第三笔：patch 被拒后的恢复路径
+
+`handleSurfacePatch` 的注释一直写着「ask for a fresh surface」，但代码只写了
+`lastError`。baseline 一旦分叉，后续每个 patch 都会被拒，屏幕永久停在分叉帧上，
+而 tab bar 只是多一个小图标。现在真的会 `resyncSurface()`（有 `reprojectSurface`
+就走它，没有就重握手），并用 `surfaceResyncRequests` 暴露给测试。
+
+### 本轮踩到的探针坑（补进 §1 / §1b）
+
+1. **第二次报 0.00 us**：第一版 in-place 探针里那个「第二个引用」只被读了一次
+   `.count`，优化器证明它的内容不可观测，把整块复制删了。改成每轮读它的内容后
+   才量出真值。凡是「共享 vs 不共享」的对比，都要确认两边的内容真的被消费。
+2. **合成循环不是产品代码**：`bench.sh` 原来的 patch 段手写
+   `copy.cells[0] = ...; stored = copy`，形态对但不是被修的那行代码，改完它不会变。
+   现在走解码 + `apply`。
+3. **A/B 必须同一份源码**：所以 patch 段刻意只用公开 API。render 段做不到
+   （要直接问存储），因此前后两棵树各自跑自己的 render 段，不可比 —— 这也写进了
+   脚本注释。
 
 ### 端到端：真实 daemon 上量到的往返
 
@@ -343,6 +453,8 @@ daemon（`gui.sh` 那套 scratch 环境），用 `EndpointConnection` 直连，�
 
 > 反直觉的地方最值得先实测。这三条里有两条是我原本准备开 issue 的，
 > 量完发现不成立 —— 而「不开」和「开」一样是结论。
+
+---
 
 ---
 

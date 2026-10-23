@@ -125,6 +125,77 @@ func uniformlyStyledFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -
     )
 }
 
+/// A `width`×`height` surface (tag 13), built with the public wire writer.
+///
+/// Built from bytes rather than a struct initialiser so the patch section below
+/// compiles against both sides of issue #50: `PaneSurfaceFrame.init` is internal,
+/// the decoder is public. It is also the honest shape — production gets surfaces
+/// from this decoder, and a frame assembled in a `for` loop is not the same
+/// allocation pattern as a decoded one (see the header of this script).
+func decodedSurface(_ width: UInt16, _ height: UInt16) -> PaneSurfaceFrame {
+    let w = Int(width), h = Int(height)
+    var writer = BincodeWriter()
+    writer.writeVarint(13)
+    writer.writeString("boot-a")
+    writer.writeVarint(3)                        // projectionRevision
+    writer.writeVarint(1)                        // surfaceRevision
+    writer.writeArray(Array(0 ..< w * h)) { writer, index in
+        let symbol = String(UnicodeScalar(UInt8(97 + index % 26)))
+        writer.writeString(symbol)
+        writer.writeVarint(UInt64(index % 8))    // foreground
+        writer.writeVarint(0x1E1E1E)             // background
+        writer.writeVarint(0)                    // modifier
+        writer.writeBool(false)                  // skip
+        writer.writeBool(false)                  // no hyperlink
+    }
+    writer.writeVarint(UInt64(w))
+    writer.writeVarint(UInt64(h))
+    writer.writeBool(true)                       // cursor: Some
+    writer.writeVarint(0)                        // column
+    writer.writeVarint(0)                        // row
+    writer.writeBool(true)                       // visible
+    writer.writeVarint(0)                        // shape
+    writer.writeVarint(0)                        // hyperlinks
+    writer.writeVarint(0)                        // graphics bytes
+    writer.writeVarint(0)                        // panes
+    writer.writeVarint(0)                        // splits
+    writer.writeBool(false)                      // popup
+    writer.writeVarint(0)                        // graphics assets
+    writer.writeVarint(0)                        // graphics placements
+    writer.writeVarint(0)                        // graphics retained
+    guard case let .paneSurface(surface) = try! ServerMessageDecoder.decode(Data(writer.bytes)) else {
+        fatalError("expected a surface")
+    }
+    return surface
+}
+
+/// A patch (tag 19) rewriting `cells` cells of `row`, based on revision 1.
+func decodedPatch(_ width: UInt16, row: UInt16, cells: Int) -> PaneSurfacePatch {
+    var writer = BincodeWriter()
+    writer.writeVarint(19)
+    writer.writeString("boot-a")
+    writer.writeVarint(3)                        // projectionRevision
+    writer.writeVarint(1)                        // baseSurfaceRevision
+    writer.writeVarint(2)                        // surfaceRevision
+    writer.writeVarint(1)                        // one row
+    writer.writeVarint(0)                        // column
+    writer.writeVarint(UInt64(row))
+    writer.writeArray(Array(0 ..< min(cells, Int(width)))) { writer, index in
+        writer.writeString(String(UnicodeScalar(UInt8(97 + index % 26))))
+        writer.writeVarint(1)                    // foreground
+        writer.writeVarint(2)                    // background
+        writer.writeVarint(0)                    // modifier
+        writer.writeBool(false)                  // skip
+        writer.writeBool(false)                  // no hyperlink
+    }
+    writer.writeVarint(0)                        // panes
+    writer.writeBool(false)                      // cursor: None
+    guard case let .paneSurfacePatch(patch) = try! ServerMessageDecoder.decode(Data(writer.bytes)) else {
+        fatalError("expected a patch")
+    }
+    return patch
+}
+
 /// Measures a renderer fed **alternating** frames through one instance.
 ///
 /// Alternating is not cosmetic. With one renderer and one unchanging input, the
@@ -188,7 +259,7 @@ if mode == "all" || mode == "render" {
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         var changed = frame
-        changed.cells[0] = CellData(
+        changed.buffer[0] = CellData(
             symbol: "Z", foreground: 1, background: 2,
             modifier: 0, skip: false, hyperlink: nil
         )
@@ -240,7 +311,9 @@ if mode == "all" || mode == "render" {
     // nothing -- exactly the class of error that produced the 0.29 us no-op diff.
     for (label, width, height) in sizes {
         func distinctStyles(_ frame: FrameData) -> Int {
-            Set(frame.cells.map { "\($0.foreground),\($0.background),\($0.modifier)" }).count
+            Set((0 ..< frame.buffer.rowCount).flatMap { row in
+                frame.buffer.row(row).map { "\($0.foreground),\($0.background),\($0.modifier)" }
+            }).count
         }
         let varied = distinctStyles(decodedFrame(width, height))
         let uniform = distinctStyles(uniformlyStyledFrame(width, height))
@@ -264,9 +337,10 @@ if mode == "all" || mode == "render" {
     for (label, width, height) in sizes {
         let first = decodedFrame(width, height)
         let second = decodedFrame(width, height)
-        let sameBuffer = first.cells.withUnsafeBufferPointer { a in
-            second.cells.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
-        }
+        // Row 0's storage, not an equality check: after issue #50 the cells live
+        // in one array per row, and per row is exactly the granularity at which
+        // storage must differ for the renderer's row diff to see a change.
+        let sameBuffer = first.buffer.sharesRow(0, with: second.buffer)
         print("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
         if sameBuffer {
             FileHandle.standardError.write(Data("bench self-check failed for \(label)\n".utf8))
@@ -277,32 +351,83 @@ if mode == "all" || mode == "render" {
 
 if mode == "all" || mode == "patch" {
     print("")
-    print("=== patch: handleSurfacePatch's copy-mutate-assign (AppStore+Events) ===")
-    print("-- cost of applying one patch, regardless of how few cells it carries --")
+    print("=== patch: PaneSurfaceFrame.apply, as AppStore.handleSurfacePatch drives it ===")
+    // Measured through the **public wire API** on purpose, twice over.
+    //
+    //  1. It is the real path: a patch is decoded from bytes exactly as the socket
+    //     delivers it, applied to a decoded surface, and the result published by
+    //     assignment, which is what `handleSurfacePatch` does. An earlier version
+    //     of this section hand-rolled `copy.cells[0] = ...; stored = copy` on a
+    //     bare array, which reproduced the symptom but not the code, so it could
+    //     not have shown the fix (issue #50).
+    //
+    //  2. It touches no API that issue #50 added: surfaces and patches come in
+    //     through the public decoders and go out through `apply`. That is what made
+    //     the before/after comparison possible — the same section, byte for byte,
+    //     compiled against a worktree at the parent commit and against this one.
+    //     (The render section above cannot do that: it asks the storage directly.)
+    //
+    // The view's copy is what makes this honest: with no second reference alive
+    // the optimiser can prove the published copy is unobservable and the loop
+    // measures nothing (docs/PERFORMANCE.md §2).
+    print("-- one patch, 1 cell, with a view holding a copy of the surface --")
     for (label, width, height) in sizes {
-        nonisolated(unsafe) var stored = decodedFrame(width, height)
+        var surface = decodedSurface(width, height)
+        var viewHolds = surface
+        var patch = decodedPatch(width, row: 1, cells: 1)
         let iterations = 3000
         for _ in 0 ..< 300 {
-            var copy = stored
-            copy.cells[0].foreground = 1
-            stored = copy
+            patch.baseSurfaceRevision = surface.surfaceRevision
+            patch.surfaceRevision = surface.surfaceRevision &+ 1
+            var current = surface
+            do { try current.apply(patch) } catch { fatalError("\(error)") }
+            surface = current
+            viewHolds = surface
         }
         let start = DispatchTime.now().uptimeNanoseconds
-        for _ in 0 ..< iterations {
-            var copy = stored
-            copy.cells[0].foreground = 1
-            stored = copy
-            sink &+= UInt64(copy.cells.count)
+        for iteration in 0 ..< iterations {
+            patch.baseSurfaceRevision = surface.surfaceRevision
+            patch.surfaceRevision = surface.surfaceRevision &+ 1
+            patch.rows[0].cells[0].foreground = UInt32(iteration % 8)
+            var current = surface
+            do { try current.apply(patch) } catch { fatalError("\(error)") }
+            surface = current
+            viewHolds = surface
+            sink &+= UInt64(viewHolds.frame.cell(column: Int(width) - 1, row: Int(height) - 1)?.foreground ?? 0)
         }
         let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
             / Double(iterations) / 1000.0
-        // 4 panes at 60 patches/s is the multi-pane case issues #50 measured.
+        // 4 panes at 60 patches/s is the multi-pane case issue #50 measured.
         let perFrame = micros * 60 * 4 / 1000.0
         let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
         print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
                      padded, micros, perFrame, perFrame / 16.7 * 100))
     }
-    print("-- frame.validate() runs on every patch --")
+    print("-- one patch carrying a whole row (a line echoed back) --")
+    for (label, width, height) in sizes {
+        var surface = decodedSurface(width, height)
+        var viewHolds = surface
+        var patch = decodedPatch(width, row: 1, cells: Int(width))
+        let iterations = 3000
+        let start = DispatchTime.now().uptimeNanoseconds
+        for iteration in 0 ..< iterations {
+            patch.baseSurfaceRevision = surface.surfaceRevision
+            patch.surfaceRevision = surface.surfaceRevision &+ 1
+            patch.rows[0].cells[0].foreground = UInt32(iteration % 8)
+            var current = surface
+            do { try current.apply(patch) } catch { fatalError("\(error)") }
+            surface = current
+            viewHolds = surface
+            sink &+= UInt64(viewHolds.frame.cell(column: Int(width) - 1, row: Int(height) - 1)?.foreground ?? 0)
+        }
+        let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
+            / Double(iterations) / 1000.0
+        let perFrame = micros * 60 * 4 / 1000.0
+        let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
+        print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
+                     padded, micros, perFrame, perFrame / 16.7 * 100))
+    }
+    print("-- frame.validate() (a full-surface arrival still runs the whole scan) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         measure("\(label) validate()", iterations: 3000) {

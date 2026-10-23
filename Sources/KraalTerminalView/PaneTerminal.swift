@@ -169,7 +169,7 @@ public final class PaneTerminalModel {
         if !projectionChanged, geometry.contentRevision == lastRevision,
            let previous = frameGrid,
            previous.width == frame.width, previous.height == frame.height,
-           previous.cells != frame.cells {
+           previous.buffer != frame.buffer {
             kraalLog("scroll repaint: pane=\(paneId) rev=\(geometry.contentRevision) "
                 + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
                 + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
@@ -418,15 +418,23 @@ public final class PaneTerminalModel {
         let area = geometry.innerRect
         let width = Int(area.width)
         let height = Int(area.height)
+        let frameWidth = Int(surface.frame.width)
         var cells: [CellData] = []
         cells.reserveCapacity(width * height)
 
+        // Row at a time: a row of the surface is one array, so this is one retain
+        // per row instead of one per cell. The bounds check is per cell because a
+        // malformed frame's last row can be shorter than the grid says; a cell the
+        // surface does not cover is filled blank, exactly as `surface.frame[c, r]`
+        // returning nil used to do.
         for row in 0 ..< height {
+            let sourceRow = Int(area.originY) + row
+            let rowCells = surface.frame.buffer.row(sourceRow)
+            let available = rowCells.count
             for column in 0 ..< width {
                 let sourceColumn = Int(area.originX) + column
-                let sourceRow = Int(area.originY) + row
-                if let cell = surface.frame[sourceColumn, sourceRow] {
-                    cells.append(cell)
+                if sourceColumn < frameWidth, sourceColumn < available {
+                    cells.append(rowCells[rowCells.startIndex + sourceColumn])
                 } else {
                     cells.append(.blank)
                 }

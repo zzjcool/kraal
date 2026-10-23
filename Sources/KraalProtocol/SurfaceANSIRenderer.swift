@@ -162,17 +162,16 @@ public struct SurfaceANSIRenderer {
     // MARK: - Row diffing
 
     private func changedRows(_ frame: FrameData) -> [Int] {
-        guard let previous, previous.cells.count == frame.cells.count else {
+        guard let previous, previous.buffer.count == frame.buffer.count else {
             return Array(0 ..< Int(frame.height))
         }
-        let width = Int(frame.width)
         var rows: [Int] = []
-        for row in 0 ..< Int(frame.height) {
-            let start = row * width
-            let end = start + width
-            if previous.cells[start ..< end] != frame.cells[start ..< end] {
-                rows.append(row)
-            }
+        for row in 0 ..< Int(frame.height) where previous.buffer.row(row) != frame.buffer.row(row) {
+            // Row-wise on purpose: rows that a patch did not touch are still the
+            // same buffer, and `Array`'s `==` short-circuits on identical storage,
+            // so an unchanged row costs a couple of instructions instead of a
+            // scan. Comparing flat cells cannot see that (issue #50).
+            rows.append(row)
         }
         return rows
     }
@@ -233,8 +232,12 @@ public struct SurfaceANSIRenderer {
         output: inout Data
     ) {
         let width = Int(frame.width)
-        let start = row * width
-        guard start + width <= frame.cells.count else { return }
+        // One row, fetched once: the row diff and the patch path both leave
+        // untouched rows sharing storage, so this is a retain, not a copy. Reading
+        // through the flat subscript instead would re-borrow a fresh array value
+        // per cell.
+        let cells = frame.buffer.row(row)
+        guard cells.count >= width else { return }
 
         // Every changed row is repainted in full, including ones that became
         // blank: skipping a blank row would leave whatever was drawn there before
@@ -243,7 +246,7 @@ public struct SurfaceANSIRenderer {
 
         var column = 0
         while column < width {
-            let cell = frame.cells[start + column]
+            let cell = cells[cells.startIndex + column]
             if cell.skip {
                 column += 1
                 continue

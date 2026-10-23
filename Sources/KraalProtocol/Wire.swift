@@ -267,7 +267,14 @@ public struct CursorState: Equatable, Sendable {
 }
 
 public struct FrameData: Equatable, Sendable {
-    public var cells: [CellData]
+    /// The cell grid, one copy-on-write array per row.
+    ///
+    /// Row-chunked rather than one flat array so a patch can rewrite a row or two
+    /// without copying the whole screen (issue #50; the reasoning is in
+    /// `CellBuffer`'s header). Writes go through this property on purpose —
+    /// `flatCells` deliberately has no setter, so no call site can reintroduce a
+    /// full-screen write by indexing into a temporary array.
+    public var buffer: CellBuffer
     public var width: UInt16
     public var height: UInt16
     public var cursor: CursorState?
@@ -282,7 +289,7 @@ public struct FrameData: Equatable, Sendable {
         hyperlinks: [String],
         graphics: Data
     ) {
-        self.cells = cells
+        buffer = CellBuffer(cells, width: Int(width))
         self.width = width
         self.height = height
         self.cursor = cursor
@@ -290,10 +297,18 @@ public struct FrameData: Equatable, Sendable {
         self.graphics = graphics
     }
 
+    /// The cells in frame order, as a plain array.
+    ///
+    /// **Not** for hot paths: it allocates one `CellData` per cell. It exists for
+    /// tests and for debug output. The renderer, the row diff and pane cropping
+    /// all go through ``buffer`` — by row, which is the shape both of them want.
+    public var flatCells: [CellData] { buffer.flattened }
+
     public func cell(column: Int, row: Int) -> CellData? {
-        let width = Int(width)
-        guard column >= 0, row >= 0, column < width, row < Int(height) else { return nil }
-        return cells[row * width + column]
+        // Delegated to the buffer, which indexes in its own chunking: `width` is a
+        // stored property a caller could reassign after the frame was built, and a
+        // read must not land in the neighbouring row because of that.
+        buffer.cell(column: column, row: row)
     }
 }
 
