@@ -738,7 +738,7 @@ pane_body_point() {
     local target="$1"
     local window_text layout_text container
     window_text=$(driver window 2>/dev/null) || return 1
-    layout_text=$(pane_layout 2>/dev/null) || return 1
+    layout_text=$(machine_layout "${2:-}" 2>/dev/null) || layout_text=$(pane_layout 2>/dev/null) || return 1
     # The most recent layout line: the container follows the window, and a resize
     # (which the vm's window does on launch) makes older lines wrong.
     container=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
@@ -794,6 +794,24 @@ collect_app_log_tail() {
     else
         tail -200 "$HOME/Library/Logs/Kraal-$SESSION.log" 2>/dev/null
     fi
+}
+
+# A screen point inside the window but outside the surface — the sidebar — for
+# dismissing a menu without acting on a pane.
+pane_dismiss_point() {
+    local window_text
+    window_text=$(driver window 2>/dev/null) || return 1
+    printf '%s' "$window_text" | python3 -c '
+import re, sys
+match = re.search(r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", sys.stdin.read())
+if not match:
+    sys.exit(1)
+win_x, win_y, win_w, win_h = (int(v) for v in match.groups())
+# The sidebar is a fixed 220pt on the leading edge (measured in the vm window:
+# `AXScrollArea` at x=0 w=220). A point 100pt in and 40pt down from the top is
+# inside it and inside the window.
+print(f"{win_x + 100},{win_y + 40}")
+'
 }
 
 pane_layout() {
@@ -2039,6 +2057,30 @@ machine_panes() {
     esac
 }
 
+# `herdr pane layout` against a named fixture machine's own daemon.
+#
+# `pane_layout` reads the *local* daemon, and on a case that switched to a remote
+# machine those are different servers with sometimes identical pane ids (`w1:p1` on
+# both). Reading the wrong one produced an "expected pane" that could never match,
+# which looked like a routing bug and was a harness bug.
+machine_layout() {
+    local label="$1" session real_home
+    session=$(roster_labels | awk -F'\t' -v want="$label" '$1 == want { print $2; exit }')
+    [ -n "$session" ] || return 1
+    real_home=$(machine_home) || return 1
+    case "$BACKEND" in
+    local)
+        env HERDR_SOCKET_PATH="$(machine_api_socket "$real_home" "$session")" \
+            herdr pane layout 2>/dev/null
+        ;;
+    vm)
+        tart exec "$VM" /bin/bash -lc \
+            "HERDR_SOCKET_PATH=$real_home/.config/herdr/sessions/$session/herdr.sock $VM_ROOT/bin/herdr pane layout" \
+            2>/dev/null
+        ;;
+    esac
+}
+
 # Loopback SSH for the guest's own sshd, plus the known_hosts entry the CLI's
 # strict host-key checking demands. Idempotent.
 machines_prereqs() {
@@ -2477,6 +2519,150 @@ for pane in json.load(sys.stdin)["result"]["panes"]:
         check "the click reported a row inside the target pane" \
             "$([ "${target_row:-0}" -ge 0 ] && [ "${target_row:-99}" -lt "${pane_rows:-1}" ] && echo 0 || echo 1)" \
             "row=$target_row of $pane_rows"
+    }
+}
+
+# Right-clicking a pane on an **SSH** machine must raise the pane menu (issue #89).
+#
+# The report: a local pane shows Kraal's pane menu, an SSH pane shows nothing. The
+# two candidate causes are indistinguishable from outside the app — `paneLocation`
+# picking the wrong pane (the bug behind #88) and the SSH pane's frame never
+# reaching `paneViewFrames` both end as "no menu, no log line". So the assertion
+# here is on what the *app* decided, which it now logs.
+case_context_menu_remote_app_setup() {
+    machines_teardown
+    machines_prereqs || { echo "loopback ssh unavailable"; return 1; }
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-menu --label menu-a \
+        >/dev/null 2>&1 || { echo "machine add menu-a failed for $target"; return 1; }
+    roster_cmd machine status 2>/dev/null | grep -q reachable || {
+        echo "menu-a never became reachable"
+        return 1
+    }
+    return 0
+}
+
+case_context_menu_remote() {
+    requires() { echo focus; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        [ "$(roster_labels | wc -l | tr -d ' ')" = "1" ] || {
+            echo "the app_setup hook did not leave the remote machine in the roster"
+            return 1
+        }
+        # Switch to the remote machine. Its pane is the one this case right-clicks.
+        local point
+        point=$(sidebar_row_point menu-a) || {
+            echo "no sidebar row with value menu-a"
+            return 1
+        }
+        driver click --at-screen "$point" >/dev/null 2>&1 || return 1
+        sleep 3
+        # The remote daemon's own pane count is the proof the switch happened; the
+        # case is vacuous otherwise.
+        local panes
+        panes=$(machine_panes menu-a)
+        [ -n "$panes" ] && [ "$panes" -ge 1 ] || {
+            echo "the remote machine has no panes to right-click (panes=$panes)"
+            return 1
+        }
+        # Two panes, because one cannot distinguish a correct hit test from a
+        # broken one: with a single pane every y resolves to it either way, so the
+        # case passed even with #88's double inversion reintroduced (verified — the
+        # A/B did not go red until this split was added).
+        driver press --title "Split Down" >/dev/null 2>&1 || true
+        sleep 3
+        panes=$(machine_panes menu-a)
+        [ "${panes:-0}" -ge 2 ] || {
+            echo "the remote machine still has one pane; the case cannot tell right from wrong (panes=$panes)"
+            return 1
+        }
+        return 0
+    }
+    action() {
+        driver window >"$host_dir/window.txt" 2>&1
+        # The *lower* pane. With a split, a double-inverted y maps this point onto
+        # the upper pane instead, which is exactly the #88 failure — so aiming at
+        # one specific pane is what makes the routing assertion mean something.
+        local lower
+        lower=$(machine_layout menu-a 2>/dev/null | python3 -c '
+import json, sys
+panes = json.load(sys.stdin)["result"]["layout"]["panes"]
+print(max(panes, key=lambda p: p["rect"]["y"])["pane_id"])
+')
+        printf '%s' "$lower" >"$host_dir/expected-pane.txt"
+        local point
+        point=$(pane_body_point "$lower" menu-a) || {
+            echo "cannot compute a point inside the lower remote pane"
+            return 1
+        }
+        printf '%s' "$point" >"$host_dir/right-click-point.txt"
+        driver click --at-screen "$point" --right >"$host_dir/right-click.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/right-click.txt"
+        sleep 2
+        # `NSMenu.popUpContextMenu` runs a modal menu-tracking loop, so the app is
+        # *inside* that call while the menu is open — the `contextmenu:` log line
+        # comes after it returns. Reading the menu therefore has to go through AX,
+        # which still answers during menu tracking.
+        driver ax --depth 30 >"$host_dir/ax-menu.txt" 2>&1
+        # Dismiss with a click elsewhere rather than a key: `driver key --char escape`
+        # sends the letter e, not ESC (issue #92), and a wrong key would leave the
+        # menu open and wedge the next case.
+        # Inside the window but away from the pane: (5,5) is outside it and the
+        # driver correctly refuses (issue #72), which left the menu open.
+        local dismiss_point
+        dismiss_point=$(pane_dismiss_point) || dismiss_point="118,360"
+        driver click --at-screen "$dismiss_point" >"$host_dir/dismiss.txt" 2>&1
+        # The dismiss click is processed by the menu's own tracking loop, so the
+        # `contextmenu:` line appears only after that loop returns. Poll the log
+        # rather than guessing a sleep length.
+        local tries=0
+        while [ "$tries" -lt 20 ]; do
+            collect_app_log "$host_dir"
+            if grep -aq 'contextmenu: pane=' "$host_dir/kraal.log" 2>/dev/null; then
+                return 0
+            fi
+            tries=$((tries + 1))
+            sleep 0.5
+        done
+        return 0
+    }
+    assert() {
+        local log="$host_dir/kraal.log"
+        local expected
+        expected=$(cat "$host_dir/expected-pane.txt" 2>/dev/null)
+
+        # Which pane the app acted on. `contextmenu: pane=<id>` is the product's own
+        # log line, written by `showPaneContextMenu` — not a probe — so the case
+        # asserts on the same evidence a user's log would show. Absent means the
+        # event never reached the forwarder, or it decided not to raise a menu
+        # (cause A in the issue: `paneLocation` picked a pane whose program
+        # reports the mouse, so the menu was correctly handed to the program).
+        local raised
+        raised=$(grep -ao 'contextmenu: pane=[^ ]*' "$log" 2>/dev/null | tail -1 \
+            | sed 's/contextmenu: pane=//')
+        check "the app raised the pane menu" \
+            "$([ -n "$raised" ] && echo 0 || echo 1)" "pane=${raised:-none (no menu raised)}"
+
+        # And for the pane that was actually under the pointer. A router that picked
+        # the neighbour still raises a menu — for the wrong pane — so this is the
+        # assertion that separates a working hit test from a broken one. It is also
+        # exactly what #88 broke.
+        check "the menu was raised for the lower pane it was aimed at" \
+            "$([ -n "$raised" ] && [ "$raised" = "$expected" ] && echo 0 || echo 1)" \
+            "raised=${raised:-none} expected=${expected:-none}"
+
+        # The menu actually being on screen, which is a different claim from the
+        # routing decision: the decision can be right and the menu still not appear.
+        # AX is the observer that can see it during menu tracking.
+        local menu_items
+        menu_items=$(grep -cE 'Split Right|Split Down|Close Pane|Toggle Pane Zoom' \
+            "$host_dir/ax-menu.txt" 2>/dev/null || echo 0)
+        check "the pane menu was on screen with its items" \
+            "$([ "${menu_items:-0}" -ge 3 ] && echo 0 || echo 1)" \
+            "menu item lines in AX: $menu_items"
+
     }
 }
 
@@ -3140,7 +3326,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote"; }
 
 # ---------------------------------------------------------------- entrypoint
 
