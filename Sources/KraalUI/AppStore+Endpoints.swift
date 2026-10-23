@@ -184,29 +184,51 @@ public extension AppStore {
         for entry in roster {
             guard let machine = entry.machine else { continue }
             let id = EndpointID.ssh(id: machine.id)
+            // A target Kraal cannot read still gets a row — the machine exists in
+            // herdr's roster, and hiding it would look like the dialog and the
+            // sidebar disagree. What it does not get is a dialable transport: the
+            // row is left disabled, so every automatic path (`connectMissingEndpoints`,
+            // `scheduleEndpointRetry`) skips it, and its status says what to fix.
+            // The raw target is kept as the host only so the row still has an
+            // identity to match on; see `ParsedSSHTarget.parse` for why a `nil` parse
+            // beats a best guess.
+            let parsed = ParsedSSHTarget.parse(machine.target)
             let settings = ConnectionSettings(
                 name: machine.displayLabel,
                 transport: .ssh,
                 session: machine.session ?? HerdrDiscovery.defaultSession,
-                sshHost: Self.hostPart(of: machine.target),
-                sshUser: Self.userPart(of: machine.target),
-                sshPort: Self.portPart(of: machine.target)
+                sshHost: parsed?.host ?? machine.target,
+                sshUser: parsed?.user,
+                sshPort: parsed?.port
             )
+            // A profile the user switched off stays off — that is their choice, and
+            // a target problem behind a disabled row is not news until they turn it
+            // back on.
+            let status: EndpointStatus = if !machine.enabled {
+                .disabled
+            } else if parsed == nil {
+                .attention(Self.invalidTargetBadge)
+            } else {
+                .connecting
+            }
             if let existing = endpoints.first(where: { $0.id == id }) {
                 existing.label = machine.displayLabel
-                existing.enabled = machine.enabled
+                existing.enabled = machine.enabled && parsed != nil
                 existing.profile = machine
                 existing.settings = settings
-                if !machine.enabled { existing.status = .disabled }
+                // A machine whose handshake failed keeps its own status: re-reading
+                // the roster is not a reconnect, and overwriting a live error with
+                // "connecting" would hide it until the next retry.
+                if !machine.enabled || parsed == nil { existing.status = status }
                 next.append(existing)
             } else {
                 next.append(EndpointState(
                     id: id,
                     label: machine.displayLabel,
-                    status: machine.enabled ? .connecting : .disabled,
+                    status: status,
                     settings: settings,
                     profile: machine,
-                    enabled: machine.enabled
+                    enabled: machine.enabled && parsed != nil
                 ))
             }
         }
@@ -249,6 +271,15 @@ public extension AppStore {
             active.snapshot = snapshot
         }
     }
+
+    /// What the sidebar writes next to a machine whose saved `target` could not be
+    /// read.
+    ///
+    /// Deliberately *not* the generic "! error": that badge is what a failed
+    /// handshake shows, and the fix for a failed handshake is not "edit the profile
+    /// in the machines dialog". A saved target is the one thing here the user can
+    /// correct by hand, so the row says where to look.
+    static let invalidTargetBadge = "! check target"
 
     /// The machine whose surface and input we are using.
     var activeEndpoint: EndpointState? {
@@ -621,27 +652,164 @@ public extension AppStore {
         // connected, which may not be the current one.
         pushSurfaceSize()
     }
+}
 
-    // MARK: - Profile target parsing
+// MARK: - Saved-profile targets
 
-    /// `ssh://user@host:port` -> host. The terminal client stores the whole URI;
-    /// Kraal needs the parts because `ConnectionSettings` is what actually opens
-    /// the transport.
-    static func hostPart(of target: String) -> String {
-        guard let url = URL(string: target), let host = url.host else { return target }
-        return host
+/// The three parts of one saved machine's `target`.
+///
+/// A saved profile holds an *ssh destination*, not a URI. `herdr machine add`
+/// stores back what it was given — `admin@127.0.0.1` for the default port — and a
+/// non-default port forces the `ssh://` form, because `machine add` has no
+/// `--port` (issue #68). A roster file can also be hand-edited, so all of these
+/// reach this parser:
+///
+///     user@host          user@host:port        host
+///     ssh://user@host    ssh://user@host:port  ssh://host:port
+///     [::1]              [::1]:2222            user@[::1]
+///
+/// The previous code ran `URL(string:)` on the target and fell back to "the whole
+/// string is the host". For the common shape that returns nothing at all,
+/// measured on this Mac:
+///
+///     URL(string: "admin@127.0.0.1")        host=nil       user=nil   port=nil
+///     URL(string: "ssh://admin@127.0.0.1")  host=127.0.0.1 user=admin port=nil
+///
+/// So two spellings of one machine produced two different `sshHost` values, and
+/// `EndpointID.matching` — which compares `sshHost` — put that machine in the
+/// sidebar twice, with its user shown as part of the host name.
+public struct ParsedSSHTarget: Equatable, Sendable {
+    public var host: String
+    public var user: String?
+    public var port: UInt16?
+
+    public init(host: String, user: String? = nil, port: UInt16? = nil) {
+        self.host = host
+        self.user = user
+        self.port = port
     }
 
-    static func userPart(of target: String) -> String? {
-        guard let url = URL(string: target), let user = url.user, !user.isEmpty else {
-            return nil
+    /// Reads one saved `target`, or `nil` when it is not a destination Kraal can
+    /// dial.
+    ///
+    /// **Unreadable is `nil`, never a best guess.** The old fallback — "no host?
+    /// then the whole string is the host" — turned a parse failure into a
+    /// *plausible-looking* row: `admin@127.0.0.1` became a machine whose host name
+    /// was the literal text `admin@127.0.0.1`. ssh happened to accept that
+    /// (`SSHTransport` rejoins `user@host`, and with no user it passes the string
+    /// through unchanged), so the mistake did not surface as an error — it
+    /// surfaced later, as a duplicate row and a wrong sidebar label. Returning
+    /// `nil` instead lets the catalog mark the profile as broken where the user
+    /// can see it (`EndpointStatus.attention`), which is what the issue asks for.
+    ///
+    /// Rules, and why each is decided the way it is:
+    ///
+    /// - A scheme is accepted only when it is `ssh`. A `git://host` left in a
+    ///   roster is a mistake; reading it as an ssh host would hide that.
+    /// - The userinfo splits at the **last** `@`, which is what ssh itself does
+    ///   (`ssh -G 'a@b@c'` reports user `a@b`, host `c`), and a host cannot
+    ///   contain `@`.
+    /// - An empty part is a typo, not an absence: `@host` and `user@` are
+    ///   rejected rather than folded into "no user" / "no host", so they cannot
+    ///   silently share a row with `host`.
+    /// - Brackets are punctuation around an IPv6 literal, not part of the
+    ///   address: `[::1]` -> host `::1`. ssh wants it unbracketed — `ssh
+    ///   'admin@[::1]'` fails with "Could not resolve hostname [::1]" (measured)
+    ///   — so keeping them would produce a destination that cannot connect.
+    /// - An unbracketed literal carries no port: two or more colons cannot be
+    ///   `host:port`, which has exactly one, so the text is read as an IPv6
+    ///   address. `admin@::1:2222` is host `::1:2222`, which is also how ssh reads
+    ///   it (measured: hostname `::0.1.34.34`); RFC 3986 requires the bracketed
+    ///   form for a literal carrying a port anyway.
+    /// - Port `0` and ports above 65535 are rejected: ssh refuses them on its own
+    ///   (`Bad port '0'`, `Bad port '70000'`, measured), so reading them as
+    ///   something else would only move the failure later.
+    public static func parse(_ raw: String) -> ParsedSSHTarget? {
+        // The roster is JSON, and a hand-edited file picks up stray whitespace far
+        // more easily than a typed command line does.
+        let target = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return nil }
+
+        var authority = target
+        if let separator = target.range(of: "://") {
+            guard target[target.startIndex..<separator.lowerBound].lowercased() == "ssh" else {
+                return nil
+            }
+            authority = String(target[separator.upperBound...])
+            // `ssh://user@host:2222/some/path`: a URI path is not part of the
+            // destination. Nothing herdr writes includes one, but cutting here is
+            // free and keeps the host free of `/`.
+            if let end = authority.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) {
+                authority = String(authority[authority.startIndex..<end])
+            }
         }
-        return user
+        guard !authority.isEmpty else { return nil }
+
+        var user: String?
+        var hostPort = authority
+        if let separator = authority.lastIndex(of: "@") {
+            let name = String(authority[authority.startIndex..<separator])
+            guard isValidUser(name) else { return nil }
+            user = name
+            hostPort = String(authority[authority.index(after: separator)...])
+        }
+        guard !hostPort.isEmpty, let split = splitHostPort(hostPort) else { return nil }
+        return ParsedSSHTarget(host: split.host, user: user, port: split.port)
     }
 
-    static func portPart(of target: String) -> UInt16? {
-        guard let url = URL(string: target), let port = url.port else { return nil }
-        return UInt16(exactly: port)
+    /// `host`, `host:port`, `[v6]` or `[v6]:port`.
+    private static func splitHostPort(_ hostPort: String) -> (host: String, port: UInt16?)? {
+        if hostPort.hasPrefix("[") {
+            guard let close = hostPort.firstIndex(of: "]") else { return nil }
+            let literal = String(hostPort[hostPort.index(after: hostPort.startIndex)..<close])
+            guard isIPv6Literal(literal) else { return nil }
+            let rest = String(hostPort[hostPort.index(after: close)...])
+            if rest.isEmpty { return (literal, nil) }
+            guard rest.hasPrefix(":"), let port = parsePort(String(rest.dropFirst())) else {
+                return nil
+            }
+            return (literal, port)
+        }
+        switch hostPort.count(where: { $0 == ":" }) {
+        case 0:
+            guard isValidHost(hostPort) else { return nil }
+            return (hostPort, nil)
+        case 1:
+            guard let colon = hostPort.firstIndex(of: ":") else { return nil }
+            let host = String(hostPort[hostPort.startIndex..<colon])
+            guard isValidHost(host), let port = parsePort(String(hostPort[hostPort.index(after: colon)...]))
+            else { return nil }
+            return (host, port)
+        default:
+            guard isIPv6Literal(hostPort) else { return nil }
+            return (hostPort, nil)
+        }
+    }
+
+    private static func parsePort(_ text: String) -> UInt16? {
+        guard let port = UInt16(text), port > 0 else { return nil }
+        return port
+    }
+
+    private static func isValidHost(_ host: String) -> Bool {
+        guard !host.isEmpty else { return false }
+        return !host.contains { character in
+            character.isWhitespace || character == "/" || character == "@" || character == "["
+        }
+    }
+
+    /// A user name becomes part of an ssh argument (`user@host`), so it cannot
+    /// contain whitespace or the characters that would re-split the destination.
+    private static func isValidUser(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        return !name.contains { character in
+            character.isWhitespace || character == "/" || character == "[" || character == "]"
+        }
+    }
+
+    private static func isIPv6Literal(_ host: String) -> Bool {
+        var address = in6_addr()
+        return host.withCString { inet_pton(AF_INET6, $0, &address) } == 1
     }
 }
 
