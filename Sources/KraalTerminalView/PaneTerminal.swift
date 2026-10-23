@@ -154,8 +154,26 @@ public final class PaneTerminalModel {
         guard projectionChanged || SurfaceGeometry.needsRepaint(
             contentRevisionChanged: geometry.contentRevision != lastRevision,
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
-            currentGrid: (width: Int(frame.width), height: Int(frame.height))
+            currentGrid: (width: Int(frame.width), height: Int(frame.height)),
+            // Scrolling rewrites the whole viewport without moving the revision and
+            // without changing the grid, so neither cheap reason above fires. The
+            // cells are the only thing that says the screen changed — see
+            // `needsRepaint`'s note on scrolling.
+            cellsDiffer: SurfaceGeometry.cellsChanged(previous: frameGrid, current: frame)
         ) else { return }
+        // Printed only when the cells alone decided a repaint — the revision and the
+        // grid both said "nothing changed" and the frame's contents said otherwise.
+        // That is exactly a scroll, and it is what the GUI case asserts on. Kept
+        // this narrow on purpose: logging every repaint would make "the scroll was
+        // painted" unfalsifiable.
+        if !projectionChanged, geometry.contentRevision == lastRevision,
+           let previous = frameGrid,
+           previous.width == frame.width, previous.height == frame.height,
+           previous.cells != frame.cells {
+            kraalLog("scroll repaint: pane=\(paneId) rev=\(geometry.contentRevision) "
+                + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
+                + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
+        }
         if projectionChanged || SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
                 previousRevision: lastRevision,
