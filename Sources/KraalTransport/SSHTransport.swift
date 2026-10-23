@@ -14,7 +14,13 @@ import KraalProtocol
 
 public enum SSHTransportError: Error, CustomStringConvertible {
     case sshNotFound
-    case handshakeTimeout
+    /// The bridge accepted the connection but produced no ready banner in time.
+    ///
+    /// Distinct from `readyBannerMissing` (the remote *spoke*, just not with a
+    /// banner) and from `unexpectedStreamEnd` at the client layer: a peer that is
+    /// silent and a peer that closed must not look the same, which is what made
+    /// issue #66 take so long to find.
+    case handshakeTimedOut(seconds: TimeInterval, detail: String)
     case readyBannerMissing(String)
     case noRemoteHerdr(String)
     case processFailed(status: Int32, stderr: String)
@@ -23,8 +29,9 @@ public enum SSHTransportError: Error, CustomStringConvertible {
         switch self {
         case .sshNotFound:
             "The `ssh` command was not found on this machine."
-        case .handshakeTimeout:
-            "The remote host did not finish the Herdr bridge handshake in time."
+        case let .handshakeTimedOut(seconds, detail):
+            "The remote host did not finish the Herdr bridge handshake within "
+                + "\(Self.secondsText(seconds)). \(detail)"
         case let .readyBannerMissing(output):
             "The remote host answered, but not with a Herdr bridge banner: \(output)"
         case let .noRemoteHerdr(detail):
@@ -32,6 +39,15 @@ public enum SSHTransportError: Error, CustomStringConvertible {
         case let .processFailed(status, stderr):
             "ssh exited with status \(status). \(stderr)"
         }
+    }
+
+    /// Whole numbers read as "30s", fractions keep one decimal ("0.5s") so a
+    /// test budget of half a second is not reported as "0s".
+    static func secondsText(_ seconds: TimeInterval) -> String {
+        let rounded = (seconds * 10).rounded() / 10
+        return rounded == rounded.rounded()
+            ? "\(Int(rounded))s"
+            : "\(rounded)s"
     }
 }
 
@@ -92,15 +108,20 @@ public final class SSHProcessTransport: @unchecked Sendable {
     }
 
     /// Launches ssh, performs the ready handshake, and leaves the stream open.
+    ///
+    /// `executable` exists for tests: a stub that ignores its arguments and says
+    /// nothing is the only way to prove the handshake deadline fires without a
+    /// real remote host.
     public static func connect(
         user: String?,
         host: String,
         port: UInt16?,
         session: String,
-        timeout: TimeInterval = 30
+        timeout: TimeInterval = 30,
+        executable: String = "/usr/bin/ssh"
     ) throws -> SSHProcessTransport {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.executableURL = URL(fileURLWithPath: executable)
 
         var arguments = [
             "-T",
@@ -148,41 +169,33 @@ public final class SSHProcessTransport: @unchecked Sendable {
     /// Reads the status JSON and the ready banner line by line, then answers
     /// `accept`. Anything the remote prints beforehand (motd, warnings) is
     /// ignored until the banner appears, exactly like the reference client.
+    ///
+    /// Every wait here is bounded. The previous version checked the deadline in a
+    /// `while` loop and then blocked in `handle.availableData`, so a remote that
+    /// accepted the connection and said nothing never reached the check: issue
+    /// #66 measured a 30 s bridge deadline that had not fired after 50 s. The
+    /// read now waits on `poll(2)` for no longer than what is left of the budget.
     private func performReadyHandshake(timeout: TimeInterval) throws {
         let deadline = Date().addingTimeInterval(timeout)
-        let handle = stdoutPipe.fileHandleForReading
         var pending = Data()
         var statusLines: [String] = []
 
-        while Date() < deadline {
-            if process.isRunning == false, handle.availableData.isEmpty {
-                break
-            }
+        while true {
             let remaining = deadline.timeIntervalSinceNow
-            if remaining <= 0 { break }
-
-            var chunk = Data()
-            // `availableData` blocks until something arrives or EOF.
-            let data = handle.availableData
-            if data.isEmpty { break }
-            chunk.append(data)
-            pending.append(chunk)
-
-            while let newlineIndex = pending.firstIndex(of: 0x0A) {
-                let lineData = pending[pending.startIndex ..< newlineIndex]
-                pending.removeSubrange(pending.startIndex ... newlineIndex)
-                let line = String(bytes: lineData, encoding: .utf8) ?? ""
-                if line == "herdr-remote-output-ready:1" {
-                    remoteVersionLine = statusLines.last ?? ""
-                    try answerReady()
-                    return
-                }
-                if !line.isEmpty {
-                    statusLines.append(line)
-                }
+            guard remaining > 0 else {
+                throw timeoutError(seconds: timeout, statusLines: statusLines)
+            }
+            do {
+                guard let data = try read(timeout: max(remaining, 0.01)) else { break }
+                pending.append(data)
+                if try consumeLines(&pending, statusLines: &statusLines) { return }
+            } catch is SocketTimeout {
+                throw timeoutError(seconds: timeout, statusLines: statusLines)
             }
         }
 
+        // The bridge closed without a banner: that is a reportable failure of the
+        // remote side, not a timeout.
         let stderr = drainStderr()
         if process.isRunning {
             process.terminate()
@@ -193,6 +206,39 @@ public final class SSHProcessTransport: @unchecked Sendable {
             )
         }
         throw SSHTransportError.noRemoteHerdr(stderr)
+    }
+
+    /// Splits complete lines out of `pending`; `true` once the ready banner
+    /// arrived (having answered `accept`).
+    private func consumeLines(_ pending: inout Data, statusLines: inout [String]) throws -> Bool {
+        while let newlineIndex = pending.firstIndex(of: 0x0A) {
+            let lineData = pending[pending.startIndex ..< newlineIndex]
+            pending.removeSubrange(pending.startIndex ... newlineIndex)
+            let line = String(bytes: lineData, encoding: .utf8) ?? ""
+            if line == "herdr-remote-output-ready:1" {
+                remoteVersionLine = statusLines.last ?? ""
+                try answerReady()
+                return true
+            }
+            if !line.isEmpty {
+                statusLines.append(line)
+            }
+        }
+        return false
+    }
+
+    /// Terminates the bridge and names the deadline that expired.
+    private func timeoutError(
+        seconds: TimeInterval,
+        statusLines: [String]
+    ) -> SSHTransportError {
+        let stderr = drainStderr()
+        if process.isRunning {
+            process.terminate()
+        }
+        let said = statusLines.suffix(3).joined(separator: " | ")
+        let detail = [said, stderr].filter { !$0.isEmpty }.joined(separator: " — ")
+        return .handshakeTimedOut(seconds: seconds, detail: detail)
     }
 
     private func answerReady() throws {
@@ -207,9 +253,36 @@ public final class SSHProcessTransport: @unchecked Sendable {
     }
 
     /// Blocks until bytes arrive. Returns `nil` at end of stream.
-    public func read(maxLength: Int = 64 * 1024) -> Data? {
+    ///
+    /// `timeout` bounds the wait: zero blocks until the bridge speaks or exits,
+    /// a positive value throws `SocketTimeout` when nothing arrives in time. The
+    /// wait is a `poll(2)` on the pipe, not `availableData`, because the latter
+    /// has no upper bound at all.
+    public func read(maxLength: Int = 64 * 1024, timeout: TimeInterval = 0) throws -> Data? {
+        let descriptor = stdoutPipe.fileHandleForReading.fileDescriptor
+        if timeout > 0, !Self.waitForReadable(descriptor, seconds: timeout) {
+            throw SocketTimeout()
+        }
         let data = stdoutPipe.fileHandleForReading.availableData
         return data.isEmpty ? nil : data
+    }
+
+    /// Waits until `descriptor` has bytes (or hung up). `false` means the wait
+    /// expired with nothing to read.
+    static func waitForReadable(_ descriptor: Int32, seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { return false }
+            var entry = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let milliseconds = Int32(max(1, (remaining * 1000).rounded(.up)))
+            let result = poll(&entry, 1, milliseconds)
+            if result > 0 { return true }
+            if result == 0 { return false }
+            // EINTR is a signal, not an answer: recompute what is left and wait
+            // again rather than reporting a spurious timeout.
+            if errno != EINTR { return false }
+        }
     }
 
     public func close() {
@@ -221,11 +294,24 @@ public final class SSHProcessTransport: @unchecked Sendable {
         stderrPipe.fileHandleForReading.closeFile()
     }
 
+    /// Whatever stderr already has, without waiting for more.
+    ///
+    /// Must never block: it runs on the failure path, and a bridge that is silent
+    /// on both streams is exactly the case being handled. `availableData` here
+    /// used to wait forever, so the "timed out" error could not even be built.
     private func drainStderr() -> String {
+        let descriptor = stderrPipe.fileHandleForReading.fileDescriptor
+        guard Self.waitForReadable(descriptor, seconds: 0.05) else {
+            return tailString()
+        }
         let data = stderrPipe.fileHandleForReading.availableData
         guard !data.isEmpty else { return "" }
         stderrTail.append(data)
-        return (String(bytes: stderrTail.suffix(800), encoding: .utf8) ?? "")
+        return tailString()
+    }
+
+    private func tailString() -> String {
+        (String(bytes: stderrTail.suffix(800), encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

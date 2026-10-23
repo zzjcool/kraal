@@ -60,11 +60,18 @@ public final class UnixSocket: @unchecked Sendable {
 
     /// Connects to a filesystem socket path.
     ///
-    /// A read timeout of zero means "block forever", which is what the frame
-    /// loop wants: it owns its thread and waits for the daemon.
+    /// A positive `timeoutSeconds` arms `SO_RCVTIMEO`, so any later read that
+    /// finds no data throws `SocketTimeout` instead of parking forever. Zero (or
+    /// negative) means "block forever".
+    ///
+    /// Which one a caller wants depends on the phase, not the socket: a handshake
+    /// needs the bound (otherwise a peer that accepts and says nothing blocks
+    /// `read(2)` forever and the caller's own deadline never gets checked), while
+    /// the frame loop wants to wait indefinitely and be woken by `close()`.
+    /// `setReadTimeout` switches between them.
     public static func connect(
         path: String,
-        timeoutSeconds: Int = 10
+        timeoutSeconds: TimeInterval = 10
     ) throws -> UnixSocket {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -112,17 +119,56 @@ public final class UnixSocket: @unchecked Sendable {
         }
 
         if timeoutSeconds > 0 {
-            var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
-            setsockopt(
-                descriptor,
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                &timeout,
-                socklen_t(MemoryLayout<timeval>.size)
-            )
+            applyReadTimeout(descriptor, timeoutSeconds)
         }
 
         return UnixSocket(handle: descriptor)
+    }
+
+    /// Changes how long one `read` may block. Zero restores "wait forever".
+    ///
+    /// Used to hand the socket from the handshake (bounded) to the frame loop
+    /// (unbounded) without reopening it: the reader thread that takes over is
+    /// built around a read that parks until the daemon speaks or the socket is
+    /// closed by `close()`.
+    public func setReadTimeout(_ seconds: TimeInterval) {
+        readLock.lock()
+        defer { readLock.unlock() }
+        guard !isClosed else { return }
+        if seconds > 0 {
+            Self.applyReadTimeout(handle, seconds)
+        } else {
+            // POSIX reads a zero `timeval` as "no timeout", which is exactly the
+            // original, never-armed state.
+            var none = timeval(tv_sec: 0, tv_usec: 0)
+            setsockopt(
+                handle,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &none,
+                socklen_t(MemoryLayout<timeval>.size)
+            )
+        }
+    }
+
+    /// Arms `SO_RCVTIMEO` with sub-second precision.
+    ///
+    /// Whole seconds only would make any deadline overshoot by up to a second;
+    /// `timeval` carries microseconds, and a test that pins a one-second budget
+    /// cannot afford that slack.
+    private static func applyReadTimeout(_ descriptor: Int32, _ seconds: TimeInterval) {
+        let whole = Int(seconds)
+        var timeout = timeval(
+            tv_sec: whole,
+            tv_usec: Int32(((seconds - Double(whole)) * 1_000_000).rounded())
+        )
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
     }
 
     /// Blocks until at least one byte arrives. Returns `nil` at end of stream.
@@ -191,4 +237,6 @@ public final class UnixSocket: @unchecked Sendable {
 
 /// Thrown by `UnixSocket.read` when `SO_RCVTIMEO` expires with no data. Not an
 /// error condition for the caller, which may simply retry.
-public struct SocketTimeout: Error {}
+public struct SocketTimeout: Error {
+    public init() {}
+}

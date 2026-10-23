@@ -59,6 +59,11 @@ public actor EndpointConnection {
     public private(set) var surfaceSize: ClientSurfaceSize
     private let cellSize: (width: UInt32, height: UInt32)
     private let surfaceActive: Bool
+    /// How long the handshake may take, including any single blocked read.
+    ///
+    /// Injectable so a test can prove the deadline fires without waiting the
+    /// production ten seconds; the shipped value stays `ConnectionLimits`.
+    private let handshakeTimeout: TimeInterval
 
     private var readThread: Thread?
     private var isRunning = false
@@ -93,12 +98,14 @@ public actor EndpointConnection {
         surfaceSize: ClientSurfaceSize,
         cellSize: (width: UInt32, height: UInt32) = (10, 20),
         surfaceActive: Bool = true,
+        handshakeTimeout: TimeInterval = ConnectionLimits.handshakeTimeout,
         eventHandler: @escaping @Sendable (ConnectionEvent) -> Void
     ) {
         self.target = target
         self.surfaceSize = surfaceSize
         self.cellSize = cellSize
         self.surfaceActive = surfaceActive
+        self.handshakeTimeout = handshakeTimeout
         self.eventHandler = eventHandler
     }
 
@@ -108,10 +115,21 @@ public actor EndpointConnection {
     // MARK: - Lifecycle
 
     /// Connects, sends the hello, and waits for `endpoint.welcome.v1`.
+    ///
+    /// The wait is bounded twice over, on purpose (issue #66):
+    ///
+    ///  1. the stream is opened with its read timeout armed for
+    ///    `handshakeTimeout`, so one `read(2)` cannot park past the deadline; and
+    ///  2. the loop still compares against its own deadline, because a read that
+    ///    returns early must not extend the budget.
+    ///
+    /// Before this, only (2) existed: a peer that accepted the connection and
+    /// stayed silent blocked the read forever, the deadline was never reached,
+    /// and `start()` never returned — locally and over SSH alike.
     public func start() throws {
         guard !isRunning else { return }
 
-        let stream = try StreamFactory.open(target)
+        let stream = try StreamFactory.open(target, handshakeTimeout: handshakeTimeout)
         framesLock.lock()
         self.stream = stream
         framesLock.unlock()
@@ -127,9 +145,20 @@ public actor EndpointConnection {
         let helloJSON = String(bytes: try JSONEncoder().encode(hello), encoding: .utf8) ?? ""
         try send(.endpointControl(kind: EndpointProtocol.helloKind, data: helloJSON))
 
-        let deadline = Date().addingTimeInterval(ConnectionLimits.handshakeTimeout)
-        while Date() < deadline {
-            guard let payload = try handshakeReadPayload() else {
+        let deadline = Date().addingTimeInterval(handshakeTimeout)
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                throw BridgeError.handshakeTimedOut(seconds: handshakeTimeout)
+            }
+            let payload: Data?
+            do {
+                payload = try handshakeReadPayload(deadline: deadline)
+            } catch is SocketTimeout {
+                // Nothing arrived yet. Not a failure: the deadline decides.
+                continue
+            }
+            guard let payload else {
                 throw BridgeError.unexpectedStreamEnd
             }
             guard case let .endpointControl(kind, data) = try ServerMessageDecoder.decode(payload)
@@ -151,12 +180,15 @@ public actor EndpointConnection {
             }
             self.welcome = welcome
             lastReceivedAt = Date()
+            // The handshake is over: hand the socket to the frame loop, which
+            // wants to wait indefinitely for the daemon (and is woken by
+            // `close()`), not to poll on a ten-second cycle.
+            stream.setReadTimeout(0)
             eventHandler(.connected(welcome))
             startReadThread()
             startHealthMonitor()
             return
         }
-        throw BridgeError.unexpectedStreamEnd
     }
 
     public func stop() {
@@ -318,13 +350,22 @@ public actor EndpointConnection {
     /// Reads one framed payload during the handshake, before the reader thread
     /// exists. Blocking on the caller's task is fine there: nothing else is
     /// using the connection yet.
-    private func handshakeReadPayload() throws -> Data? {
+    ///
+    /// **Every** read is armed with what is left of `deadline`, including the
+    /// ones that only collect the rest of a frame. Arming once per outer loop
+    /// would let a peer that sends one byte per timeout window keep the
+    /// handshake alive indefinitely — the same class of bug (a deadline that is
+    /// only checked between reads) at a finer grain.
+    private func handshakeReadPayload(deadline: Date) throws -> Data? {
         framesLock.lock()
         let activeStream = stream
         framesLock.unlock()
         guard let activeStream else { return nil }
 
         while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { throw SocketTimeout() }
+            activeStream.setReadTimeout(remaining)
             guard let chunk = try activeStream.read(maxLength: 64 * 1024) else {
                 return nil
             }
@@ -350,6 +391,10 @@ public actor EndpointConnection {
     /// executor: a single parked `read(2)` would occupy a cooperative thread and
     /// make every `send`/`stop` wait behind it. A dedicated `Thread` owns the
     /// socket, decodes frames, and hands each payload back to the actor.
+    ///
+    /// `start()` has already restored the socket's read timeout to "wait until
+    /// the daemon speaks": `stop()` closes the socket, which turns that wait into
+    /// EOF, so no timeout is needed here to notice a teardown.
     private func startReadThread() {
         let thread = Thread { [weak self] in
             guard let self else { return }
