@@ -33,6 +33,14 @@ public final class MachinesStore {
     /// from "cannot ask", which would otherwise both render as an empty list.
     public private(set) var available: Bool
 
+    /// Live reachability for the saved machines (issue #73).
+    ///
+    /// A *second* signal beside each row, from a different source than Kraal's own
+    /// connection state: this one asks the CLI to open SSH and see whether the
+    /// remote Herdr server answers. Its own type because it runs on its own clock —
+    /// see `MachineReachability` for why a plain `reload()` must not probe.
+    public let reachability: MachineReachability
+
     private let client: HerdrMachineClient?
     /// How this Mac is labelled and reached. Held here so the roster always has
     /// a local row even when the CLI is missing or the remote list fails.
@@ -49,6 +57,7 @@ public final class MachinesStore {
         self.client = client
         self.local = local
         self.available = client != nil
+        self.reachability = MachineReachability(client: client)
         // Seed the roster with this Mac immediately. `herdr machine list` only
         // returns SSH profiles — the local daemon is implicit and never appears
         // in it — so without this seed the panel's first frame, and every frame
@@ -58,6 +67,18 @@ public final class MachinesStore {
     }
 
     public func reload() {
+        load(probeAfter: false)
+    }
+
+    /// One read of the roster, and optionally a probe once it has landed.
+    ///
+    /// The probe is sequenced *after* the list on purpose. `machine status` probes
+    /// every saved profile regardless of what the UI knows, so launching it before
+    /// the list returns would be a probe whose results cannot be matched to rows —
+    /// and, on the first appearance, a probe of a roster the panel had not yet
+    /// seen. Deciding after the read also gives the obvious answer to "is there
+    /// anything to probe": no saved machines, no SSH.
+    private func load(probeAfter: Bool) {
         guard let client else {
             available = false
             // Keep this Mac visible: it is reachable without the CLI, and it is
@@ -87,6 +108,9 @@ public final class MachinesStore {
                 kraalLog("machines: loaded \(loaded.count) remote + 1 local -> "
                     + self.machines.map { "\($0.displayLabel)[\($0.id.prefix(8))]" }
                         .joined(separator: ", "))
+                // Nothing saved means nothing to probe: this Mac is not a profile,
+                // so `machine status` would answer `[]` after no SSH at all.
+                if probeAfter, !sorted.isEmpty { self.reachability.probe() }
             } catch {
                 self.error = String(describing: error)
                 // The local row survives a failed read, so the panel never
@@ -96,6 +120,36 @@ public final class MachinesStore {
                 kraalLog("machines: list failed \(error)")
             }
         }
+    }
+
+    /// Reloads the roster, and optionally re-probes reachability.
+    ///
+    /// Both halves go through here so a caller states its intent once; see
+    /// `MachineReachability` for when a probe is affordable and why it is not part
+    /// of a plain reload.
+    public func refresh(probe: Bool) {
+        load(probeAfter: probe)
+    }
+
+    /// What the panel does each time it appears.
+    ///
+    /// The roster is re-read every time (cheap: `machine list` reads a JSON file),
+    /// but reachability only the first time — `onAppear` also fires when the user
+    /// switches back from another settings tab, and probing there would spend one
+    /// SSH round trip per machine on a tab change.
+    ///
+    /// "The first time" means the first read that actually had something to probe.
+    /// `hasProbed` is set by the probe itself, so a first appearance against an
+    /// empty or unreadable roster leaves it alone and the next appearance tries
+    /// again — the alternative is a panel that gave up on reachability because
+    /// herdr happened to be slow once.
+    public func appear() {
+        load(probeAfter: !reachability.hasProbed)
+    }
+
+    /// Reachability for one row, or nil when that row has not been probed.
+    public func status(for entry: MachineEntry) -> MachineStatus? {
+        reachability.status(for: entry)
     }
 
     /// Footer text: how many entries the roster has, and where they come from.
@@ -165,6 +219,8 @@ public final class MachinesStore {
     /// fields the UI does not set (the default-selected machine, the session
     /// name) are only visible by asking again. Reporting what we hoped happened
     /// would drift from what is on disk.
+    ///
+    /// No reachability probe here, on purpose — see `refresh(probe:)`.
     private func perform(done: ((Bool) -> Void)?, _ work: @escaping @Sendable () throws -> Void) {
         guard let client else { return }
         kraalLog("machines: mutation via \(client.executable.path)")
@@ -272,7 +328,7 @@ public struct MachinesPanel: View {
         // still demanded 640x460 would fight whatever the settings window picks.
         .modifier(PanelChrome(embedded: embedded))
         .onAppear {
-            store.reload()
+            store.appear()
         }
         .sheet(isPresented: $showingAdd) {
             AddMachineSheet(store: store) { showingAdd = false }
@@ -335,13 +391,15 @@ public struct MachinesPanel: View {
             }
             Spacer()
             Button {
-                store.reload()
+                // Probe as well: a refresh is the user asking "what is true
+                // now", and the roster half of that is the cheap part.
+                store.refresh(probe: true)
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .help("Reload from herdr")
-            .disabled(store.isLoading || !store.available)
+            .help("Reload machines and check reachability")
+            .disabled(store.isLoading || store.reachability.isProbing || !store.available)
 
             Button {
                 showingAdd = true
@@ -387,6 +445,7 @@ public struct MachinesPanel: View {
                     MachineRow(
                         entry: entry,
                         busy: store.isBusy,
+                        status: store.status(for: entry),
                         onRename: { if let machine = entry.machine { renaming = machine } },
                         onToggleEnabled: {
                             guard let machine = entry.machine else { return }
@@ -399,6 +458,35 @@ public struct MachinesPanel: View {
                         onRemove: { if let machine = entry.machine { confirmingRemove = machine } }
                     )
                     Divider().opacity(0.3)
+                }
+                // A broken *probe* says nothing about the machines, so it is a
+                // footing line rather than a row state. Rows keep their last
+                // snapshot: dropping them all because one check failed would be
+                // the "panel goes blank" failure this issue is about.
+                if let probeError = store.reachability.probeError {
+                    HStack(spacing: 6) {
+                        if store.reachability.isProbing { ProgressView().controlSize(.small) }
+                        Text("Reachability check failed: \(probeError)")
+                            .font(KraalTheme.Font.caption)
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("Retry") { store.reachability.probe() }
+                            .buttonStyle(.borderless)
+                            .font(KraalTheme.Font.caption)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                } else if store.reachability.isProbing {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking reachability…")
+                            .font(KraalTheme.Font.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
                 }
                 if let error = store.error, !store.machines.isEmpty {
                     Text(error)
@@ -454,13 +542,13 @@ public struct MachinesPanel: View {
             // reachable; they just no longer cost a whole strip at the top.
             if embedded {
                 Button {
-                    store.reload()
+                    store.refresh(probe: true)
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
-                .help("Reload from herdr")
-                .disabled(store.isLoading || !store.available)
+                .help("Reload machines and check reachability")
+                .disabled(store.isLoading || store.reachability.isProbing || !store.available)
 
                 Button {
                     showingAdd = true
@@ -487,6 +575,11 @@ public struct MachinesPanel: View {
 private struct MachineRow: View {
     let entry: MachineEntry
     let busy: Bool
+    /// What this row is about. Carries the reachability word, not a dot: the
+    /// sidebar already draws `●` for Kraal's own connection to a machine, and two
+    /// green dots for two different facts is exactly how a reader concludes "it
+    /// says green, so the machine is fine" (issue #73).
+    let status: MachineStatus?
     let onRename: () -> Void
     let onToggleEnabled: () -> Void
     let onRemove: () -> Void
@@ -528,6 +621,9 @@ private struct MachineRow: View {
                             .font(KraalTheme.Font.micro)
                             .foregroundStyle(.orange)
                     }
+                    if let status {
+                        ReachabilityBadge(status: status)
+                    }
                 }
                 Text(entry.targetDescription)
                     .font(.system(.caption, design: .monospaced))
@@ -537,6 +633,18 @@ private struct MachineRow: View {
                     Text("session \(session)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                }
+                // The CLI's own explanation when the machine is not reachable. It
+                // is the actionable half — normally a command to run to bring the
+                // server back — and it existed all along; the client used to throw
+                // it away with the non-zero exit code.
+                if let reason = status?.error, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption2)
+                        .foregroundStyle(status?.reachability == .authRequired ? Color.orange : Color.red)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
 

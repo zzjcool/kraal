@@ -68,6 +68,130 @@ public struct HerdrMachine: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+// MARK: - Status
+
+/// One row of `herdr machine status --json`: is this saved machine reachable
+/// *now*, and if not, what did the CLI say.
+///
+/// This is a different fact from `EndpointStatus` in the UI, which describes
+/// Kraal's own connection to a machine. A machine can be gone while our
+/// connection object still exists, and vice versa.
+///
+/// `status` is a `String`, **not** an enum, on purpose. Upstream builds it as a
+/// plain `&'static str` (`src/cli/machine.rs:136-150`) with four values today —
+/// `reachable`, `error`, `disabled`, `auth required` — and no declared Rust enum,
+/// so a new state can appear in any herdr release without a protocol change. An
+/// `enum` without a fallback would make one unrecognised row fail the *array*
+/// decode (`JSONDecoder` fails the whole array, not just the element), blanking
+/// the reachability column at exactly the moment it becomes interesting. Hence:
+/// keep the wire value verbatim, and let `Reachability` interpret it with an
+/// `.other` arm that still renders.
+public struct MachineStatus: Codable, Identifiable, Hashable, Sendable {
+    public var id: String
+    public var label: String
+    /// The CLI's own word: `reachable` / `error` / `disabled` / `auth required`.
+    public var status: String
+    /// The CLI's explanation when the machine is not reachable, e.g. the command
+    /// to run to bring it back. `null` (or absent) when there is nothing wrong.
+    public var error: String?
+
+    /// What the raw status string means, with a fallback that does not lose it.
+    public enum Reachability: Hashable, Sendable {
+        case reachable
+        /// Upstream's `error`: SSH worked or did not, but the remote Herdr server
+        /// is not there in a usable state.
+        case unreachable
+        /// Upstream's `auth required`: a distinct state from `error`, because the
+        /// fix is `herdr machine reconnect`, not "start the server".
+        case authRequired
+        case disabled
+        /// A status this build does not know. Kept verbatim so a newer herdr
+        /// shows its own word instead of an empty cell.
+        case other(String)
+
+        public init(rawStatus: String) {
+            switch rawStatus {
+            case "reachable": self = .reachable
+            case "error": self = .unreachable
+            case "auth required": self = .authRequired
+            case "disabled": self = .disabled
+            default: self = .other(rawStatus)
+            }
+        }
+
+        /// Whether this state is something the user could act on. `disabled` and
+        /// `reachable` are not; a dead server and a rejected key are, and they need
+        /// different actions — which is why `authRequired` is not folded into
+        /// `unreachable`.
+        public var needsAttention: Bool {
+            switch self {
+            case .unreachable, .authRequired: true
+            case .reachable, .disabled, .other: false
+            }
+        }
+    }
+
+    public init(id: String, label: String, status: String, error: String? = nil) {
+        self.id = id
+        self.label = label
+        self.status = status
+        self.error = error
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case status
+        case error
+    }
+
+    /// Lenient on everything except `id`, which is the only field with no
+    /// substitute: it is the join key against `herdr machine list`. A row that
+    /// cannot be joined is not worth failing the whole probe over.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        // `null` and "no such key" both mean "nothing to report"; measured shape
+        // is `"error": null` for a healthy machine and a string otherwise.
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+    }
+
+    public var reachability: Reachability { Reachability(rawStatus: status) }
+}
+
+/// Probe results keyed by profile id, so a roster row can find its own answer.
+///
+/// The two CLI commands answer different questions and can disagree by design:
+/// `machine list` is the roster on disk, `machine status` is a live probe. A
+/// machine that was just added has no status row yet; a status can name a profile
+/// that `list` no longer has (removed between the two calls). Both are handled by
+/// merging on `id` and treating a missing entry as "not probed", never as
+/// "broken".
+public struct MachineStatusIndex: Equatable, Sendable {
+    private var byID: [String: MachineStatus]
+
+    public init(_ rows: [MachineStatus] = []) {
+        byID = [:]
+        for row in rows {
+            byID[row.id] = row
+        }
+    }
+
+    public var isEmpty: Bool { byID.isEmpty }
+
+    public var count: Int { byID.count }
+
+    public func status(for id: String) -> MachineStatus? { byID[id] }
+
+    /// `nil` for a row nobody has probed — including this Mac, which is never in
+    /// the CLI's status output because it is not a saved profile.
+    public func reachability(for id: String) -> MachineStatus.Reachability? {
+        byID[id]?.reachability
+    }
+}
+
 // MARK: - Errors
 
 public enum HerdrMachineError: Error, CustomStringConvertible, Sendable {
@@ -232,16 +356,38 @@ public struct HerdrMachineClient: Sendable {
         }
     }
 
-    /// Connectivity of one machine (or all, when `labelOrId` is nil).
+    /// Connectivity of every saved machine (or one, when `labelOrId` is given).
     ///
     /// Runs without prompting for authentication — this is the non-blocking
     /// check, unlike `reconnect`.
-    public func status(_ labelOrId: String? = nil) throws -> String {
+    ///
+    /// This is the **only** method that tolerates a non-zero exit, and only
+    /// because the output is complete and valid in that case. The exit code is a
+    /// summary — `machine.rs:184` returns
+    /// `i32::from(rows.iter().any(|row| row.error.is_some()))` — while the rows
+    /// carry the answer. Treating exit 1 as a failure would discard the `error`
+    /// field, which is the only place that says what to run to fix the machine.
+    ///
+    /// The tolerance is not a blanket "ignore the status": if the stdout does
+    /// not decode, a non-zero run is reported as a failure with the CLI's stderr,
+    /// which is where a usage error (`unknown machine 'x'`, exit 2, empty stdout)
+    /// explains itself.
+    public func status(_ labelOrId: String? = nil) throws -> [MachineStatus] {
         var arguments = ["machine", "status", "--json"]
         if let labelOrId, !labelOrId.isEmpty {
             arguments.append(labelOrId)
         }
-        return Self.text(try run(arguments))
+        let result = try invoke(arguments)
+        do {
+            return try JSONDecoder().decode([MachineStatus].self, from: result.stdout)
+        } catch {
+            // No usable answer. `undecodable` would hide "unknown machine", so a
+            // non-zero exit keeps its own message.
+            guard result.status == 0 else {
+                throw HerdrMachineError.failed(status: result.status, message: result.failureMessage)
+            }
+            throw HerdrMachineError.undecodable(Self.text(result.stdout, limit: 200))
+        }
     }
 
     // MARK: Writes
@@ -293,12 +439,41 @@ public struct HerdrMachineClient: Sendable {
         return String(bytes: slice, encoding: .utf8) ?? ""
     }
 
+    /// One invocation: what came back, before anyone has judged the exit status.
+    private struct Invocation {
+        var status: Int32
+        var stdout: Data
+        var stderr: String
+
+        /// What to report when a caller decides this run failed.
+        var failureMessage: String {
+            stderr.isEmpty ? "herdr exited with status \(status)" : stderr
+        }
+    }
+
     /// Runs the CLI and returns stdout, throwing on a non-zero exit.
     ///
     /// stderr is folded into the thrown message because that is where `herdr`
     /// reports every user-facing failure ("no such profile", ssh errors), and a
     /// bare exit code would leave the UI with nothing to show.
+    ///
+    /// Writes (`add` / `rename` / `remove` / `enable` / `disable`) keep this
+    /// strict path: their non-zero exits are real failures with nothing useful on
+    /// stdout. `status` is the one reader that goes through `invoke` directly.
     private func run(_ arguments: [String]) throws -> Data {
+        let result = try invoke(arguments)
+        guard result.status == 0 else {
+            throw HerdrMachineError.failed(status: result.status, message: result.failureMessage)
+        }
+        return result.stdout
+    }
+
+    /// Runs the CLI and hands back both streams plus the exit status, without
+    /// judging it.
+    ///
+    /// Both pipes are read to EOF before waiting, because a child that fills a
+    /// pipe buffer while the parent sits in `waitUntilExit` deadlocks.
+    private func invoke(_ arguments: [String]) throws -> Invocation {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -330,14 +505,10 @@ public struct HerdrMachineClient: Sendable {
         let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
-        guard process.terminationStatus == 0 else {
-            let message = Self.text(stderrData)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw HerdrMachineError.failed(
-                status: process.terminationStatus,
-                message: message.isEmpty ? "herdr exited with status \(process.terminationStatus)" : message
-            )
-        }
-        return stdoutData
+        return Invocation(
+            status: process.terminationStatus,
+            stdout: stdoutData,
+            stderr: Self.text(stderrData).trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 }

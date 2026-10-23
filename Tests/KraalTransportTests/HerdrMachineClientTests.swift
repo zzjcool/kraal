@@ -283,6 +283,222 @@ final class HerdrMachineClientTests: XCTestCase {
         }
     }
 
+    // MARK: - status
+
+    /// The shape `herdr machine status --json` prints, measured on herdr 0.9.5.
+    private static let reachableJSON = """
+    [
+      {
+        "id": "bbbb2222cccc3333dddd4444eeee5555",
+        "label": "live-one",
+        "status": "reachable",
+        "error": null
+      }
+    ]
+    """
+
+    // Wrapped the way the real CLI wraps it: `println!` of a pretty-printed
+    // document, so the long reason sits on one line inside the JSON. The Swift
+    // literal is split only to stay inside the line-length lint.
+    private static let errorReason =
+        "remote Herdr server is stopped or incompatible; "
+        + "run `herdr --remote zheng@127.0.0.1 --session no-such-73`"
+
+    private static var errorJSON: String {
+        """
+        [
+          {
+            "id": "aaaa1111bbbb2222cccc3333dddd4444",
+            "label": "dead-one",
+            "status": "error",
+            "error": "\(errorReason)"
+          }
+        ]
+        """
+    }
+
+    /// **The bug in issue #73.** Measured on herdr 0.9.5: when any machine is
+    /// down, `machine status --json` exits **1** while still printing the complete,
+    /// valid JSON — the exit code is only a summary
+    /// (`src/cli/machine.rs:184`: `i32::from(rows.iter().any(|row| row.error.is_some()))`).
+    ///
+    /// A client that treats a non-zero exit as failure throws away the `error`
+    /// field, which is the only place that says what to run to fix the machine.
+    /// Measured three times in a row on the real binary: exit 1, 451 bytes, same
+    /// md5 every time — so the output is not truncated or partial under a non-zero
+    /// exit, it is the whole document.
+    func testStatusUsesStdoutWhenExitIsNonZero() throws {
+        let (client, argumentsFile) = try stub(stdout: Self.errorJSON, status: 1)
+
+        let rows = try client.status()
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].id, "aaaa1111bbbb2222cccc3333dddd4444")
+        XCTAssertEqual(rows[0].label, "dead-one")
+        XCTAssertEqual(rows[0].status, "error")
+        XCTAssertEqual(rows[0].reachability, .unreachable)
+        // The actionable half — the command in the message — must survive.
+        XCTAssertEqual(
+            rows[0].error,
+            "remote Herdr server is stopped or incompatible; "
+                + "run `herdr --remote zheng@127.0.0.1 --session no-such-73`"
+        )
+        XCTAssertEqual(try recordedArguments(argumentsFile), ["machine", "status", "--json"])
+    }
+
+    func testStatusDecodesReachableWithNullError() throws {
+        let (client, _) = try stub(stdout: Self.reachableJSON)
+        let rows = try client.status()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].reachability, .reachable)
+        XCTAssertNil(rows[0].error)
+    }
+
+    /// A missing `error` key and an explicit `null` mean the same thing. The
+    /// measured shape uses `null`, but `decodeIfPresent` is what makes an absent
+    /// key harmless too.
+    func testStatusToleratesAbsentErrorKey() throws {
+        let (client, _) = try stub(stdout: #"[{"id":"a","label":"one","status":"reachable"}]"#)
+        XCTAssertNil(try client.status()[0].error)
+    }
+
+    /// Upstream's `status` is a plain `&'static str` with no declared enum, so a
+    /// future herdr can add a state. That must render as itself, not fail: a
+    /// `JSONDecoder` failure on one element fails the **whole array**, which would
+    /// blank the reachability column at the exact moment it becomes interesting.
+    func testStatusKeepsUnknownStatusValues() throws {
+        let json = #"[{"id":"a","label":"one","status":"quarantined","error":null}]"#
+        let (client, _) = try stub(stdout: json)
+        let rows = try client.status()
+        XCTAssertEqual(rows.count, 1, "an unknown status must not drop the row")
+        XCTAssertEqual(rows[0].status, "quarantined")
+        XCTAssertEqual(rows[0].reachability, .other("quarantined"))
+    }
+
+    /// The other two statuses upstream can emit (`machine.rs:136-150`), which the
+    /// issue's report did not happen to produce. Both are pinned so a later change
+    /// cannot quietly fold them into `error`.
+    func testStatusKnowsDisabledAndAuthRequired() throws {
+        let json = """
+        [{"id":"a","label":"off","status":"disabled","error":null},
+         {"id":"b","label":"locked","status":"auth required","error":"Permission denied (publickey)"}]
+        """
+        let (client, _) = try stub(stdout: json)
+        let rows = try client.status()
+        XCTAssertEqual(rows[0].reachability, .disabled)
+        XCTAssertEqual(rows[1].reachability, .authRequired)
+        // A disabled profile is not an error: upstream sets `error` to None.
+        XCTAssertNil(rows[0].error)
+    }
+
+    func testStatusDecodesEmptyArray() throws {
+        let (client, _) = try stub(stdout: "[]")
+        XCTAssertTrue(try client.status().isEmpty)
+    }
+
+    /// Extra fields must be ignored, not fatal. `machine list` gaining a field is
+    /// the normal case for a CLI that ships independently of this app.
+    func testStatusIgnoresUnknownFields() throws {
+        let json = #"[{"id":"a","label":"one","status":"reachable","error":null,"latencyMs":12}]"#
+        let (client, _) = try stub(stdout: json)
+        XCTAssertEqual(try client.status().count, 1)
+    }
+
+    /// The tolerance is for "non-zero exit **and** parseable output" only. A usage
+    /// error (exit 2, empty stdout) still has to surface the CLI's own message:
+    /// measured, `herdr machine status --json nope` prints
+    /// `unknown machine 'nope'; use `herdr machine list`` on stderr and exits 2.
+    func testStatusStillFailsOnNonZeroExitWithoutJSON() throws {
+        let (client, _) = try stub(stdout: "", stderr: "unknown machine nope", status: 2)
+        XCTAssertThrowsError(try client.status("nope")) { error in
+            guard case HerdrMachineError.failed(let status, let message) = error else {
+                return XCTFail("expected failed, got \(error)")
+            }
+            XCTAssertEqual(status, 2)
+            XCTAssertTrue(message.contains("unknown machine"), message)
+        }
+    }
+
+    /// Exit 0 with garbage stays "undecodable": the CLI claims success, so the
+    /// problem is the output, and saying "exited with status 0" would be useless.
+    func testStatusReportsUndecodableOutputOnSuccess() throws {
+        let (client, _) = try stub(stdout: "not json at all")
+        XCTAssertThrowsError(try client.status()) { error in
+            guard case HerdrMachineError.undecodable = error else {
+                return XCTFail("expected undecodable, got \(error)")
+            }
+        }
+    }
+
+    /// A single-machine probe passes the selector, and still gets the non-zero
+    /// tolerance: measured, `machine status --json <id>` on a dead machine exits 1
+    /// with the same complete one-element JSON.
+    func testStatusSingleSelectorKeepsNonZeroTolerance() throws {
+        let (client, argumentsFile) = try stub(stdout: Self.errorJSON, status: 1)
+        let rows = try client.status("dead-one")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(try recordedArguments(argumentsFile), ["machine", "status", "--json", "dead-one"])
+    }
+
+    /// The write commands must NOT get the tolerance: their non-zero exit is a real
+    /// failure and their stdout is human text, not JSON. This is why the change went
+    /// into a private `invoke` + one relaxed caller instead of into `run`.
+    func testWritesStillThrowOnNonZeroExitWithStdout() throws {
+        let (client, _) = try stub(stdout: "looks successful", stderr: "error: ssh failed", status: 1)
+        XCTAssertThrowsError(try client.add(target: "h", label: nil, remoteSession: nil)) { error in
+            guard case HerdrMachineError.failed(let status, let message) = error else {
+                return XCTFail("expected failed, got \(error)")
+            }
+            XCTAssertEqual(status, 1)
+            XCTAssertEqual(message, "error: ssh failed")
+        }
+    }
+
+    // MARK: - Status index
+
+    /// Merging is by `id`, because the two commands answer different questions:
+    /// `list` is the roster on disk, `status` is a live probe.
+    func testStatusIndexJoinsOnID() {
+        let index = MachineStatusIndex([
+            MachineStatus(id: "a", label: "one", status: "reachable"),
+            MachineStatus(id: "b", label: "two", status: "error", error: "boom"),
+        ])
+        XCTAssertEqual(index.reachability(for: "a"), .reachable)
+        XCTAssertEqual(index.reachability(for: "b"), .unreachable)
+        XCTAssertEqual(index.status(for: "b")?.error, "boom")
+    }
+
+    /// A machine in the roster with no probe result is *unknown*, never broken.
+    /// Both directions happen in practice: a profile added since the last probe has
+    /// no row yet, and a status row can outlive its profile when one is removed
+    /// between the two commands.
+    func testStatusIndexTreatsMissingEntriesAsUnknown() {
+        let index = MachineStatusIndex(
+            [MachineStatus(id: "gone", label: "removed", status: "reachable")]
+        )
+        XCTAssertNil(index.reachability(for: "just-added"))
+        XCTAssertNil(index.status(for: "just-added"))
+        // The status row for a profile `list` no longer has is kept, not invented
+        // into a roster entry — `list` decides which rows exist.
+        XCTAssertNotNil(index.status(for: "gone"))
+    }
+
+    func testStatusIndexIsEmptyByDefault() {
+        XCTAssertTrue(MachineStatusIndex().isEmpty)
+        XCTAssertNil(MachineStatusIndex().reachability(for: "a"))
+    }
+
+    /// A later row for the same id wins, so a probe that reports a machine twice
+    /// (it does not today) cannot make the panel show a stale answer.
+    func testStatusIndexLastRowWins() {
+        let index = MachineStatusIndex([
+            MachineStatus(id: "a", label: "one", status: "error", error: "x"),
+            MachineStatus(id: "a", label: "one", status: "reachable"),
+        ])
+        XCTAssertEqual(index.count, 1)
+        XCTAssertEqual(index.reachability(for: "a"), .reachable)
+    }
+
     // MARK: - roster path
 
     /// The path the app watches has to be the file `herdr machine list` reads,

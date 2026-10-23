@@ -2341,6 +2341,205 @@ print(len(plain), len(named))
 
 # ---------------------------------------------------------------- runner# ---------------------------------------------------------------- runner
 
+# Appends one roster row pointing at a port nothing listens on, so the CLI reports
+# `error` for it. Used by `machines-reachability`: `machine add` verifies a host
+# before saving and would refuse to create an entry that is known to be dead, so
+# the dead half of the fixture has to be written by hand.
+#
+# **Why a dead port and not a nonexistent session.** The first version of this
+# fixture used a session name nothing had created, and it went green for the wrong
+# reason: the app's sidebar dials every roster entry, and that dial is the same
+# bridge `herdr machine add` uses — it *starts* the remote server. By the time the
+# panel probed, the session existed and the row read `reachable`. Measured in the
+# failing run: `machines: status 2 row(s) -> reach-a[8f6ca3cc]=reachable,
+# reach-b[deadbeef]=reachable`, while the same command had reported `error` for
+# `reach-b` seconds earlier. A refused TCP port cannot be revived, so the row stays
+# dead no matter what the app does.
+#
+# The file shape is herdr's own (`src/client/endpoint/catalog.rs:71-77`):
+# `{"version":1,"ssh":[…]}` with `deny_unknown_fields`, so no extra key may be
+# invented — measured: adding `"selected"` to a row makes the whole catalog
+# unreadable ("unknown field `selected`").
+roster_add_dead_row() {
+    # `$1` is read into a local immediately. Bash scopes dynamically, so a bare
+    # `$target` here would silently resolve to the *caller's* `local target` — the
+    # caller's live loopback machine — and the "dead" row would point at a host the
+    # app can revive. Measured: that is exactly what the first two runs did.
+    local target="$1"
+    local roster="$ROSTER_HOME/.local/state/herdr/client/endpoints.json"
+    # No single quotes inside: this string is handed to the guest's shell wrapped
+    # in them.
+    local script='import json, os
+path = os.environ["ROSTER"]
+catalog = json.load(open(path))
+catalog["ssh"].append({
+    "id": "deadbeefdeadbeefdeadbeefdeadbeef",
+    "label": "reach-b",
+    "target": os.environ["TARGET"],
+    "session": "kraal-73-dead",
+    "enabled": True,
+})
+json.dump(catalog, open(path, "w"))'
+    case "$BACKEND" in
+    local) ROSTER="$roster" TARGET="$target" python3 -c "$script" ;;
+    vm) tart exec "$VM" /bin/bash -lc "ROSTER=$roster TARGET=$target python3 -c '$script'" ;;
+    esac
+}
+
+# Whether the machines panel shows each machine's reachability (issue #73).
+#
+# `HerdrMachineClient.status()` was never called, so the panel drew a dead
+# machine exactly like a live one — and `machine status --json` exits **1** when
+# any machine is down, so even a caller would have thrown the answer away as an
+# error. The panel now probes on first appearance and on Refresh, and renders the
+# CLI's own word beside each row.
+#
+# This case asserts **both halves of the axis**, which is why the fixture is one
+# live machine and one deliberately dead one:
+#
+#   * `reach-a` is a real session daemon started by `machine add`, so the CLI
+#     reports `reachable`;
+#   * `reach-b` is a hand-written row with a session name nothing ever created, so
+#     the CLI reports `error` and names the command that would bring it back. That
+#     `error` string is what the row shows as the reason, and it is the field the
+#     client used to discard along with the non-zero exit code.
+#
+# Asserting only "reachable appears" would pass against a panel that drew one word
+# for everything; only "unreachable appears" would pass against one that drew
+# nothing for the healthy case. Both, plus the reason text, is what makes this a
+# gate rather than a screenshot.
+#
+# Cost: the probe is one SSH round trip per machine, and the dead one has to time
+# out — a few seconds, once per case. That is exactly what the feature costs in
+# production, so the case measures what it claims to.
+case_machines_reachability_app_setup() {
+    machines_teardown
+    machines_prereqs || return 1
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label reach-a \
+        >/dev/null 2>&1 || return 1
+    # Port 1 on loopback: nothing listens, and nothing the app does can change
+    # that. `ssh://` is the spelling `machine add` itself stores.
+    roster_add_dead_row "ssh://kraal-73-dead@127.0.0.1:1" || return 1
+    # The fixture is only meaningful if the CLI really reports one of each — and
+    # exits 1 while doing it. Checked before the app launches, so a broken fixture
+    # cannot be misread as a broken product.
+    local statuses exit_code
+    statuses=$(roster_cmd machine status --json 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" = "1" ] || {
+        echo "expected machine status to exit 1 with a dead machine, got $exit_code"
+        return 1
+    }
+    printf '%s' "$statuses" | python3 -c '
+import json, sys
+rows = {row["label"]: row for row in json.load(sys.stdin)}
+assert rows["reach-a"]["status"] == "reachable", rows.get("reach-a")
+assert rows["reach-b"]["status"] == "error", rows.get("reach-b")
+assert rows["reach-b"]["error"], "the dead row must carry an explanation"
+' || { echo "fixture statuses wrong: $(printf '%s' "$statuses" | head -c 300)"; return 1; }
+    return 0
+}
+
+case_machines_reachability() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        return 0
+    }
+    action() {
+        # Settings via the menu: AXPress needs no focus, so this stays an `ax`
+        # case. The probe runs on the panel's first appearance, so opening the
+        # window is the only trigger needed.
+        driver menu --menu Kraal --item "Settings…" >/dev/null 2>&1 || true
+        # Long enough for the appearance probe: one SSH round trip for the live
+        # machine, one that has to conclude the dead session is gone.
+        sleep 12
+        driver ax --json --depth 26 >"$host_dir/ax-reachability.json" 2>/dev/null
+        return 0
+    }
+    assert() {
+        # The pills are SwiftUI `Text`, so they live in `AXValue` and nowhere else
+        # (issue #71 measured that this repo writes no accessibility identifiers).
+        local counts
+        counts=$(AXJSON="$host_dir/ax-reachability.json" python3 -c '
+import json, os
+with open(os.environ["AXJSON"]) as handle:
+    tree = json.load(handle)
+values = {}
+for node in tree["nodes"]:
+    if node.get("role") == "AXStaticText":
+        value = node.get("value") or ""
+        values[value] = values.get(value, 0) + 1
+print(values.get("reachable", 0), values.get("unreachable", 0))
+') || counts="0 0"
+        local reachable unreachable
+        read -r reachable unreachable <<<"$counts"
+
+        # At least one, not exactly one: the panel is not the only place the word
+        # can appear (a tooltip or a footer would add one), and the claim being
+        # gated is that the live row is drawn as reachable at all.
+        check "the live machine is drawn as reachable" \
+            "$([ "${reachable:-0}" -ge "1" ] && echo 0 || echo 1)" \
+            "\"reachable\" appears ${reachable:-0} time(s) in the panel's AX tree"
+        check "the dead machine is drawn as unreachable" \
+            "$([ "${unreachable:-0}" = "1" ] && echo 0 || echo 1)" \
+            "\"unreachable\" appears ${unreachable:-0} time(s) in the panel's AX tree"
+
+        # The reason came from the CLI `error` field — the actionable half, and
+        # the part a client judging the exit code first never saw.
+        #
+        # The expected text is taken from the CLI **in this same assert**, not
+        # hard-coded: an earlier version pinned "remote Herdr server is stopped",
+        # which is what a *missing session* produces, while a refused port says
+        # "remote platform detection failed: … Connection refused". The panel was
+        # rendering the right string both times; the assertion was checking the
+        # wrong one. Asking the CLI what it says and looking for that is immune to
+        # which failure mode the fixture happens to hit.
+        local expected_reason shown_reason
+        expected_reason=$(roster_cmd machine status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    rows = {row["label"]: row for row in json.load(sys.stdin)}
+except Exception:
+    raise SystemExit
+print((rows.get("reach-b", {}).get("error") or "")[:60])
+')
+        shown_reason=$(AXJSON="$host_dir/ax-reachability.json" EXPECTED="$expected_reason" python3 -c '
+import json, os
+expected = os.environ["EXPECTED"]
+with open(os.environ["AXJSON"]) as handle:
+    tree = json.load(handle)
+if not expected:
+    raise SystemExit
+for node in tree["nodes"]:
+    value = node.get("value") or ""
+    if expected in value:
+        print(value[:160])
+        break
+')
+        check "the dead machine's reason is shown, not just its state" \
+            "$([ -n "$shown_reason" ] && echo 0 || echo 1)" \
+            "CLI said [${expected_reason:-<nothing>}], panel showed [${shown_reason:-<nothing matching>}]"
+
+        # The app's own account of the probe. Matched on the count and on the two
+        # labels, not on the profile ids: the ids are the fixture's, and pinning
+        # them here as well would duplicate what the AX assertions already prove.
+        local log="$host_dir/kraal.log"
+        check "the app logged one probe covering both machines" \
+            "$(grep -aq 'machines: status 2 row(s)' "$log" 2>/dev/null && echo 0 || echo 1)" \
+            "$(grep -ao 'machines: status .*' "$log" 2>/dev/null | tail -1)"
+        check "the logged probe records one reachable row and one error row" \
+            "$(grep -ao 'machines: status .*' "$log" 2>/dev/null | tail -1 \
+                | grep -q 'reach-a\[[0-9a-f]*\]=reachable' \
+                && grep -ao 'machines: status .*' "$log" 2>/dev/null | tail -1 \
+                | grep -q 'reach-b\[deadbeef\]=error' \
+                && echo 0 || echo 1)" \
+            "log line: $(grep -ao 'machines: status .*' "$log" 2>/dev/null | tail -1)"
+    }
+}
+
 # Reads a case's declared requirement without executing the case.
 #
 # The first version ran the case function and then called `requires`, which
@@ -2607,7 +2806,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch machines-controls"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch machines-controls machines-reachability"; }
 
 # ---------------------------------------------------------------- entrypoint
 
