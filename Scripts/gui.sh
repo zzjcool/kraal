@@ -2033,6 +2033,159 @@ case_machines_roster() {
     }
 }
 
+# The machines panel's controls must be addressable **by name**, not by
+# position (issue #71).
+#
+# The reported symptom: every Row-level control answered `AXDescription=\"Rename\"`
+# with `AXTitle=''`, so `press --title Rename` found nothing and the driver had to
+# fall back to `press --desc Rename --index N`. With one Rename per row plus the
+# rename sheet's own submit button, `--index` meant guessing which control got
+# pressed.
+#
+# Measured while fixing it (macOS 27.0.1 / build 26A434, in this VM): **no**
+# SwiftUI `Button` reports `AXTitle`. Twenty spellings were tried — plain
+# `Button(\"X\"){}`, `label:` closure, `.borderless`, `.help`, `Label`, `.bordered`,
+# `.borderedProminent`, `.link`, `.keyboardShortcut`, `.accessibilityLabel`,
+# `.accessibilityElement(children:)`, `.accessibilityRepresentation`, `.accessibilityValue`
+# — and every one produced `title=''` with the text in `AXDescription`. A bare
+# `NSButton` in the same window reported the title it was given, so `AXTitle` is
+# reachable in this app; SwiftUI simply does not write it. The issue's diagnosis
+# (`.buttonStyle(.borderless)` + `.help()`) is therefore wrong, and
+# `.accessibilityLabel` does **not** write `AXTitle` either — it rewrites `desc`.
+#
+# So the fix makes the *description* unambiguous instead: the row buttons carry
+# the machine label (`Rename ctrl-a`), which also separates them from the
+# sheet's plain `Rename`. This case is the gate for exactly that.
+#
+# `--title` is deliberately not asserted on anywhere here: it cannot pass, and a
+# gate that asserts something unreachable is worse than no gate. The measurable
+# claim is "each control has a unique, stable name a driver can pass to
+# `press --desc`", and that is what the checks below mean.
+case_machines_controls_app_setup() {
+    machines_teardown
+    machines_prereqs || return 1
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label ctrl-a \
+        >/dev/null 2>&1 || return 1
+    roster_cmd machine add "$target" --remote-session fx-beta --label ctrl-b \
+        >/dev/null 2>&1 || return 1
+    return 0
+}
+
+case_machines_controls() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        return 0
+    }
+    action() {
+        # Settings via the menu: AXPress needs no focus, so this case stays an
+        # `ax` case and can run while the machine is in use.
+        driver menu --menu Kraal --item "Settings…" >/dev/null 2>&1 || true
+        sleep 3
+        driver ax --json --depth 26 >"$host_dir/ax-settings.json" 2>/dev/null
+        # Open the rename sheet by pressing the row's own button, by name. `|| true`
+        # on purpose: a missing element is an assertion failure below, not a
+        # harness failure, so the dumps still land as artefacts to look at.
+        driver press --desc "Rename ctrl-a" >"$host_dir/press-row-rename.log" 2>&1 || true
+        sleep 2
+        # With the sheet open, both the rows and the sheet are in one tree. That is
+        # the moment the old build had three answers to `desc=Rename` (two rows plus
+        # the sheet) and a caller had to pass `--index`.
+        driver ax --json --depth 26 >"$host_dir/ax-rename-sheet.json" 2>/dev/null
+        driver press --desc "Cancel" >/dev/null 2>&1 || true
+        sleep 2
+        driver press --desc "Remove ctrl-a" >"$host_dir/press-row-remove.log" 2>&1 || true
+        sleep 2
+        driver ax --depth 26 >"$host_dir/ax-remove-alert.txt" 2>&1
+        driver press --desc "Cancel" >/dev/null 2>&1 || true
+        sleep 2
+        driver press --desc "Add Machine" >"$host_dir/press-add.log" 2>&1 || true
+        sleep 2
+        driver ax --depth 26 >"$host_dir/ax-add-sheet.txt" 2>&1
+        driver press --desc "Cancel" >/dev/null 2>&1 || true
+        sleep 1
+        return 0
+    }
+    assert() {
+        # One tree, several questions asked of it. The JSON carries `desc`, `role`
+        # and `pressable` per node — the same view an agent driving this app has.
+        local counts
+        counts=$(AXJSON="$host_dir/ax-settings.json" python3 -c '
+import json, sys, os
+path = os.environ["AXJSON"]
+with open(path) as handle:
+    tree = json.load(handle)
+desc = {}
+for node in tree["nodes"]:
+    if node.get("role") != "AXButton":
+        continue
+    key = node.get("desc") or ""
+    desc[key] = desc.get(key, 0) + 1
+named_rename = sum(n for d, n in desc.items() if d.startswith("Rename "))
+named_remove = sum(n for d, n in desc.items() if d.startswith("Remove "))
+print(named_rename, named_remove, desc.get("Add Machine", 0), desc.get("Rename", 0))
+') || counts="0 0 0 0"
+        local row_rename row_remove add_machine
+        read -r row_rename row_remove add_machine _ <<<"$counts"
+
+        # Each row gets its own two descriptions, so a row is addressable without
+        # an index. Two rows => two distinct `Rename <label>` strings.
+        check "each row's Rename is named after its machine" \
+            "$([ "${row_rename:-0}" = "2" ] && echo 0 || echo 1)" \
+            "$row_rename button(s) with a distinct \"Rename <label>\" description"
+        check "each row's Remove is named after its machine" \
+            "$([ "${row_remove:-0}" = "2" ] && echo 0 || echo 1)" \
+            "$row_remove button(s) with a distinct \"Remove <label>\" description"
+
+        # `Add Machine` — the `Label(...)` button the issue also named. It was
+        # already unique before the fix; it is here so a future edit that renames
+        # it fails loudly instead of silently making the panel unaddressable again.
+        check "Add Machine is addressable by name" \
+            "$([ "${add_machine:-0}" = "1" ] && echo 0 || echo 1)" \
+            "desc=Add Machine matches ${add_machine:-0} element(s)"
+
+        # The sheet-open tree is the one that used to be ambiguous.
+        local sheet_open
+        sheet_open=$(AXJSON="$host_dir/ax-rename-sheet.json" python3 -c '
+import json, os
+with open(os.environ["AXJSON"]) as handle:
+    tree = json.load(handle)
+plain = [n for n in tree["nodes"]
+         if n.get("role") == "AXButton" and (n.get("desc") or "") == "Rename"]
+named = [n for n in tree["nodes"]
+         if n.get("role") == "AXButton" and (n.get("desc") or "").startswith("Rename ")]
+print(len(plain), len(named))
+') || sheet_open="9 9"
+        local plain_open named_open
+        read -r plain_open named_open <<<"$sheet_open"
+
+        # The A/B in one assertion. Measured on the pre-fix build with this same
+        # sheet open: three buttons answered `desc=Rename` (two rows plus the
+        # sheet), which is what forced `--index` on the caller. Now the only plain
+        # `Rename` is the sheet's own submit button.
+        check "with the rename sheet open, only the sheet answers plain Rename" \
+            "$([ "${plain_open:-9}" = "1" ] && echo 0 || echo 1)" \
+            "plain desc=Rename matches ${plain_open:-?} element(s) with the sheet open"
+        check "the rows stay named while the sheet is open" \
+            "$([ "${named_open:-9}" = "2" ] && echo 0 || echo 1)" \
+            "${named_open:-?} \"Rename <label>\" button(s) visible behind the sheet"
+
+        # The press logs are the other half: the driver has to have *found* each
+        # control by the name this case claims. An assertion on the tree alone
+        # would pass even if `press` could not resolve the same string.
+        local pressed
+        pressed=$(cat "$host_dir"/press-*.log 2>/dev/null)
+        check "the driver pressed every Row control by name" \
+            "$([ "$(printf '%s' "$pressed" | grep -c '^pressed ')" = "3" ] && echo 0 || echo 1)" \
+            "$(printf '%s' "$pressed" | grep '^pressed ' | tr '\n' ' ')"
+        check "no press was ambiguous or unmatched" \
+            "$(printf '%s' "$pressed" | grep -qvE '^pressed |^$' && echo 1 || echo 0)" \
+            "$(printf '%s' "$pressed" | grep -vE '^pressed |^$' | head -2 | tr '\n' ' ')"
+    }
+}
+
 # ---------------------------------------------------------------- runner# ---------------------------------------------------------------- runner
 
 # Reads a case's declared requirement without executing the case.
@@ -2301,7 +2454,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch"; }
+all_cases() { echo "split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch machines-controls"; }
 
 # ---------------------------------------------------------------- entrypoint
 
