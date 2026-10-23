@@ -222,6 +222,13 @@ vm_deploy() {
         | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf -" \
         || die "failed to push herdr-api.py into the guest"
 
+    # The mouse probe. A TUI that reports what it receives is the only way to tell
+    # "the app never sent the event" from "the app sent it and the program ignored
+    # it" — both look like a dead click from the outside (issue #95).
+    tar -czf - -C "$ROOT/Scripts" tui-mouse-probe.py \
+        | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf -" \
+        || die "failed to push tui-mouse-probe.py into the guest"
+
     # The `kraal` CLI. The machines fixture reads a daemon's `boot` id with it: pane
     # ids repeat across daemons (both machines have a `w1:p1`), so the boot id is the
     # only cheap proof that two roster entries are two servers. It is a debug binary
@@ -673,6 +680,120 @@ first_pane_id() {
 import json, sys
 print(sorted(p["pane_id"] for p in json.load(sys.stdin)["result"]["panes"])[0])
 '
+}
+
+# All pane ids, sorted. Same reasoning as `first_pane_id`: the daemon's map order
+# is not insertion order, so a case that wants "the other pane" cannot use index.
+pane_ids() {
+    herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+print("\n".join(sorted(p["pane_id"] for p in json.load(sys.stdin)["result"]["panes"])))
+'
+}
+
+# Whether the program in this pane asked for mouse reports.
+#
+# The surface, not `pane list`: the pane record carries no mouse field at all, and
+# the daemon only tells the app about it in `client_shell.surface.get`, which is why
+# the whole app-side routing depends on `paneGeometry(...).mouseReporting`.
+pane_reports_mouse() {
+    local target="$1"
+    run_py herdr-api.py --socket "$API_SOCKET" --method session.snapshot 2>/dev/null \
+        | python3 -c '
+import json, sys
+target = sys.argv[1]
+try:
+    payload = json.load(sys.stdin)
+    surface = (payload.get("result") or {}).get("surface") \
+        or (payload.get("result") or {}).get("snapshot", {}).get("surface") \
+        or {}
+except Exception:
+    sys.exit(1)
+for pane in surface.get("panes") or []:
+    if pane.get("pane_id") == target:
+        sys.exit(0 if pane.get("mouse_reporting") else 1)
+sys.exit(1)
+' "$target"
+}
+
+# A screen point inside a pane's body, from the daemon's own layout.
+#
+# `pane layout` gives cell rectangles; the app's window is on screen at a known
+# origin, so the two have to be joined here. Conversion goes through the window
+# frame the driver reports rather than through constants, because the VM's window
+# geometry changes with the display it boots into (docs/DEBUGGING.md §12).
+# A screen point inside a pane's body, from the daemon's own layout.
+#
+# Two coordinate systems have to be joined: the daemon measures panes in cells
+# inside the surface grid, and the screen measures points. The AX tree does not
+# help — panes are drawn by Ghostty's layer and do not appear in it at all (only
+# the window, one group, and the sidebar do; verified on the vm window). What the
+# app *does* log is the container rectangle it laid the surface out in, in
+# content-view points, and the driver reports where that view sits on screen.
+#
+#     layout: container=1219x2434 grid=143x131 ...
+#
+# So: cell → fraction of the grid → point inside the container → screen point.
+pane_body_point() {
+    local target="$1"
+    local window_text layout_text container
+    window_text=$(driver window 2>/dev/null) || return 1
+    layout_text=$(pane_layout 2>/dev/null) || return 1
+    # The most recent layout line: the container follows the window, and a resize
+    # (which the vm's window does on launch) makes older lines wrong.
+    container=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
+    if [ -z "$container" ]; then
+        echo "no 'layout: container=' line in the app log" >&2
+        return 1
+    fi
+    python3 -c '
+import json, re, sys
+
+target = sys.argv[1]
+window_text, layout_text, container_line = sys.argv[2], sys.argv[3], sys.argv[4]
+
+win = re.search(r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", window_text)
+if not win:
+    sys.exit(1)
+win_x, win_y, win_w, win_h = (int(v) for v in win.groups())
+
+# "container=<w>x<h> grid=<cols>x<rows>"
+cont = re.search(r"container=(\d+)x(\d+) grid=(\d+)x(\d+)", container_line)
+if not cont:
+    sys.exit(1)
+cont_w, cont_h, grid_cols, grid_rows = (int(v) for v in cont.groups())
+
+layout = json.loads(layout_text)["result"]["layout"]
+panes = layout["panes"]
+target_pane = next((p for p in panes if p["pane_id"] == target), None)
+if target_pane is None:
+    sys.exit(1)
+
+# The container is anchored top-leading inside the content view, whose top-left is
+# the window origin plus the title bar. The driver already reports the window in
+# screen space with the title bar included, so the container origin is the window
+# origin plus a fixed inset (measured: 221,71 on a 1180x760 window).
+rect = target_pane["rect"]
+cx = (rect["x"] + rect["width"] / 2) / grid_cols
+cy = (rect["y"] + rect["height"] / 2) / grid_rows
+# Inset of the surface container inside the window, as a fraction is wrong — the
+# sidebar is a fixed width. Derive it from the container size instead: the surface
+# is right-aligned and its height is the window height minus the title bar.
+left_inset = win_w - cont_w
+top_inset = win_h - cont_h
+print(f"{int(win_x + left_inset + cx * cont_w)},{int(win_y + top_inset + cy * cont_h)}")
+' "$target" "$window_text" "$layout_text" "$container"
+}
+
+# The last N lines of the app log, for cases that need a decision the app logged
+# while the case was running.
+collect_app_log_tail() {
+    if [ "$BACKEND" = "vm" ]; then
+        tart exec -i "$VM" /bin/bash -lc \
+            "tail -200 ~/Library/Logs/Kraal-$SESSION.log 2>/dev/null"
+    else
+        tail -200 "$HOME/Library/Logs/Kraal-$SESSION.log" 2>/dev/null
+    fi
 }
 
 pane_layout() {
@@ -1374,6 +1495,11 @@ case_click_coordinates() {
     }
     action() {
         driver window >"$host_dir/window.txt" 2>&1
+        # The window frame is not the surface: the sidebar is on the left and the
+        # title bar above, so mapping cell space onto the window put the click in
+        # the sidebar. The AX tree is the only place the real container rectangle is
+        # visible from outside the app.
+        driver ax --json --depth 30 >"$host_dir/ax.json" 2>&1
         local point
         point=$(sidebar_row_point coord-two) || {
             echo "no sidebar row with value coord-two (issue #71: rows are AXValue only)"
@@ -2146,6 +2272,214 @@ case_machines_roster_app_setup() {
     return 0
 }
 
+# A click in a pane whose program reports the mouse (issue #95).
+#
+# The failure this exists for cannot be seen from the app side: whether the event
+# was never sent, sent to the wrong pane, sent in the wrong coordinate space, or
+# sent correctly and ignored by the program all look like "clicking does nothing".
+# So the program itself records the bytes it received, and the assertion is on
+# those bytes.
+case_mouse_tui() {
+    requires() { echo focus; }
+    fixture() {
+        # A fresh daemon has no panes at all (`daemon up, panes=0`), so the
+        # workspace has to be created before there is anything to split.
+        if [ "$(pane_count)" -eq 0 ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+            sleep 2
+        fi
+        # Split so there is a pane that is *not* focused: routing to the wrong pane
+        # is one of the failures this case has to be able to see.
+        # Positional pane id, not `--target-pane-id`: that flag does not exist and
+        # the split was silently skipped, which the case reported as "the program
+        # never claimed mouse reporting" (a downstream symptom of a fixture that
+        # never ran). `herdr pane split --help` is the authority.
+        herdr pane split "$(first_pane_id)" --direction down >/dev/null 2>&1 || true
+        # Focus the *other* pane after splitting. `pane split` focuses the new pane,
+        # and clicking a pane that is already focused cannot show the bug this case
+        # is about: the first click on an unfocused pane is either swallowed by a
+        # focus change or forwarded, and only the second one ever worked.
+        sleep 2
+        local target
+        target=$(printf '%s\n' "$(pane_ids)" | tail -1)
+        if [ -z "$target" ]; then
+            echo "no pane to probe after the split"
+            return 1
+        fi
+        # host_dir, not dir: `dir` is a *guest* path under the vm backend, and this
+        # shell is the host. Writing to it here failed with "No such file or
+        # directory" for a directory that existed — on the other machine.
+        if ! printf '%s' "$target" >"$host_dir/target-pane.txt"; then
+            echo "cannot record the target pane"
+            return 1
+        fi
+        # Deliberately focus the *other* pane. `pane split` leaves the new pane
+        # focused, and a click on an already-focused pane cannot show the bug: an
+        # unfocused view forwards nothing, so the click is swallowed and the pane
+        # never becomes focused either.
+        herdr pane focus --pane "$(first_pane_id)" >/dev/null 2>&1 || true
+        sleep 1
+        # The probe claims mouse reporting the way a real TUI does, records every
+        # byte, and leaves the pane usable. It runs for exactly as long as the case
+        # needs, then exits on its own so the pane is not left in raw mode.
+        herdr pane run "$target" \
+            "python3 $VM_ROOT/tui-mouse-probe.py 45 $dir/mouse-events.txt" \
+            >/dev/null 2>&1 || return 1
+        # The program claiming the mouse is what makes this case meaningful, and the
+        # only observer that can see it is the program itself: the CLI's JSON API
+        # (`session.snapshot`) carries workspace/tab/pane metadata and no mouse
+        # state at all. The probe writes its claim to a marker file for the same
+        # reason — asking the daemon would mean speaking Kraal's bincode protocol
+        # from bash.
+        local tries=0
+        while [ "$tries" -lt 40 ]; do
+            if tart exec "$VM" /bin/bash -lc "test -s $dir/mouse-events.txt.ready" 2>/dev/null; then
+                return 0
+            fi
+            tries=$((tries + 1))
+            sleep 0.25
+        done
+        echo "probe never started (pane $target)"
+        return 1
+    }
+    action() {
+        driver window >"$host_dir/window.txt" 2>&1
+        # The AX tree, because the window frame is not the surface: the sidebar is on
+        # the left and the title bar above, so mapping cell space onto the *window*
+        # put the click in the sidebar and the program correctly saw nothing.
+        driver ax --json --depth 30 >"$host_dir/ax.json" 2>&1
+        local point
+        point=$(pane_body_point "$(cat "$host_dir/target-pane.txt")") || {
+            echo "cannot compute a point inside the target pane"
+            return 1
+        }
+        printf '%s' "$point" >"$host_dir/click-point.txt"
+        # A real click, not AXPress: only a synthetic event exercises the mouse path
+        # (AXPress goes through the accessibility action, which panes do not have).
+        driver click --at-screen "$point" >"$host_dir/click.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/click.txt"
+        sleep 1
+        driver scroll --at-screen "$point" --lines 3 >"$host_dir/scroll.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/scroll.txt"
+        sleep 2
+    }
+    assert() {
+        # The probe writes in the guest under the vm backend, and the artefact
+        # collection that would bring that file to the host runs *after* `assert`.
+        # So the file has to be read where it is, not after it has been copied.
+        local events="$host_dir/mouse-events.txt"
+        if [ "$BACKEND" = "vm" ]; then
+            tart exec -i "$VM" /bin/bash -lc "cat $dir/mouse-events.txt 2>/dev/null" \
+                >"$events" 2>/dev/null
+        else
+            cp "$dir/mouse-events.txt" "$events" 2>/dev/null
+        fi
+        if [ ! -s "$events" ]; then
+            check "program received a mouse press" 1 \
+                "no bytes at all: the event never reached the program"
+            return 1
+        fi
+        local parsed
+        parsed=$(
+            python3 - "$events" <<'PYEOF'
+import ast
+import sys
+
+press = release = wheel = 0
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line:
+        continue
+    data = ast.literal_eval(line)
+    # SGR mouse reports: ESC [ < button ; column ; row M|m
+    # `M` is press (or wheel), `m` is release. Bit 6 of the button (>= 64) means
+    # the wheel, which is how a program tells a scroll from a click.
+    for chunk in data.split(b"\x1b[<")[1:]:
+        if not chunk:
+            continue
+        final = chunk[-1:]
+        if final not in (b"M", b"m"):
+            continue
+        try:
+            button = int(chunk[:-1].split(b";")[0])
+        except ValueError:
+            continue
+        if button >= 64:
+            wheel += 1
+        elif final == b"M":
+            press += 1
+        else:
+            release += 1
+print(f"press={press} release={release} wheel={wheel}")
+sys.exit(0 if press >= 1 and release >= 1 else 1)
+PYEOF
+        )
+        check "program received a press and its release" "$?" "$parsed"
+        local wheel_only
+        wheel_only=$(printf '%s' "$parsed" | sed -n 's/.*wheel=\([0-9]*\)/\1/p')
+        check "program received a wheel report" \
+            "$([ "${wheel_only:-0}" -ge 1 ] && echo 0 || echo 1)" "wheel=$wheel_only"
+        # The pair must be one click, not several: the drag-jitter filter exists so a
+        # stationary click is not reported as a drag (issue #95).
+        local press_only
+        press_only=$(printf '%s' "$parsed" | sed -n 's/^press=\([0-9]*\).*/\1/p')
+        check "a stationary click is one press, not a drag storm" \
+            "$([ "${press_only:-99}" = "1" ] && echo 0 || echo 1)" "press=$press_only"
+        # And the report is in the *target pane's* own coordinates. A router that
+        # picked the neighbour would send bytes too — same format, same count, a row
+        # measured against the wrong pane — so counting alone would pass while the
+        # click landed somewhere else. The row has to fit the pane it was aimed at.
+        local target_row
+        target_row=$(python3 - "$events" <<'PYEOF'
+import ast
+import sys
+
+rows = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line:
+        continue
+    for chunk in ast.literal_eval(line).split(b"\x1b[<")[1:]:
+        if not chunk or chunk[-1:] not in (b"M", b"m"):
+            continue
+        try:
+            parts = chunk[:-1].split(b";")
+            rows.append(int(parts[2]))
+        except (IndexError, ValueError):
+            continue
+print(max(rows) if rows else -1)
+PYEOF
+)
+        local pane_rows
+        pane_rows=$(pane_layout 2>/dev/null | python3 -c '
+import json, sys
+target = sys.argv[1]
+layout = json.load(sys.stdin)["result"]["layout"]
+for pane in layout["panes"]:
+    if pane["pane_id"] == target:
+        print(pane["rect"]["height"])
+        break
+' "$(cat "$host_dir/target-pane.txt")")
+        # And the click focused the pane it landed in. Asserted against the daemon,
+        # not the app's own state: focus is the daemon's to decide, and the whole
+        # point is that a click on an unfocused pane goes nowhere without this.
+        local focused_now
+        focused_now=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+for pane in json.load(sys.stdin)["result"]["panes"]:
+    if pane.get("focused"):
+        print(pane["pane_id"])
+        break
+')
+        check "the click focused the pane it landed in" \
+            "$([ "$focused_now" = "$(cat "$host_dir/target-pane.txt")" ] && echo 0 || echo 1)" \
+            "focused=$focused_now target=$(cat "$host_dir/target-pane.txt")"
+        check "the click reported a row inside the target pane" \
+            "$([ "${target_row:-0}" -ge 0 ] && [ "${target_row:-99}" -lt "${pane_rows:-1}" ] && echo 0 || echo 1)" \
+            "row=$target_row of $pane_rows"
+    }
+}
+
 case_machines_roster() {
     requires() { echo ax; }
     fixture() {
@@ -2806,7 +3140,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll machines-roster machines-switch machines-controls machines-reachability"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability"; }
 
 # ---------------------------------------------------------------- entrypoint
 

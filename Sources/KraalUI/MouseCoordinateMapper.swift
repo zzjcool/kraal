@@ -135,6 +135,32 @@ public enum PaneMouse {
         }
     }
 
+    /// Whether a pointer movement is a drag or just the wobble inside a click.
+    ///
+    /// macOS emits `leftMouseDragged` for a movement of a single point, and a
+    /// trackpad produces one on almost every click. Forwarding those made a click
+    /// arrive at the program as press → drag → drag → release, which a TUI reads as
+    /// a drag and ignores — the "clicking the TUI does nothing" half of issue #95.
+    ///
+    /// Pure so the threshold can be tested without an event loop; the caller keeps
+    /// the per-pane origin.
+    public struct PressTracking: Sendable {
+        /// One cell's smaller dimension, in points. A third of a cell is still a
+        /// wobble; a whole cell is deliberate.
+        public let threshold: CGFloat
+
+        public init(cellSize: CGFloat) {
+            // A floor of two points: at tiny cell sizes rounding would otherwise
+            // classify a stationary click as a drag.
+            threshold = max(cellSize, 2)
+        }
+
+        /// True when the pointer moved far enough from where the button went down.
+        public func isDrag(from origin: CGPoint, to point: CGPoint) -> Bool {
+            hypot(point.x - origin.x, point.y - origin.y) >= threshold
+        }
+    }
+
     /// Turns a stream of trackpad deltas into whole lines to scroll.
     ///
     /// A trackpad emits one event per frame, each a point or two, so rounding

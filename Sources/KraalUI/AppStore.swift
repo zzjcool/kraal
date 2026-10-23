@@ -117,6 +117,9 @@ public final class AppStore {
     @ObservationIgnored
     public var paneViewFrames: [String: CGRect] = [:]
 
+    /// Coalesced `pane.scroll` for wheel gestures (issue #94); see `PaneScrollQueue`.
+    @ObservationIgnored public lazy var paneScrollQueue = Self.makePaneScrollQueue(self)
+
     /// Where the foreground connection points.
     ///
     /// Assigning it no longer reconnects. Changing machines goes through

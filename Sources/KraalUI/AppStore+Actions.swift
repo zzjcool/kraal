@@ -133,8 +133,44 @@ extension AppStore {
     /// where the viewport should sit rather than moving it by some amount. Sending
     /// a delta would be read literally as "jump to line N", which jumps to the top
     /// of history on any upward scroll.
+    ///
+    /// Absent an absolute target, a wheel gesture is a *rate*, not a list of
+    /// destinations — so the wheel path goes through `scrollPaneBy` instead, which
+    /// coalesces. This entry point stays for the callers that genuinely have a
+    /// destination: the scrollbar thumb, copy mode, and the pane menu.
     public func scrollPane(paneId: String, toOffsetFromBottom offset: UInt64) {
         Task { await call("pane.scroll", ["pane_id": paneId, "offset_from_bottom": offset]) }
+    }
+
+    /// Builds the coalescing queue, kept out of `AppStore.swift` so that file stays
+    /// under SwiftLint's type-length limit.
+    ///
+    /// `@MainActor` because `PaneScrollQueue` is, and `self` is captured weakly: the
+    /// queue must not keep its store alive.
+    @MainActor
+    static func makePaneScrollQueue(_ store: AppStore) -> PaneScrollQueue {
+        PaneScrollQueue { [weak store] paneId, offset in
+            await store?.call("pane.scroll", ["pane_id": paneId, "offset_from_bottom": offset])
+        }
+    }
+
+    /// Moves a pane's history by a gesture instead of to a destination.
+    ///
+    /// This is what a wheel event calls. It exists because a trackpad emits one
+    /// event per frame and sending each as its own `pane.scroll` both flooded the
+    /// one-command-at-a-time connection and carried targets computed from a stale
+    /// snapshot — measured 281 refusals against 791 successes, and an offset that
+    /// visibly jumped backwards mid-gesture (issue #94). See `PaneScrollQueue`.
+    ///
+    /// `current` is only used the first time a pane is scrolled, to seed the queue;
+    /// after that the queue tracks its own target, because the snapshot always lags
+    /// the gesture.
+    public func scrollPaneBy(
+        paneId: String, lines: Int, current: UInt64, maxOffset: UInt64
+    ) {
+        paneScrollQueue.scroll(
+            paneId: paneId, lines: lines, current: current, maxOffset: maxOffset
+        )
     }
 
     /// Re-reads config.toml on the daemon side (theme, keybindings, sidebar).
