@@ -795,6 +795,9 @@ guard let command = argv.first else {
                                      --at-screen is absolute (AX frame space)
       drag  --from X,Y --to X,Y [--steps N]
                                      synthetic drag, both points window-relative
+      scroll --at X,Y | --at-screen X,Y [--lines N]
+                                     synthetic wheel at a point; the app decides
+                                     which pane is under it, unlike pane.scroll
       key   --char C [--mod cmd,shift]
                                      key chord (needs the app frontmost)
       menu  --menu T --item T [--index N]
@@ -824,6 +827,7 @@ case "type": commandType(args)
 case "launch": commandLaunch(args)
 case "quit": commandQuit(args)
 case "click": commandClick(args)
+case "scroll": commandScroll(args)
 case "drag": commandDrag(args)
 case "key": commandKey(args)
 case "menu": commandMenu(args)
