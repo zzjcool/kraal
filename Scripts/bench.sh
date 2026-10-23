@@ -24,7 +24,9 @@
 #      from a decoded frame where every cell owns its string. The numbers moved
 #      by 3x between the two shapes. Frames here are built cell by cell.
 #
-# Both traps are written down in docs/PERFORMANCE.md §2.
+# Both traps are written down in docs/PERFORMANCE.md — §1 ("没被消费的结果会被删掉")
+# for the optimiser deleting the work, §2 ("合成数据要和真实数据同形") for the
+# repeating-cell frame.
 #
 # A third trap is shape, not code: a frame's *style count* changes the cost of
 # rendering it by 7x once issue #49 was fixed. `decodedFrame` cycles colours so
@@ -125,6 +127,126 @@ func uniformlyStyledFrame(_ width: UInt16, _ height: UInt16, seed: UInt32 = 0) -
     )
 }
 
+/// A `width`×`height` surface (tag 13), built with the public wire writer.
+///
+/// Built from bytes rather than a struct initialiser so the patch section below
+/// compiles against both sides of issue #50: `PaneSurfaceFrame.init` is internal,
+/// the decoder is public. It is also the honest shape — production gets surfaces
+/// from this decoder, and a frame assembled in a `for` loop is not the same
+/// allocation pattern as a decoded one (see the header of this script).
+func decodedSurface(_ width: UInt16, _ height: UInt16) -> PaneSurfaceFrame {
+    let w = Int(width), h = Int(height)
+    var writer = BincodeWriter()
+    writer.writeVarint(13)
+    writer.writeString("boot-a")
+    writer.writeVarint(3)                        // projectionRevision
+    writer.writeVarint(1)                        // surfaceRevision
+    writer.writeArray(Array(0 ..< w * h)) { writer, index in
+        let symbol = String(UnicodeScalar(UInt8(97 + index % 26)))
+        writer.writeString(symbol)
+        writer.writeVarint(UInt64(index % 8))    // foreground
+        writer.writeVarint(0x1E1E1E)             // background
+        writer.writeVarint(0)                    // modifier
+        writer.writeBool(false)                  // skip
+        writer.writeBool(false)                  // no hyperlink
+    }
+    writer.writeVarint(UInt64(w))
+    writer.writeVarint(UInt64(h))
+    writer.writeBool(true)                       // cursor: Some
+    writer.writeVarint(0)                        // column
+    writer.writeVarint(0)                        // row
+    writer.writeBool(true)                       // visible
+    writer.writeVarint(0)                        // shape
+    writer.writeVarint(0)                        // hyperlinks
+    writer.writeVarint(0)                        // graphics bytes
+    writer.writeVarint(0)                        // panes
+    writer.writeVarint(0)                        // splits
+    writer.writeBool(false)                      // popup
+    writer.writeVarint(0)                        // graphics assets
+    writer.writeVarint(0)                        // graphics placements
+    writer.writeVarint(0)                        // graphics retained
+    guard case let .paneSurface(surface) = try! ServerMessageDecoder.decode(Data(writer.bytes)) else {
+        fatalError("expected a surface")
+    }
+    return surface
+}
+
+/// A patch (tag 19) rewriting `cells` cells of `row`, based on revision 1.
+func decodedPatch(_ width: UInt16, row: UInt16, cells: Int) -> PaneSurfacePatch {
+    var writer = BincodeWriter()
+    writer.writeVarint(19)
+    writer.writeString("boot-a")
+    writer.writeVarint(3)                        // projectionRevision
+    writer.writeVarint(1)                        // baseSurfaceRevision
+    writer.writeVarint(2)                        // surfaceRevision
+    writer.writeVarint(1)                        // one row
+    writer.writeVarint(0)                        // column
+    writer.writeVarint(UInt64(row))
+    writer.writeArray(Array(0 ..< min(cells, Int(width)))) { writer, index in
+        writer.writeString(String(UnicodeScalar(UInt8(97 + index % 26))))
+        writer.writeVarint(1)                    // foreground
+        writer.writeVarint(2)                    // background
+        writer.writeVarint(0)                    // modifier
+        writer.writeBool(false)                  // skip
+        writer.writeBool(false)                  // no hyperlink
+    }
+    writer.writeVarint(0)                        // panes
+    writer.writeBool(false)                      // cursor: None
+    guard case let .paneSurfacePatch(patch) = try! ServerMessageDecoder.decode(Data(writer.bytes)) else {
+        fatalError("expected a patch")
+    }
+    return patch
+}
+
+// Machine-readable mode. Set by `Scripts/bench.sh --json`.
+//
+// The shell used to post-process stdout with awk (`$NF == "fps"`), which only
+// matched the render rows: every patch measurement ends with
+// `(2% of 16.7ms)` instead, so the core number of issue #50 was invisible to
+// `--json` (it printed the three `validate()` rows and nothing else). Emitting
+// the JSON here, where the label and the fields are both in hand, removes that
+// whole class of bug -- no column counting, no trailing-text matching.
+let jsonMode = ProcessInfo.processInfo.environment["KRAAL_BENCH_JSON"] == "1"
+
+/// A section header, suppressed in JSON mode (it is not a measurement).
+func header(_ line: String) {
+    guard !jsonMode else { return }
+    print(line)
+}
+
+/// One measurement.
+///
+/// - Parameters:
+///   - fps: set for per-frame costs (rendering).
+///   - perFrameMs / budgetPercent: set for per-patch costs (60fps x 4 panes).
+func emit(
+    _ label: String,
+    us: Double,
+    fps: Double? = nil,
+    perFrameMs: Double? = nil,
+    budgetPercent: Double? = nil
+) {
+    if jsonMode {
+        var fields = ["\"label\":\"\(label)\"", String(format: "\"us\":%.3f", us)]
+        if let fps { fields.append(String(format: "\"fps\":%.0f", fps)) }
+        if let perFrameMs { fields.append(String(format: "\"ms_per_frame\":%.3f", perFrameMs)) }
+        if let budgetPercent {
+            fields.append(String(format: "\"percent_of_budget\":%.0f", budgetPercent))
+        }
+        print("{" + fields.joined(separator: ",") + "}")
+        return
+    }
+    let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
+    if let fps {
+        print(String(format: "%@ %9.2f us  %8.0f fps", padded, us, fps))
+    } else if let perFrameMs, let budgetPercent {
+        print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
+                     padded, us, perFrameMs, budgetPercent))
+    } else {
+        print(String(format: "%@ %9.2f us", padded, us))
+    }
+}
+
 /// Measures a renderer fed **alternating** frames through one instance.
 ///
 /// Alternating is not cosmetic. With one renderer and one unchanging input, the
@@ -149,8 +271,7 @@ func measureRendering(
     }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start)
     let micros = elapsed / Double(iterations) / 1000.0
-    let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-    print(String(format: "%@ %9.2f us  %8.0f fps", padded, micros, 1_000_000.0 / micros))
+    emit(label, us: micros, fps: 1_000_000.0 / micros)
 }
 
 func measure(_ label: String, iterations: Int, _ body: () -> Void) {
@@ -159,8 +280,7 @@ func measure(_ label: String, iterations: Int, _ body: () -> Void) {
     for _ in 0 ..< iterations { body() }
     let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start)
     let micros = elapsed / Double(iterations) / 1000.0
-    let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-    print(String(format: "%@ %9.2f us  %8.0f fps", padded, micros, 1_000_000.0 / micros))
+    emit(label, us: micros, fps: 1_000_000.0 / micros)
 }
 
 let sizes: [(String, UInt16, UInt16)] = [
@@ -172,9 +292,9 @@ let sizes: [(String, UInt16, UInt16)] = [
 let mode = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "all"
 
 if mode == "all" || mode == "render" {
-    print("=== render: VT encoding (SurfaceANSIRenderer) ===")
+    header("=== render: VT encoding (SurfaceANSIRenderer) ===")
     // First frame: a pane appearing. Full repaint, nothing to diff against.
-    print("-- first frame (pane appears) --")
+    header("-- first frame (pane appears) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         measure("\(label) first frame", iterations: 400) {
@@ -184,11 +304,11 @@ if mode == "all" || mode == "render" {
     }
     // Typing: one cell changes, one row is repainted. Alternating between the
     // two frames is what stops the optimiser (see measureRendering).
-    print("-- one cell changed (typing) --")
+    header("-- one cell changed (typing) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         var changed = frame
-        changed.cells[0] = CellData(
+        changed.buffer[0] = CellData(
             symbol: "Z", foreground: 1, background: 2,
             modifier: 0, skip: false, hyperlink: nil
         )
@@ -203,7 +323,7 @@ if mode == "all" || mode == "render" {
     // to run ~10000 times. `uniformlyStyledFrame` is one style across the screen,
     // where it has to run ~once. Before the fix the ratio was 1.08x -- i.e. the
     // encoder ran per cell and its result was thrown away.
-    print("-- every row changed (scroll / tail -f) --")
+    header("-- every row changed (scroll / tail -f) --")
     for (label, width, height) in sizes {
         let varied = decodedFrame(width, height)
         let variedNext = decodedFrame(width, height, seed: 1)
@@ -221,7 +341,7 @@ if mode == "all" || mode == "render" {
     // always gets fresh storage, and `Array` comparison short-circuits when two
     // values share a buffer -- passing one value as both arguments measured
     // 0.15 us instead of 60 us, a 400x understatement. See docs/PERFORMANCE.md.
-    print("-- identical frame repeated (redundant snapshot) --")
+    header("-- identical frame repeated (redundant snapshot) --")
     for (label, width, height) in sizes {
         let first = decodedFrame(width, height)
         let second = decodedFrame(width, height)
@@ -231,8 +351,8 @@ if mode == "all" || mode == "render" {
 }
 
 if mode == "all" || mode == "render" {
-    print("")
-    print("=== self-check: the two every-row frames must differ in style count ===")
+    header("")
+    header("=== self-check: the two every-row frames must differ in style count ===")
     // Issue #49's regression, as a self-check rather than a timing comparison.
     // Timing one run against another measures the machine; counting distinct
     // styles measures the probe. If these ever come out equal, the "uniform"
@@ -240,12 +360,14 @@ if mode == "all" || mode == "render" {
     // nothing -- exactly the class of error that produced the 0.29 us no-op diff.
     for (label, width, height) in sizes {
         func distinctStyles(_ frame: FrameData) -> Int {
-            Set(frame.cells.map { "\($0.foreground),\($0.background),\($0.modifier)" }).count
+            Set((0 ..< frame.buffer.rowCount).flatMap { row in
+                frame.buffer.row(row).map { "\($0.foreground),\($0.background),\($0.modifier)" }
+            }).count
         }
         let varied = distinctStyles(decodedFrame(width, height))
         let uniform = distinctStyles(uniformlyStyledFrame(width, height))
         let ok = varied > 1 && uniform == 1
-        print("  \(label) styles: varied=\(varied) uniform=\(uniform): \(ok ? "ok" : "BROKEN")")
+        header("  \(label) styles: varied=\(varied) uniform=\(uniform): \(ok ? "ok" : "BROKEN")")
         if !ok {
             FileHandle.standardError.write(
                 Data("bench self-check failed: uniform frame is not uniform for \(label)\n".utf8))
@@ -259,15 +381,16 @@ if mode == "all" || mode == "render" {
 // look 400x cheaper than it is. Check storage identity directly -- a ratio check
 // on timings measures the probe, not the hazard.
 if mode == "all" || mode == "render" {
-    print("")
-    print("=== self-check: no-op frames must not share storage ===")
+    header("")
+    header("=== self-check: no-op frames must not share storage ===")
     for (label, width, height) in sizes {
         let first = decodedFrame(width, height)
         let second = decodedFrame(width, height)
-        let sameBuffer = first.cells.withUnsafeBufferPointer { a in
-            second.cells.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
-        }
-        print("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
+        // Row 0's storage, not an equality check: after issue #50 the cells live
+        // in one array per row, and per row is exactly the granularity at which
+        // storage must differ for the renderer's row diff to see a change.
+        let sameBuffer = first.buffer.sharesRow(0, with: second.buffer)
+        header("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
         if sameBuffer {
             FileHandle.standardError.write(Data("bench self-check failed for \(label)\n".utf8))
             exit(1)
@@ -276,33 +399,82 @@ if mode == "all" || mode == "render" {
 }
 
 if mode == "all" || mode == "patch" {
-    print("")
-    print("=== patch: handleSurfacePatch's copy-mutate-assign (AppStore+Events) ===")
-    print("-- cost of applying one patch, regardless of how few cells it carries --")
+    header("")
+    header("=== patch: PaneSurfaceFrame.apply, as AppStore.handleSurfacePatch drives it ===")
+    // Measured through the **public wire API** on purpose, twice over.
+    //
+    //  1. It is the real path: a patch is decoded from bytes exactly as the socket
+    //     delivers it, applied to a decoded surface, and the result published by
+    //     assignment, which is what `handleSurfacePatch` does. An earlier version
+    //     of this section hand-rolled `copy.cells[0] = ...; stored = copy` on a
+    //     bare array, which reproduced the symptom but not the code, so it could
+    //     not have shown the fix (issue #50).
+    //
+    //  2. It touches no API that issue #50 added: surfaces and patches come in
+    //     through the public decoders and go out through `apply`. That is what made
+    //     the before/after comparison possible — the same section, byte for byte,
+    //     compiled against a worktree at the parent commit and against this one.
+    //     (The render section above cannot do that: it asks the storage directly.)
+    //
+    // The view's copy is what makes this honest: with no second reference alive
+    // the optimiser can prove the published copy is unobservable and the loop
+    // measures nothing (docs/PERFORMANCE.md §1, "没被消费的结果会被删掉").
+    header("-- one patch, 1 cell, with a view holding a copy of the surface --")
     for (label, width, height) in sizes {
-        nonisolated(unsafe) var stored = decodedFrame(width, height)
+        var surface = decodedSurface(width, height)
+        var viewHolds = surface
+        var patch = decodedPatch(width, row: 1, cells: 1)
         let iterations = 3000
         for _ in 0 ..< 300 {
-            var copy = stored
-            copy.cells[0].foreground = 1
-            stored = copy
+            patch.baseSurfaceRevision = surface.surfaceRevision
+            patch.surfaceRevision = surface.surfaceRevision &+ 1
+            var current = surface
+            do { try current.apply(patch) } catch { fatalError("\(error)") }
+            surface = current
+            viewHolds = surface
         }
         let start = DispatchTime.now().uptimeNanoseconds
-        for _ in 0 ..< iterations {
-            var copy = stored
-            copy.cells[0].foreground = 1
-            stored = copy
-            sink &+= UInt64(copy.cells.count)
+        for iteration in 0 ..< iterations {
+            patch.baseSurfaceRevision = surface.surfaceRevision
+            patch.surfaceRevision = surface.surfaceRevision &+ 1
+            patch.rows[0].cells[0].foreground = UInt32(iteration % 8)
+            var current = surface
+            do { try current.apply(patch) } catch { fatalError("\(error)") }
+            surface = current
+            viewHolds = surface
+            sink &+= UInt64(viewHolds.frame.cell(column: Int(width) - 1, row: Int(height) - 1)?.foreground ?? 0)
         }
         let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
             / Double(iterations) / 1000.0
-        // 4 panes at 60 patches/s is the multi-pane case issues #50 measured.
+        // 4 panes at 60 patches/s is the multi-pane case issue #50 measured.
         let perFrame = micros * 60 * 4 / 1000.0
-        let padded = label.padding(toLength: 46, withPad: " ", startingAt: 0)
-        print(String(format: "%@ %9.2f us  %5.2f ms/frame at 60fps x 4 panes (%.0f%% of 16.7ms)",
-                     padded, micros, perFrame, perFrame / 16.7 * 100))
+        emit("\(label) 1-cell patch", us: micros,
+             perFrameMs: perFrame, budgetPercent: perFrame / 16.7 * 100)
     }
-    print("-- frame.validate() runs on every patch --")
+    header("-- one patch carrying a whole row (a line echoed back) --")
+    for (label, width, height) in sizes {
+        var surface = decodedSurface(width, height)
+        var viewHolds = surface
+        var patch = decodedPatch(width, row: 1, cells: Int(width))
+        let iterations = 3000
+        let start = DispatchTime.now().uptimeNanoseconds
+        for iteration in 0 ..< iterations {
+            patch.baseSurfaceRevision = surface.surfaceRevision
+            patch.surfaceRevision = surface.surfaceRevision &+ 1
+            patch.rows[0].cells[0].foreground = UInt32(iteration % 8)
+            var current = surface
+            do { try current.apply(patch) } catch { fatalError("\(error)") }
+            surface = current
+            viewHolds = surface
+            sink &+= UInt64(viewHolds.frame.cell(column: Int(width) - 1, row: Int(height) - 1)?.foreground ?? 0)
+        }
+        let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
+            / Double(iterations) / 1000.0
+        let perFrame = micros * 60 * 4 / 1000.0
+        emit("\(label) whole-row patch", us: micros,
+             perFrameMs: perFrame, budgetPercent: perFrame / 16.7 * 100)
+    }
+    header("-- frame.validate() (a full-surface arrival still runs the whole scan) --")
     for (label, width, height) in sizes {
         let frame = decodedFrame(width, height)
         measure("\(label) validate()", iterations: 3000) {
@@ -310,32 +482,87 @@ if mode == "all" || mode == "patch" {
             sink &+= 1
         }
     }
+    // The cost of `apply`'s atomicity: write into a local copy and publish once,
+    // versus write straight into the stored value.
+    //
+    // This exists because the numbers this comment used to quote (`+0.069 us` at
+    // 200x50 and friends) had no probe behind them, and an independent reviewer
+    // measured a different order of magnitude. A claim about the *cost of a code
+    // shape* needs a probe with both shapes in it, not an inference from the shape
+    // that shipped — see docs/PERFORMANCE.md §3 ("拆到能单独归因").
+    //
+    // Deliberately measures the storage step only: `apply`'s validation is shared
+    // by both shapes, so including it would dilute the difference being measured.
+    // Both arms hold a second reference for the whole loop, for the same reason the
+    // patch section does — with one reference alive the optimiser deletes the copy
+    // and the atomic arm reports the in-place cost (§1).
+    header("-- atomicity: copy-then-publish vs write-in-place, one 1-cell row write --")
+    // The tall sizes are here on purpose: the doc this replaced claimed the cost
+    // grows with *height* (+6.3% at 50 rows, +11% at 300, +13.6% at 1200), which is
+    // a claim about the outer row array being relocated one extra time. Probing only
+    // the 24/50/80-row sizes could not have found that.
+    let atomicitySizes = sizes + [("200x300", 200, 300), ("200x1200", 200, 1200)]
+    for (label, width, height) in atomicitySizes {
+        for atomic in [true, false] {
+            var frame = decodedFrame(width, height)
+            var viewHolds = frame
+            var cell = CellData(
+                symbol: "x", foreground: 1, background: 2, modifier: 0,
+                skip: false, hyperlink: nil
+            )
+            let iterations = 3000
+            for _ in 0 ..< 300 {
+                cell.foreground = 1
+                if atomic {
+                    var next = frame
+                    next.buffer.write([cell], at: Int(width) + 1)
+                    frame = next
+                } else {
+                    frame.buffer.write([cell], at: Int(width) + 1)
+                }
+                viewHolds = frame
+            }
+            let start = DispatchTime.now().uptimeNanoseconds
+            for iteration in 0 ..< iterations {
+                cell.foreground = UInt32(iteration % 8)
+                if atomic {
+                    var next = frame
+                    next.buffer.write([cell], at: Int(width) + 1)
+                    frame = next
+                } else {
+                    frame.buffer.write([cell], at: Int(width) + 1)
+                }
+                viewHolds = frame
+                // Consume both references, or the copy is dead code (§1).
+                sink &+= UInt64(frame.buffer[1].foreground)
+                sink &+= UInt64(viewHolds.buffer[1].symbol.utf8.count)
+            }
+            let micros = Double(DispatchTime.now().uptimeNanoseconds - start)
+                / Double(iterations) / 1000.0
+            emit("\(label) \(atomic ? "copy-then-publish" : "write-in-place")",
+                 us: micros, fps: 1_000_000.0 / micros)
+        }
+    }
 }
 
-print("")
-print("(checksum \(sink) — printed so no measurement can be optimised away)")
+// The checksum goes to stderr: it is the reason no measurement can be optimised
+// away, not a measurement, and on stdout it would make `--json` unparseable.
+FileHandle.standardError.write(
+    Data("(checksum \(sink) — printed so no measurement can be optimised away)\n".utf8))
 SWIFT
 
 echo "compiling probe against $BUILD ..." >&2
 /usr/bin/swiftc -O -o "$WORK/bench" "$WORK/bench.swift" \
     -I "$BUILD" -L "$BUILD" -lKraalProtocol 2>&1 | grep -E "error" && exit 1
 
+# JSON mode is the probe's own, not a stdout filter here.
+#
+# It used to be awk on `$NF == "fps"`, which matched only the render rows: every
+# patch row ends with `(2% of 16.7ms)`, so `--json` printed the three validate()
+# rows and silently dropped the number issue #50 is about. The probe now emits
+# the JSON itself, where the label and the fields are both in hand.
 if [ "$JSON" -eq 1 ]; then
-    # Convert "<label> <us> us <fps> fps" into JSON lines with awk: sed cannot
-    # reliably split the right-aligned numeric columns (the us field carries a
-    # decimal point and the label carries trailing spaces).
-    # "<label...>   <us> us   <fps> fps" -> JSON. The numeric columns are the
-    # last four fields (us, "us", fps, "fps"), so the label is everything before
-    # them; sed cannot do this reliably because the label carries trailing spaces.
-    "$WORK/bench" "$MODE" | awk '
-        $NF == "fps" {
-            fps = $(NF-1)
-            us  = $(NF-3)
-            label = ""
-            for (i = 1; i <= NF-4; i++) label = label (i > 1 ? " " : "") $i
-            gsub(/"/, "", label)
-            printf "{\"label\":\"%s\",\"us\":%s,\"fps\":%s}\n", label, us, fps
-        }'
+    KRAAL_BENCH_JSON=1 "$WORK/bench" "$MODE"
 else
     "$WORK/bench" "$MODE"
 fi

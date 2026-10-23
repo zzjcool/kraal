@@ -18,9 +18,22 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
     case patchRowBounds
     case patchRowOverlap(row: UInt16)
     case patchGeometry(paneId: String)
-    case patchCursorBounds
+    /// A patch arrived while a popup owns the screen.
+    ///
+    /// Its own case, and deliberately **not** `patchIdentity`: the two are
+    /// different kinds of "no". An identity failure means our baseline diverged
+    /// and only a fresh surface can repair it; a popup means the daemon is
+    /// patching something this client does not compose, and re-sending the whole
+    /// surface would change nothing. `AppStore.handleSurfacePatch` resyncs on the
+    /// first and not on the second, and it can only tell them apart by case.
+    case patchPopupOpen
     case patchBeforeBaseline
     case bootIdMismatch(expected: String, actual: String)
+    /// A validation check threw something other than `SurfaceError`.
+    ///
+    /// Unreachable while `validate()` only throws `SurfaceError`, and kept as a
+    /// *rejection* rather than a pass so a future check cannot be swallowed.
+    case unexpectedValidationFailure(String)
 
     public var description: String {
         switch self {
@@ -38,26 +51,60 @@ public enum SurfaceError: Error, CustomStringConvertible, Equatable {
             "surface patch rows overlap on row \(row)"
         case let .patchGeometry(paneId):
             "surface patch changed geometry for pane \(paneId)"
-        case .patchCursorBounds:
-            "patch cursor outside frame"
+        case .patchPopupOpen:
+            "surface patch while a popup is open"
         case .patchBeforeBaseline:
             "patch arrived before any baseline surface"
         case let .bootIdMismatch(expected, actual):
             "boot id \(actual) does not match \(expected)"
+        case let .unexpectedValidationFailure(message):
+            "unexpected validation failure: \(message)"
         }
     }
 }
 
 public extension FrameData {
+    /// Every invariant: cell count, every cell's hyperlink index, cursor bounds.
+    ///
+    /// The cell scan is deliberately kept here — it belongs to a *surface
+    /// arriving whole*, where the cells are new and untrusted. The patch path uses
+    /// ``validateGrid()`` instead; see its note for why the scan is redundant
+    /// there (issue #50).
     func validate() throws {
-        let expected = Int(width) * Int(height)
-        guard cells.count == expected else {
-            throw SurfaceError.cellCount(expected: expected, actual: cells.count)
-        }
-        for cell in cells {
-            if let index = cell.hyperlink, Int(index) >= hyperlinks.count {
-                throw SurfaceError.hyperlinkIndex(index: index, count: hyperlinks.count)
+        try validateGrid()
+        for index in 0 ..< buffer.rowCount {
+            for cell in buffer.row(index) {
+                if let link = cell.hyperlink, Int(link) >= hyperlinks.count {
+                    throw SurfaceError.hyperlinkIndex(index: link, count: hyperlinks.count)
+                }
             }
+        }
+    }
+
+    /// The part of ``validate()`` a patch can actually disturb, at O(1).
+    ///
+    /// Two invariants, and neither needs the cells:
+    ///
+    ///   count — must be `width * height`. A patch writes into an existing grid,
+    ///           so this can only be *found* wrong here, never made wrong; it is a
+    ///           cheap tripwire on a baseline that was built badly.
+    ///   cursor — bounds, against the frame's own grid.
+    ///
+    /// Hyperlink indices are the expensive one to check (a full scan, 3.1 us at
+    /// 200x50) and are the one thing a patch provably cannot break: ``PaneSurfacePatch``
+    /// carries no hyperlinks and cannot replace the array, so every index in the
+    /// baseline was already checked against the very same array when the surface
+    /// arrived, and every index a patch introduces is checked by
+    /// `validatePatch`. Re-scanning the untouched rows on every patch is what made
+    /// this repeat work expensive.
+    ///
+    /// The cursor is checked here because a *patch* carrying an out-of-bounds
+    /// cursor is a daemon bug. A whole surface is different: see
+    /// ``firstValidationError()``, which admits one instead.
+    func validateGrid() throws {
+        let expected = Int(width) * Int(height)
+        guard buffer.count == expected else {
+            throw SurfaceError.cellCount(expected: expected, actual: buffer.count)
         }
         if let cursor, cursor.visible, cursor.column >= width || cursor.row >= height {
             throw SurfaceError.cursorBounds(
@@ -69,14 +116,62 @@ public extension FrameData {
         }
     }
 
+    /// The first reason an *arriving* surface cannot be adopted, if any.
+    ///
+    /// A non-throwing form, for callers that report the reason rather than
+    /// propagate it — `AppStore.handleSurface` has no `throws` in its path, and
+    /// turning a corrupt frame into a UI message is the whole point of checking.
+    func firstValidationError() -> SurfaceError? {
+        do {
+            try validate()
+            return nil
+        } catch let error as SurfaceError {
+            return error
+        } catch {
+            // Not reachable today — `validate()` only throws `SurfaceError` — and
+            // that is exactly why this must not fall through to "valid". A future
+            // check that throws something else would turn a whole class of
+            // corrupt frames into a silent pass. Fail closed, and fail loudly in
+            // debug/test builds (every test runs with assertions on).
+            assertionFailure("FrameData.validate() threw a non-SurfaceError: \(error)")
+            return .unexpectedValidationFailure(String(describing: error))
+        }
+    }
+
+    /// The cursor, pulled inside the grid.
+    ///
+    /// For a frame whose cursor sits on the pending-wrap column (`column == width`)
+    /// or on the row below the last. That state is legal and common — a terminal
+    /// parks the cursor past the last cell until the next character wraps it — so
+    /// it is not a reason to refuse a frame. ``SurfaceANSIRenderer/resolveHostCursor``
+    /// already clamps what it paints; this only makes the value the rest of the
+    /// client reads (pane cropping, debug output) agree with what is drawn.
+    ///
+    /// Hidden cursors are clamped too: leaving a stale out-of-bounds `column` in
+    /// the store would make a later `visible` flip paint in the wrong place.
+    ///
+    /// Both entry points call this — an arriving surface and an applied patch —
+    /// so "is this cursor legal?" has exactly one answer in the client. A grid
+    /// with no cells at all (`width == 0` or `height == 0`) has no legal cursor
+    /// position, so the cursor is dropped rather than clamped to a negative
+    /// index (which `width - 1` would be on an unsigned type: a trap).
+    mutating func clampCursor() {
+        guard var cursor else { return }
+        guard width > 0, height > 0 else {
+            self.cursor = nil
+            return
+        }
+        let column = min(cursor.column, width - 1)
+        let row = min(cursor.row, height - 1)
+        guard column != cursor.column || row != cursor.row else { return }
+        cursor.column = column
+        cursor.row = row
+        self.cursor = cursor
+    }
+
     /// The cell at a grid position, or `nil` outside the frame.
     subscript(column: Int, row: Int) -> CellData? {
-        guard column >= 0, row >= 0, column < Int(width), row < Int(height) else {
-            return nil
-        }
-        let index = row * Int(width) + column
-        guard index < cells.count else { return nil }
-        return cells[index]
+        buffer.cell(column: column, row: row)
     }
 }
 
@@ -87,38 +182,82 @@ public extension PaneSurfaceFrame {
 
     /// Applies a patch atomically. On any validation failure the receiver is
     /// unchanged.
+    ///
+    /// The cells are written into a copy and published only once every row has
+    /// landed. That used to need a deliberate backup because the write could fail
+    /// halfway; with row-chunked CoW storage the copy is one retain per row, so
+    /// atomicity is cheap. **How cheap is not a number this comment can give**: the
+    /// percentages it used to quote (+6.3% at 50 rows, +11% at 300, +13.6% at 1200)
+    /// never had a probe behind them, and `./Scripts/bench.sh patch`'s
+    /// copy-then-publish vs write-in-place pair now measures no stable difference —
+    /// at tall sizes the direction even reverses. See docs/PERFORMANCE.md, "第五笔",
+    /// for the per-size numbers and why the old ones are not quoted any more.
+    /// What `apply` guarantees concretely: no partial state can exist even for a
+    /// moment, and the untouched rows stay the same buffers as before the call.
     mutating func apply(_ patch: PaneSurfacePatch) throws {
         try validatePatch(patch)
 
+        var next = frame
         for row in patch.rows {
             let start = Int(row.row) * Int(frame.width) + Int(row.column)
-            for (offset, cell) in row.cells.enumerated() {
-                let index = start + offset
-                guard index < frame.cells.count else {
-                    throw SurfaceError.patchRowBounds
-                }
-                frame.cells[index] = cell
+            guard next.buffer.write(row.cells, at: start) else {
+                // Reachable only when `frame.width` was reassigned after the frame
+                // was built: `validatePatch` checks a row against `width`, while
+                // the write places it in the buffer's own chunking, and a count
+                // that still happens to match (`4x4` reassigned to `8x2`) gets
+                // past the grid check. Refusing here is what keeps
+                // `CellBuffer.write(_:at:)`'s "nothing was written" promise
+                // meaningful instead of reporting a partial write as success.
+                throw SurfaceError.patchRowBounds
             }
         }
+        // The same rule as an arriving surface (`AppStore.handleSurface`): a
+        // pending-wrap cursor (`column == width`) is legal and common, so it is
+        // clamped here rather than refused. Clamping rather than validating is
+        // what keeps the two entry points from disagreeing about what a legal
+        // cursor is — the check that used to live at the end of `validatePatch`
+        // is this line, and it says the same thing the arrival side says.
+        next.cursor = patch.cursor
+        next.clampCursor()
+        frame = next
+        // Nothing below can throw, so the receiver is either fully updated or
+        // untouched. `next` costs one retain per row (row-chunked CoW) on top of
+        // the relocation the write itself needed — cheap, but O(height), not a
+        // screen copy and not free.
         for patched in patch.panes {
             if let index = panes.firstIndex(where: { $0.paneId == patched.paneId }) {
                 panes[index] = patched
             }
         }
-        frame.cursor = patch.cursor
         surfaceRevision = patch.surfaceRevision
     }
 
+    /// Whether a patch may be applied, and whether it may be applied *at all*.
+    ///
+    /// The baseline check is ``FrameData/validateGrid()``, not the full
+    /// ``FrameData/validate()``. The full version scans every cell for a hyperlink
+    /// index that a patch cannot invalidate — `PaneSurfacePatch` carries no
+    /// hyperlinks and cannot replace the frame's array, so the untouched rows'
+    /// indices were checked against this very array when the surface arrived
+    /// (`AppStore.handleSurface`). The rows a patch *does* introduce are checked
+    /// below, cell by cell. Rescanning the rest was 3.1 us of every 37.4 us patch
+    /// at 200x50, for a check that could not fail (issue #50).
     private func validatePatch(_ patch: PaneSurfacePatch) throws {
         guard patch.bootId == bootId,
               patch.projectionRevision == projectionRevision,
               patch.baseSurfaceRevision == surfaceRevision,
-              surfaceRevision &+ 1 == patch.surfaceRevision,
-              popup == nil
+              surfaceRevision &+ 1 == patch.surfaceRevision
         else {
             throw SurfaceError.patchIdentity
         }
-        try frame.validate()
+        // A popup is checked separately, and *after* identity, because it is not
+        // a divergence: while a popup owns the screen the daemon composes a
+        // different projection, so every patch is refused — systematically, once
+        // per frame. Reporting that as `patchIdentity` made the store treat a
+        // normal popup as a diverged baseline and re-project the whole surface 60
+        // times a second, which fixes nothing and floods the connection.
+        guard popup == nil else { throw SurfaceError.patchPopupOpen }
+        try frame.validateGrid()
         for row in patch.rows {
             guard row.row < frame.height,
                   Int(row.column) + row.cells.count <= Int(frame.width)
@@ -161,11 +300,12 @@ public extension PaneSurfaceFrame {
                 throw SurfaceError.patchGeometry(paneId: patched.paneId)
             }
         }
-        if let cursor = patch.cursor,
-           cursor.visible,
-           cursor.column >= frame.width || cursor.row >= frame.height {
-            throw SurfaceError.patchCursorBounds
-        }
+        // No cursor-bounds rejection here any more. `apply` clamps the patch's
+        // cursor with the same ``clampCursor()`` the arrival path uses, so
+        // refusing `column == width` here would have meant two opposite verdicts
+        // for one state: adopted when it arrives whole, dropped when it arrives as
+        // a patch. A `CursorState` cannot express a position outside `UInt16`, so
+        // there is nothing left for a bounds check to catch.
     }
 
     /// The pane containing a grid cell, preferring its content area.

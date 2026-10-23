@@ -304,6 +304,9 @@ public final class AppStore {
         disconnectAllEndpoints()
         phase = .idle
         surface = nil
+        // The surface the latch waited for is gone. Left armed, a later `connect()`
+        // would start with a latch nothing can release.
+        clearResyncLatch()
     }
 
     /// Reconnects the selected machine after its connection was lost.
@@ -775,6 +778,11 @@ public final class AppStore {
     @ObservationIgnored var resyncPending = false
     /// Guards `reprojectSurface` against overlapping toggles.
     @ObservationIgnored var reprojectInFlight = false
+    /// Backing store for ``surfaceResyncLatched`` and its counters.
+    ///
+    /// One stored property rather than three: `AppStore` is at swiftlint's body
+    /// limit, and the latch's own state is described in `AppStore+SurfaceResync`.
+    @ObservationIgnored var surfaceResyncState = SurfaceResyncState()
 }
 
 /// Coalescing state for a divider drag.

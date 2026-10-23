@@ -261,6 +261,14 @@ struct PaneLayoutView: View {
             .task(id: store.surface?.surfaceRevision) {
                 // One line per surface change, not per frame: this is the data
                 // needed to tell a sizing bug from a rendering one.
+                //
+                // Note this *does* re-run for a patch the store refused and whose
+                // frame number it claimed anyway (issue #50 review) — the revision
+                // moved, the cells did not. That is one extra log line per refused
+                // frame while a systematic refusal lasts, which is why the line is
+                // kept to a single `kraalLog` call and nothing is measured here.
+                // Do not turn this into per-frame work on the strength of "the
+                // surface changed".
                 let cell = SurfaceGeometry.points(
                     for: store.terminalCellSize,
                     scale: displayScale

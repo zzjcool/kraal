@@ -243,9 +243,9 @@ public extension AppStore {
         for endpoint in next where !endpoint.enabled {
             disconnectEndpoint(endpoint)
         }
+        clearResyncLatch()
         endpoints = next
-        // The selected machine may have been removed entirely; fall back to the
-        // local one rather than pointing at a row that no longer exists.
+        // The selected machine may be gone; fall back rather than dangle.
         if let active = activeEndpointID, !kept.contains(active) {
             activeEndpointID = .local
             target = .local
@@ -659,11 +659,11 @@ public extension AppStore {
         activeEndpointID = endpoint.id
 
         // Adopt what the incoming machine already has. Its connection has been
-        // receiving snapshots all along, so this is usually instant — the point
-        // of the whole design.
+        // receiving snapshots all along, so this is usually instant (by design).
         snapshot = endpoint.snapshot ?? snapshot
         surface = nil
         surfaceIsStale = false
+        clearResyncLatch()
         phase = endpoint.status == .online ? .live : .connecting
         welcome = endpoint.welcome ?? welcome
 

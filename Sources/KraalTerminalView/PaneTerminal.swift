@@ -169,7 +169,7 @@ public final class PaneTerminalModel {
         if !projectionChanged, geometry.contentRevision == lastRevision,
            let previous = frameGrid,
            previous.width == frame.width, previous.height == frame.height,
-           previous.cells != frame.cells {
+           previous.buffer != frame.buffer {
             kraalLog("scroll repaint: pane=\(paneId) rev=\(geometry.contentRevision) "
                 + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
                 + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
@@ -411,6 +411,16 @@ public final class PaneTerminalModel {
     /// The terminal only ever knows about its own pane, so the surrounding
     /// borders and sibling panes must not be fed to it — otherwise a patch in a
     /// neighbouring pane would repaint ours.
+    ///
+    /// Rows are handed to the frame already chunked (`CellBuffer(rows:width:)`)
+    /// rather than flattened into one array and re-split. The flatten-then-chunk
+    /// shape copied the pane twice — once into `[CellData]`, once per row by
+    /// `Array(slice)` inside `CellBuffer.init(_:width:)`, which does not share
+    /// storage with the slice it comes from. The storage step alone is what that
+    /// removes, and it is the reproducible part: 200x50, 37.5 us -> 0.033 us
+    /// (docs/PERFORMANCE.md, "`paneFrame`：本次改动自己制造、又自己还回去的那笔
+    /// 存储拷贝"). The whole-path timings this comment used to quote could not be
+    /// reproduced independently and were dropped — do not reintroduce them.
     private func paneFrame(
         from surface: PaneSurfaceFrame,
         geometry: PaneSurfacePane
@@ -418,19 +428,30 @@ public final class PaneTerminalModel {
         let area = geometry.innerRect
         let width = Int(area.width)
         let height = Int(area.height)
-        var cells: [CellData] = []
-        cells.reserveCapacity(width * height)
+        let frameWidth = Int(surface.frame.width)
+        var rows: [[CellData]] = []
+        rows.reserveCapacity(height)
 
+        // Row at a time: a row of the surface is one array, so this is one retain
+        // per row instead of one per cell. The bounds check is per cell because a
+        // malformed frame's last row can be shorter than the grid says; a cell the
+        // surface does not cover is filled blank, exactly as `surface.frame[c, r]`
+        // returning nil used to do.
         for row in 0 ..< height {
+            let sourceRow = Int(area.originY) + row
+            let rowCells = surface.frame.buffer.row(sourceRow)
+            let available = rowCells.count
+            var cropped: [CellData] = []
+            cropped.reserveCapacity(width)
             for column in 0 ..< width {
                 let sourceColumn = Int(area.originX) + column
-                let sourceRow = Int(area.originY) + row
-                if let cell = surface.frame[sourceColumn, sourceRow] {
-                    cells.append(cell)
+                if sourceColumn < frameWidth, sourceColumn < available {
+                    cropped.append(rowCells[rowCells.startIndex + sourceColumn])
                 } else {
-                    cells.append(.blank)
+                    cropped.append(.blank)
                 }
             }
+            rows.append(cropped)
         }
 
         var cursor: CursorState?
@@ -448,7 +469,7 @@ public final class PaneTerminalModel {
         }
 
         return FrameData(
-            cells: cells,
+            buffer: CellBuffer(rows: rows, width: width),
             width: UInt16(width),
             height: UInt16(height),
             cursor: cursor,

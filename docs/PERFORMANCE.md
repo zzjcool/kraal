@@ -89,10 +89,12 @@ no-op diff      0.33 us（错，共享存储）   →   86.9 us（对，真实�
 探针，不是在测风险）：
 
 ```swift
-let sameBuffer = first.cells.withUnsafeBufferPointer { a in
-    second.cells.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
-}
+let sameBuffer = first.buffer.sharesRow(0, with: second.buffer)
 ```
+
+粒度是**行**而不是整帧，因为 #50 之后 cell 存在一行一个 CoW 数组里（`CellBuffer`）。
+`sharesRow` 就是为此存在的：`Array` 的相等比较会在两侧共享同一块 buffer 时短路，
+而逐格断言看不到这件事。
 
 注入 `first: frame, second: frame` 会让它打印 `YES -> BROKEN` 并以退出码 1 结束
 （已 A/B 验证）。
@@ -283,14 +285,14 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 - `Scripts/gui.sh:70` 与 `Scripts/agent-vm.sh:203` **硬编码 Debug 路径**，不认
   `-c release` —— 想用 release 产物跑 GUI 用例需要自己改，别以为传 `-c release` 就行
 
-## 附：本仓库的性能现状（2026-10-22 实测）
+## 附：本仓库的性能现状（2026-10-23 实测）
 
-已确认的两个热点，各有独立 issue：
+已确认的热点，各有独立 issue：
 
 | 热点 | 位置 | 200×50 成本 | issue |
 |---|---|---|---|
 | ~~`StyleCode.encode` 每格建 `[String]` + `joined`~~ | `SurfaceANSIRenderer.swift:222` | ~~~1230 us/帧（整屏变化时）~~ → 统一样式 209 us（**已修**） | #49 |
-| patch 应用时整屏 CoW 深拷贝 | `AppStore+Events.swift:146` | 37.4 us/patch（4 pane = 54% 预算） | #50 |
+| ~~patch 应用时整屏 CoW 深拷贝~~ | ~~`AppStore+Events.swift:146`~~ → `CellBuffer.swift` | ~~37.4 us/patch（4 pane = 54% 预算）~~ → **1.4 us/patch（2%）**；残留与高度线性（~10 ns/行），**不是 O(1)**（**已修**） | #50 |
 | 每键多发一条 `pane.focus` | `KraalMacMain.swift:97` | 每键 0.036 → 0.248 ms（7×） | #55 |
 | 日志格式化在 enabled 检查前求值 | `KraalLog.swift:108` | 每键 0.96 us（关闭时照付） | #56 |
 | `DateFormatter` 每条日志新建 | `KraalLog.swift:102` | 32.3 us（共享版 0.67 us） | #56 |
@@ -300,24 +302,311 @@ sleep，不是解码。用它测编解码吞吐会得出「大屏比小屏快」
 
 | 观察 | 位置 | 实测成本 |
 |---|---|---|
-| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:100` | 19.3 us（半宽）/ 30.8 us（全宽），200×50 |
-| `render` 每帧新建 `Data()` 无 `reserveCapacity` | `SurfaceANSIRenderer.swift:57-58` | 未单独测（整屏 300×80 输出约 90 KB，会有多次扩容） |
-| `linkURI` 每个 cell 都调用，带链接时每次重新 sanitize 整个 URI | `SurfaceANSIRenderer.swift:217,261-263` | 未单独测（同一行同一 URI 出现 N 次就 sanitize N 次） |
-| `changedRows` 无单元格级 diff，一行变一格整行重写 | `SurfaceANSIRenderer.swift:164-178` | 已含在「1 格变化」29.7-257 us 里 |
+| `paneFrame` 在 revision 判据**之前**无条件逐格拷贝 | `PaneTerminal.swift:130` | 见下：#50 第一版让它多付一次逐行拷贝，现已改为直接交行。存储单步可复现（37.5 -> 0.033 us）；整条路径的耗时未独立复现，见下节 |
+| `render` 每帧新建 `Data()` 无 `reserveCapacity` | `SurfaceANSIRenderer.swift:58` | 未单独测（整屏 300×80 输出约 90 KB，会有多次扩容） |
+| `linkURI` 每个 cell 都调用，带链接时每次重新 sanitize 整个 URI | `SurfaceANSIRenderer.swift:297` | 未单独测（同一行同一 URI 出现 N 次就 sanitize N 次） |
+| `changedRows` 无单元格级 diff，一行变一格整行重写 | `SurfaceANSIRenderer.swift:164` | 已含在「1 格变化」29.7-257 us 里 |
+
+#### `paneFrame`：本次改动自己制造、又自己还回去的那笔存储拷贝
+
+`paneFrame` 的形态没变（逐格裁一个 pane），变的是「怎么交给 `FrameData`」。
+
+**只有存储那一步可以当作结论引用**（同一个进程内可复现）：
+
+```
+200×50 裁剪结果交给 FrameData，只算存储这一步（release）
+width 200   flat→chunk 37.5 us    rows→init 0.033 us
+```
+
+`Array(slice)` 不与源共享存储 —— 这是 `CellBuffer(rows:width:)` 存在的唯一理由，
+也是这次 M4 的核心证据。
+
+> **已删除的归因（未独立复现，不要引用）**
+>
+> 本节早先有一张 A/B/C 三行表（父提交逐格下标 / 按行读进 flat 再切块 / 按行读进
+> `[[CellData]]`），声称 A 是 96.1–102.8 us、C 是 62.3–65.1 us，并把「C 相对 A 的
+> −35%」归因于「A 走逐格下标而 C 走 `ArraySlice`」。
+>
+> 审查员用同形态探针独立复现失败：A 组量到 51.7 / 25.9 us（不是 96.1 / 49.2），
+> 逐格下标 vs 按行读只差 1.5–3.5 us，A→C 的差价是 ~4%（不是 −35%）。数字差近 2 倍，
+> 归因方向也不成立。
+>
+> 结论：**逐格下标不是这次改动的收益来源**，别引用那张表。`paneFrame` 整体时间的
+> 可信范围以 `Scripts/bench.sh` 复测为准；这里只保留可复现的存储单步。
 
 健康、不需要动的部分（同样实测）：
 
 | 路径 | 成本 |
 |---|---|
 | 构造一个 200×50 解码帧 | 57 us |
-| `FrameData.validate()` | 3.1 us |
+| `FrameData.validate()`（整帧到达时一次，不再每 patch 一次） | 3.1 us |
 | retain 一个帧（CoW 共享） | 0.01 us |
-| 行级 diff 检测（10000 格） | 61 us |
+| 行级 diff 检测（10000 格，行未改动时 O(1)） | 61 us |
 | 解码一个按键（`TerminalInputDecoder`） | 0.115 us |
 | `inputDecoders` 字典取存一个 decoder | 0.038 us |
 | `Task { }` 创建 + hop | 5.8 us |
 
 > 记下健康数据同样重要：下次有人怀疑这些地方慢时，不必重测。
+
+### #50 修掉之后的数字（2026-10-23 实测）
+
+### 症状与分项
+
+patch 只改 1 格，成本却只跟 pane 面积有关，与 patch 大小无关：
+
+| pane 尺寸 | 修前每 patch | 60fps × 4 panes |
+|---|---|---|
+| 80×24 | 10.8 us | 2.60 ms/帧（16%） |
+| 200×50 | 40.3 us | 9.66 ms/帧（58%） |
+| 300×80 | 95.3 us | 22.9 ms/帧（137%，掉帧） |
+
+分项（200×50）：整屏 CoW 深拷贝 ~38 us；`frame.validate()` 全量扫描 ~3 us。
+
+### 第一件必须先排掉的事：`surface?.apply(patch)` 并不能修它
+
+issue 建议「用 inout 直接改 store 的 surface」。**这条不成立**，实测过：
+
+```
+in-place write, sole owner                       0.001 us
+in-place write, second ref alive (contents read) 0.004 us   ← 慢的不是 write，是写的那一刻的 CoW
+copy-mutate-assign, copy held opaquely           → buffer moved: true
+```
+
+指针比对（`withUnsafeBufferPointer` 的 `baseAddress`）证明：只要还有第二个引用，
+**原地写同样会搬迁整块 buffer**。而 patch 到达的那一刻至少有三个引用活着 ——
+
+- store 的 `surface`
+- 每个 `GhosttyPaneView` 拿到的 `PaneSurfaceFrame`
+- `SurfaceANSIRenderer.previous`
+- `PaneTerminalModel.frameGrid`
+
+所以复制不是 copy-assign 造成的，是**值的存储形态**造成的。只有让存储本身廉价可复制，
+才能消掉这笔钱。
+
+### 为什么不是 `final class CellBuffer`（issue 的另一条建议）
+
+引用类型让复制免费，但也让语义变了：patch 会**写穿**到 renderer 已经画过的
+`previous` 里，`changedRows` 于是拿新内容跟它自己比，判定「没变化」，不重绘 ——
+屏幕停在旧画面上，任何地方都不报错。
+
+这条不是推理，是有测试钉住的：`PatchCopyOnWriteTests.publishedCopyIsIndependent`
+在注入「行共享一个 class」后立刻变红（本轮的 A/B 注入之一）。
+
+**一条更正**：第一版这里还写了「`@Observable` 那一侧同理，没有属性被写，SwiftUI 不会
+invalidation」。这条**不成立**，实测反驳了它：嵌套 class + 原地 `surface?.apply(...)`
+**会**触发 observation —— 访问器走的是被追踪属性的 `_modify`，`willSet`/`didSet` 照常
+发。所以拒掉 `final class` 的理由只有上面那条写穿，写穿一条就足够了。`StorePatchTests`
+里那条 `withObservationTracking` 用例保留，但注释已改成「钉住 copy-assign 这个实现
+细节」，**不再**声称它能抓 class 方案。
+
+### 实际修法
+
+`CellBuffer`（`Sources/KraalProtocol/CellBuffer.swift`）：**一行一个 CoW 数组**。
+
+- 复制 → 共享未改动的行（O(1) retain），只有被 patch 的那一行真的复制；
+- 值语义保留，diff 与 `@Observable` 都不受影响；
+- 分块是内部实现，相等性比较 cell 而非布局。
+
+`FrameData.cells: [CellData]` 变成 `FrameData.buffer: CellBuffer`，且 `flatCells`
+**故意不给 setter** —— 这样编译器会强制每个调用点显式面对存储形态，不会有人
+顺手又写回一个整屏数组写。
+
+### 修后实测（同一个探针源码，编译在父提交与本提交上各跑一次）
+
+探针 `Scripts/bench.sh patch` 只走**公开 wire API**（`ServerMessageDecoder` +
+`apply`），所以同一份源码能编在两棵树上，before/after 才是可比的。
+
+| pane | 修前 | 修后 | 倍数 |
+|---|---|---|---|
+| 80×24，1 格 | 8.1–10.8 us | 0.72–1.09 us | **~11×** |
+| 200×50，1 格 | 40.3–40.4 us | 1.42–1.52 us | **~27×** |
+| 300×80，1 格 | 95.3–97.9 us | 1.76–2.04 us | **~52×** |
+| 200×50，整行（200 格） | 40.2–41.5 us | 2.29–2.37 us | **~17×** |
+
+折算成帧预算（60fps × 4 panes，200×50）：**9.66 ms → 0.37 ms**，占 16.7 ms 的
+58% → 2%。
+
+**面积相关性消失了**：修前 300×80 是 80×24 的 12 倍，修后只差 2 倍（那 2 倍是
+真正的写入量，不是整屏复制）。
+
+### 残留成本：与 pane **高度**线性，不是 O(1)
+
+第一版文档把这次修法写成「写入量 = 被 patch 的行」，那是错的。外层 `rows: [[CellData]]`
+本身也是一个 CoW 数组：写任意一行，都要把这 `height` 个行句柄整体搬迁一次。宽度维度
+确实消掉了，高度维度**没有**。
+
+实测（宽固定 200，只写 1 格，第二个引用活着，即每一轮都必须搬迁外层数组；
+release，每个尺寸跑 5 次取最小值）：
+
+| pane | 每 patch（最好值） | 每行 |
+|---|---|---|
+| 200×10 | 0.83 us | 83 ns/行 |
+| 200×100 | 1.63–1.68 us | 16 ns/行 |
+| 200×300 | 3.84–3.88 us | 13 ns/行 |
+| 200×600 | 6.90 us | 11.5 ns/行 |
+| 200×1200 | 12.3–13.0 us | 10.3 ns/行 |
+
+**斜率 ≈ 10 ns/行**（(12.9 − 0.83) us / (1200 − 10) 行 = 10.1 ns/行），外加约 0.7 us
+的固定成本（一次 buffer 复制 + 一次回读）。行数小的时候固定项占主导，所以前两行看着
+「每行」很贵，那是分母的错觉。
+
+> 审查员在忠实模型上量到的是 ~6 ns/行；我这份是 ~10 ns/行。方向一致（线性、与高度
+> 成正比），斜率差 1.7 倍，原因是模型不同（我这版含一次 `copy = stored` 与两次回读，
+> 更接近真实 patch 路径）。**两个数都写在这儿，别把其中一个当定值引用。**
+
+300×80 时 1.7 us/patch，占 16.7 ms 帧预算的 2%，**可接受，但不是 O(1)**。
+
+为什么不再往下修：唯一的办法是给外层数组再套一层 box，让搬迁退化成一次 retain。
+代价是所有读路径（渲染器逐行 diff、pane 裁剪、`cell(column:row:)`）都要多一次间接寻址
+—— 而这条路径已经是 2% 预算。收益 ~1 us、风险是给每次读加一层间接，不做。
+
+### 第二笔：`validate()` 不再每 patch 全量扫
+
+`PaneSurfaceFrame.apply` → `validatePatch` 过去调 `frame.validate()`，会遍历全部
+cell 检查 hyperlink 索引。而 `PaneSurfacePatch` **不携带 hyperlinks、也无法替换
+hyperlinks 数组**，所以它不可能让未被触碰的行的索引失效。
+
+改成 `validateGrid()`（O(1)：cell 数 + cursor 边界），patch 自己写入的行仍逐格校验。
+全量扫描搬到它本来该在的地方 —— **整帧到达时**（`AppStore.handleSurface`）。
+
+这里有个必须说清的坑：搬之前查过，`FrameData.validate()` 唯一的调用点就是 patch
+路径 —— 也就是说那次「每 patch 全量扫描」也是**唯一**一次校验，根本没有别处在校验
+到达的 surface。所以这次不是「删掉一个检查」，而是「把检查从每帧一次搬到每 surface
+一次」，覆盖率不变、频率降两个数量级。`AppStore.handleSurface` 现在会拒绝校验失败
+的整帧并给出原因（`surface rejected: ...`），`arrivalRejectsDanglingLink` 盯着这条。
+
+### 第三笔：patch 被拒后的恢复路径
+
+`handleSurfacePatch` 的注释一直写着「ask for a fresh surface」，但代码只写了
+`lastError`。baseline 一旦分叉，后续每个 patch 都会被拒，屏幕永久停在分叉帧上，
+而 tab bar 只是多一个小图标。现在真的会 `resyncSurface()`（有 `reprojectSurface`
+就走它，没有就重握手），并用 `surfaceResyncRequests` 暴露给测试。
+
+**这一笔补过一次（审查发现）**：第一版没有 latch。`resyncInFlight` 在**请求完成**
+时就清掉，而刷新后的 surface 要更晚才到 —— 分叉期间每个被拒的 patch 都会
+再发一轮两条命令；旧 daemon 那条分支更糟，没有 in-flight 状态，`resetBackoff: true`
+每次把 `reconnectAttempt` 归零并断开端点，等于每秒重连一次、永不停止。
+`resyncInFlight` 因窗口被 latch 严格包含而删掉（留着它反而会让
+第二个 guard 吞掉更晚的合法请求）。
+
+**latch 的复位点（2026-10-23 收尾修正；7 个 `clearResyncLatch()` + 2 个
+`releaseResyncLatch(_:)` 调用点）**。原文写的是「在**新的 surface
+被采纳**时才复位」，那是不完整的：一次 resync 的答案经常根本走不到「被采纳」这一步。
+现在的分类与复位点：
+
+| 事件 | 复位方式 | 理由 |
+| --- | --- | --- |
+| `handleSurface` 采纳了新 surface（`AppStore+Events.swift:244`） | `clearResyncLatch()` | 问题已解决，预算归零 |
+| `handleSurface` **拒绝了**到达帧（`:234`） | `clearResyncLatch()` | 答案到了但不可用；不带它永远无法再问 |
+| `handleSurface` 两条早退（`:169` / `:182`，经 `noteDroppedResyncAnswer`） | `releaseResyncLatch()` | 答案**被丢弃**：这是 resync 的常规落点，不是异常 |
+| `handleSnapshot` 里 revision 前进 / focused tab 变了 / boot 变了（`:119` / `:138`） | `release` / `clear` | 投影被重编号（`client_shell.surface.set` 的回复先于 surface 到达）；新 boot 则是旧语境彻底没了 |
+| `handleWelcome`（`:29`，新连接） | `clearResyncLatch()` | latch 属于旧连接 |
+| `selectEndpoint`（`AppStore+Endpoints.swift:589`）/ `rebuildEndpoints`（`:236`）/ `disconnect`（`AppStore.swift:257`） | `clearResyncLatch()` | 那条连接/那台机器的语境没了 |
+| 请求根本没发出去（`:480`，`reprojectSurface` 返回 false，被在飞的 toggle 吞掉） | `clearResyncLatch()` | 没问过，就没有问题待了结 |
+
+`releaseResyncLatch` 与 `clearResyncLatch` 是**两个**函数，不是笔误：前者用于「证据较弱」
+的路径，受 `resyncLatchReleaseLimit`（2）约束 —— 因为 resync 在飞的时候客户端停在投影
+P 而 daemon 在推 P+1，**每一帧**都是「投影动了」的证据，无上限地释放就是把 latch 卡死
+换成「每帧一次 resync」（H1 的反向形态）。后者只用于「问题已了结」的路径，预算归零。
+
+### H1（收尾）：拒绝也必须认领帧号
+
+`Surface.swift:232` 的 `surfaceRevision = patch.surfaceRevision` 只在**成功**路径，所以
+任何被拒的 patch 都让客户端 revision 落后一帧，而 daemon 照常提交该帧。下一帧的
+`baseSurfaceRevision` 就是 N+1，于是 identity guard 先命中 `patchIdentity`（可恢复类），
+发出一次 resync —— 「系统性拒绝不 resync」于是变成「拒绝/分叉交替」，每两帧翻一次。
+
+现在不可恢复分支在拒掉 cells 的同时**认领帧号**（不动 cells）：daemon 的 baseline 确实
+前进了，客户端是「决定不跟这一帧的 cells」，而不是「落后了」。
+
+**这条是「防未来 / 防其它 daemon 配置」，不是「修掉了一个每帧 flood」。** 对 herdr 0.9.5，
+retained-patch 路径在 popup 打开时直接 fallback 到整帧渲染，daemon 根本不在 popup 期间发
+patch；本客户端的 optional codecs 也默认关。所以「一次 popup 一分钟 = 3600 轮命令」是
+**推演，未在真实 daemon 上复现**（仓库规矩：不把推测写成实测）。被修的是一个真实存在于
+分类逻辑里的不一致，只是它的触发条件在当前 daemon 上够不到。
+
+顺带纠正一条旧说法：「拒绝即无副作用」不再成立（revision 会前进）。已复核三处受 revision
+影响的决策，见 `handleSurfacePatch` 里那段注释（它们不在这里重复，因为写得比这张表长）。
+
+还有一条代价没写进那张表：认领帧号后，**非 popup 类拒绝失去了唯一的自动恢复出口**——
+它们现在既不重绘也不 resync，只写 `lastError`。当前不可达（herdr 0.9.5 的 retained 路径
+在几何/hyperlink 变化时直接 fallback 整帧），若将来 daemon 行为变了，要重新评估这条。
+
+### 第四笔（审查修正）：到达帧校验差点变成「屏幕定格」
+
+第一版把 `frame.validate()` 搬到 `AppStore.handleSurface`，然后对任何校验失败
+`return`。`validateGrid()` 会把 **cursor 越界**判成失败，而终端的 pending-wrap 状态
+（`cursor.column == width`）是合法且常见的 —— 于是 daemon 一旦发这种帧，`surface`
+永远不被采纳（启动时是 nil，也就是黑屏；否则永远停在上一个 tab 的画面），
+唯一症状是 tab bar 上一个图标。
+
+现在的规则分两类，不是一刀切：
+
+| 检查 | 到达的整帧 | 为什么 |
+|---|---|---|
+| cell 数 != `width * height` | **拒绝** | 真的坏了：第一行之后每一行都错位 |
+| cursor 越界 | **clamp 后采纳** | pending-wrap 合法；`SurfaceANSIRenderer.resolveHostCursor` 本来就在 clamp 它画的那份，所以下游接得住 |
+
+`arrivalRejectsDanglingLink` / `invalidSurfaceRejected` / `pendingWrapCursorAdopted`
+三条钉住这三格（`cellCountStillRefused` 已被 `invalidSurfaceRejected` 覆盖，不再单列）。
+
+A/B：把 clamp 去掉，`pendingWrapCursorAdopted` 立刻变红（4 条断言全挂）；装回去就绿。
+
+### 第五笔（审查修正）：`write(_:at:)` 的兜底分支部分写入却报成功
+
+`CellBuffer.write` 原来在「这一串放不进任何一行」时退化成逐格 `write`，而逐格 `write`
+越界时**静默返回**，循环结束照样 `return true` —— 部分写入、报成功。
+触发条件是 `frame.width` 与 buffer 分块不一致（`width` 是 `public var`），而
+「`validate()` 会拒绝这种帧」的说法**不成立**：4×4（16 格）改成 8×2 后 count 仍是 16，
+`validateGrid` 通过，之后行索引全部错位。
+
+两处一起改：兜底分支改成 `return false`；`PaneSurfaceFrame.apply` 先写进局部
+`var next`，全部成功后才 `frame = next`。
+
+**「原子性免费」是过度声明，但这组百分比也一并废了（不可复现）。**
+
+曾写过：原子版（`var next = frame` 写副本再发布）相对原地写 200×50 多 +0.069 us
+（6.3%）、200×300 +0.41 us（11%）、200×1200 +1.69 us（13.6%），并归因于「原子版让
+外层 `rows` 数组多搬迁一次」。
+
+**这组数字没有探针，而且已复现不出来。** 2026-10-23 收尾时在 `bench.sh patch` 段加了
+一条对照（copy-then-publish vs write-in-place，只算存储那一步，两臂都留一个活引用
+防止优化器删掉复制），三次运行的结果是：
+
+| 尺寸 | copy-then-publish | write-in-place | 差值 |
+|---|---|---|---|
+| 80×24 | 0.55–0.58 us | 0.53–0.57 us | 噪声以内 |
+| 200×50 | 1.30–1.47 us | 1.25–1.35 us | 0–0.2 us（≈0–15%，但方向不稳定） |
+| 300×80 | 1.46–1.58 us | 1.49–1.56 us | 噪声以内 |
+| 200×300 | 3.90–4.11 us | 4.24–4.44 us | **反向**（原地写更慢） |
+| 200×1200 | 12.4–14.5 us | 12.8–15.3 us | **反向**（原地写更慢） |
+
+结论只能写成定性的：**原子版没有可稳定测出的额外代价，也没有「随高度增长」的趋势**。
+原来那组「+6.3% / +11% / +13.6%」不再引用——它们在对照探针里复现不出来，且高行数处
+方向是反的。机制上也可以解释：`var next = frame` 只多一次外层数组值的 retain，而
+`write(_:at:)` 本来就要为被改的那一行做一次 CoW 复制，两者不是同一量级。
+
+要重新提这个问题，先跑 `./Scripts/bench.sh patch` 看最后那段对照，不要引用历史数字。
+
+A/B 两次注入：恢复逐格兜底 → 测试红（「期望抛错但没抛」+「buffer 变了」）；
+`apply` 改回非原子 → 也红（「部分写入留在 buffer 里」）。
+
+### 本轮踩到的探针坑（补进 §1 / §1b）
+
+1. **第二次报 0.00 us**：第一版 in-place 探针里那个「第二个引用」只被读了一次
+   `.count`，优化器证明它的内容不可观测，把整块复制删了。改成每轮读它的内容后
+   才量出真值。凡是「共享 vs 不共享」的对比，都要确认两边的内容真的被消费。
+2. **合成循环不是产品代码**：`bench.sh` 原来的 patch 段手写
+   `copy.cells[0] = ...; stored = copy`，形态对但不是被修的那行代码，改完它不会变。
+   现在走解码 + `apply`。
+3. **A/B 必须同一份源码**：所以 patch 段刻意只用公开 API。render 段做不到
+   （要直接问存储），因此前后两棵树各自跑自己的 render 段，不可比 —— 这也写进了
+   脚本注释。
+4. **`--json` 用 awk 过滤 stdout，只认得 `$NF == "fps"`**：render 段每行以 `fps` 结尾，
+   patch 段以 `(2% of 16.7ms)` 结尾 —— 于是 `./Scripts/bench.sh patch --json`
+   只吐 3 条 `validate()` 行，**本次核心指标 1.4 us 一条都读不到**，而人眼模式看着
+   完全正常。现在 JSON 由探针自己发（`KRAAL_BENCH_JSON=1`，label 和字段都在手上），
+   不再靠列位置猜。A/B：把 awk 过滤器装回去，`patch --json` 又只剩 3 行。
 
 ### 端到端：真实 daemon 上量到的往返
 

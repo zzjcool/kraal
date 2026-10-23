@@ -454,7 +454,7 @@ struct KraalCLI {
     static func printSurface(_ surface: PaneSurfaceFrame, allRows: Bool) {
         print("")
         print("surface \(surface.frame.width)×\(surface.frame.height)"
-            + "  cells \(surface.frame.cells.count)"
+            + "  cells \(surface.frame.buffer.count)"
             + "  revision \(surface.surfaceRevision)")
         for pane in surface.panes {
             let inner = pane.innerRect

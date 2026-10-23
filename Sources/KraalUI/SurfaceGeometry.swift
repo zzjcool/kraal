@@ -162,7 +162,11 @@ public enum SurfaceGeometry {
         guard previous.width == current.width, previous.height == current.height else {
             return true
         }
-        return previous.cells != current.cells
+        // `buffer` equality, not `flatCells`: the row-chunked storage compares a
+        // row whose buffer is shared in O(1) and only scans the rows that differ,
+        // so the common case (one row changed) stays cheap. Flattening first would
+        // allocate the whole screen on every call (issue #50).
+        return previous.buffer != current.buffer
     }
 
     /// Whether a frame needs the screen erased before it can be painted.

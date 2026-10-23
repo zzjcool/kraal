@@ -225,7 +225,7 @@ struct ANSICursorAndHyperlinkTests {
         _ = renderer.render(first)
 
         var changed = first
-        changed.cells[5] = CellData(
+        changed.buffer[5] = CellData(
             symbol: "z",
             foreground: 0,
             background: 0,
