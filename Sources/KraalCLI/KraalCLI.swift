@@ -185,12 +185,22 @@ func resolveTarget(_ options: Options) throws -> HerdrTarget {
         return .unixSocket(path: path)
     }
     if let host = options.sshHost {
-        return .sshShell(
-            user: options.sshUser,
-            host: host,
-            port: options.sshPort,
-            session: options.session
-        )
+        // Goes through `HerdrDiscovery` rather than building `.sshShell` here, so
+        // the session-name rule is the same one the app enforces. Building it
+        // inline is what let issue #70 reproduce on the command line:
+        //
+        //     kraal --ssh admin@127.0.0.1 --session '../escape' probe
+        //     connect failed: the connection closed before the handshake finished
+        //
+        // It read as a network problem; the name was simply never checked here.
+        return try HerdrDiscovery.resolve(ConnectionSettings(
+            name: "ssh",
+            transport: .ssh,
+            session: options.session,
+            sshHost: host,
+            sshUser: options.sshUser,
+            sshPort: options.sshPort
+        ))
     }
     // Honours `HERDR_CLIENT_SOCKET_PATH` / `HERDR_SOCKET_PATH`, so a probe can be
     // pointed at a sandbox without typing the path every time.

@@ -132,7 +132,18 @@ public enum HerdrDiscovery {
             )
 
         case .ssh:
+            // The same rule as the local branch, and for a sharper reason: upstream
+            // `herdr --session <name>` *creates* a session that does not exist, so an
+            // unchecked name is not rejected remotely — it silently leaves a fresh
+            // daemon behind and connects to it. A typo then looks exactly like
+            // "wrong machine": an empty workspace with no error (issue #70).
+            //
+            // Only the empty case is defaulted; `default` is itself a valid name, so
+            // the "session field left blank" path is unaffected.
             let session = settings.session.isEmpty ? defaultSession : settings.session
+            guard isValidSessionName(session) else {
+                throw DiscoveryError.invalidSessionName(session)
+            }
             return .sshShell(
                 user: settings.sshUser,
                 host: settings.sshHost,
