@@ -53,10 +53,16 @@ JSON=0
 for arg in "$@"; do [ "$arg" = "--json" ] && JSON=1; done
 
 BUILD="$ROOT/.build/release"
-[ -f "$BUILD/libKraalProtocol.a" ] || {
-    echo "no release build; building (needed for honest numbers)..." >&2
+# Rebuild when the library is missing **or older than the sources it was built
+# from**. The missing-only check meant a stale release library was silently
+# reused: adding a type or changing a signature made the probe fail to compile
+# (or worse, link against old code) while the script reported nothing but a
+# compile error from the probe itself.
+if [ ! -f "$BUILD/libKraalProtocol.a" ] \
+    || [ -n "$(find "$ROOT/Sources" -name '*.swift' -newer "$BUILD/libKraalProtocol.a" -print -quit)" ]; then
+    echo "release build is missing or stale; building (needed for honest numbers)..." >&2
     $SWIFT build -c release >&2 || exit 1
-}
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -548,6 +554,83 @@ if mode == "all" || mode == "patch" {
             emit("\(label) \(atomic ? "copy-then-publish" : "write-in-place")",
                  us: micros, fps: 1_000_000.0 / micros)
         }
+    }
+}
+
+// Graphics encoding cost (issue #105).
+//
+// The encoder runs on **every** frame a pane paints, so its steady-state cost has
+// to be negligible next to the cell render. It diffs against what it already sent,
+// which means the two cases that matter are far apart:
+//
+//   * first frame  — upload the image (base64 of the whole asset) + place it
+//   * cache hit    — look up the image and the placement, emit nothing
+//
+// Measuring only the first would overstate the cost, and only the second would
+// hide the upload entirely. Both are reported.
+//
+// A 200x50 pane with a 64x64 RGBA image is the shape a real pane has: the image is
+// small relative to the screen, but its base64 form is 4/3 larger than its bytes.
+if mode == "all" || mode == "graphics" {
+    header("")
+    header("=== graphics: SurfaceGraphicsScene -> kitty bytes (GraphicsEncoder) ===")
+    let imageWidth: UInt32 = 64
+    let imageHeight: UInt32 = 64
+    // RGBA, so 4 bytes per pixel. Three images, so the cache has something to hold.
+    let pixelBytes = 4
+    let dataLen = UInt64(imageWidth * imageHeight * UInt32(pixelBytes))
+    let graphicsKey = SurfaceGraphicsAssetKey(
+        source: .terminal(target: .pane(paneId: "w1:p1"), imageId: 1),
+        imageWidth: imageWidth,
+        imageHeight: imageHeight,
+        format: .rgba,
+        dataLen: dataLen,
+        dataFingerprint: 0xFEED_FACE
+    )
+    let graphicsAsset = SurfaceGraphicsAsset(
+        key: graphicsKey,
+        data: Data(count: Int(dataLen))
+    )
+    let graphicsPlacement = SurfaceGraphicsPlacement(
+        asset: graphicsKey,
+        logicalPlacementId: 1,
+        cellX: 2,
+        cellY: 2,
+        cols: 8,
+        rows: 4,
+        sourceX: 0,
+        sourceY: 0,
+        sourceWidth: 0,
+        sourceHeight: 0,
+        xOffset: 0,
+        yOffset: 0,
+        layer: 0,
+        scrollbackOffset: 0
+    )
+    let graphicsScene = SurfaceGraphicsScene(
+        assets: [graphicsAsset],
+        placements: [graphicsPlacement]
+    )
+
+    // First frame: a fresh encoder every iteration, so nothing can be cached away.
+    measure("graphics 64x64 rgba first frame", iterations: 2000) {
+        var encoder = GraphicsEncoder()
+        sink &+= UInt64(encoder.encode(scene: graphicsScene, scope: "w1:p1").count)
+    }
+
+    // Cache hit: one encoder, the same scene again. This is the frame a pane
+    // actually paints while nothing changes — it must cost close to nothing.
+    var graphicsEncoder = GraphicsEncoder()
+    _ = graphicsEncoder.encode(scene: graphicsScene, scope: "w1:p1")
+    measure("graphics 64x64 rgba cache hit", iterations: 20000) {
+        sink &+= UInt64(graphicsEncoder.encode(scene: graphicsScene, scope: "w1:p1").count)
+    }
+
+    // The empty case: a pane with no images pays this on every frame.
+    let emptyScene = SurfaceGraphicsScene()
+    var emptyEncoder = GraphicsEncoder()
+    measure("graphics empty scene", iterations: 20000) {
+        sink &+= UInt64(emptyEncoder.encode(scene: emptyScene, scope: "w1:p1").count)
     }
 }
 

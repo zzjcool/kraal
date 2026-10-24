@@ -267,7 +267,7 @@ vm_deploy() {
     # The mouse probe. A TUI that reports what it receives is the only way to tell
     # "the app never sent the event" from "the app sent it and the program ignored
     # it" — both look like a dead click from the outside (issue #95).
-    tar -czf - -C "$ROOT/Scripts" tui-mouse-probe.py key-probe.py \
+    tar -czf - -C "$ROOT/Scripts" tui-mouse-probe.py key-probe.py kitty-graphics-probe.py \
         | tart exec -i "$VM" /bin/bash -lc "cd $VM_ROOT && tar -xzf -" \
         || die "failed to push the probes into the guest"
 
@@ -2799,6 +2799,88 @@ PYEOF
     }
 }
 
+# A pane with an image encodes it into kitty bytes (issue #105, parent #37).
+#
+# The chain that was broken: the daemon sends graphics as a *scene*
+# (`PaneSurfaceFrame.graphics`), the client read `PaneSurfaceFrame.frame.graphics`
+# instead — the ANSI path's field, which the daemon leaves empty for semantic
+# clients. Every layer decoded, nothing ever reached the terminal, and no unit test
+# could see it because nobody called the encoder.
+#
+# The assertion is the product's own log line, emitted only for frames that carry
+# non-empty encoded bytes. That matters: asserting "the encoder was called" would
+# pass with an encoder that returns `Data()`.
+case_kitty_graphics() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" -eq 0 ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+            sleep 2
+        fi
+        local target
+        target=$(first_pane_id) || return 1
+        printf '%s' "$target" >"$host_dir/target-pane.txt"
+        # The probe transmits a real kitty image (`a=T`), writes a marker once the
+        # bytes are out, and holds the pane open long enough for the daemon to
+        # composite a frame with it.
+        herdr pane run "$target" \
+            "python3 $VM_ROOT/kitty-graphics-probe.py 30 $dir/graphics-probe.txt" \
+            >/dev/null 2>&1 || return 1
+        local tries=0
+        while [ "$tries" -lt 60 ]; do
+            if tart exec "$VM" /bin/bash -lc "test -s $dir/graphics-probe.txt.ready" 2>/dev/null; then
+                return 0
+            fi
+            tries=$((tries + 1))
+            sleep 0.25
+        done
+        echo "the probe never transmitted an image (pane $target)"
+        return 1
+    }
+    action() {
+        # Give the daemon time to composite a frame that carries the image and push
+        # it to the client, then let the client paint it.
+        sleep 4
+    }
+    assert() {
+        local sent
+        if [ "$BACKEND" = "vm" ]; then
+            sent=$(tart exec -i "$VM" /bin/bash -lc "head -1 $dir/graphics-probe.txt 2>/dev/null" 2>/dev/null)
+        else
+            sent=$(head -1 "$dir/graphics-probe.txt" 2>/dev/null)
+        fi
+        check "the program transmitted a kitty image" \
+            "$([ -n "$sent" ] && echo 0 || echo 1)" "${sent:-nothing was written}"
+
+        # The product log line. `collect_app_log_tail` reads the guest's log under
+        # the vm backend, which is where the app writes it.
+        local line
+        line=$(collect_app_log_tail 2>/dev/null | grep -a 'graphics: pane=' | tail -1)
+        printf '%s\n' "${line:-<none>}" >"$host_dir/graphics-log.txt"
+        check "the pane encoded the daemon's graphics scene" \
+            "$([ -n "$line" ] && echo 0 || echo 1)" \
+            "${line:-no 'graphics: pane=' line; the scene never reached the encoder}"
+        # The bytes are what proves an upload happened rather than an empty frame
+        # being logged. `assets` and `placements` come straight from the scene.
+        check "the encoded frame carries an asset and a placement" \
+            "$(printf '%s' "$line" | grep -qE 'assets=[1-9]' && printf '%s' "$line" | grep -qE 'placements=[1-9]' && echo 0 || echo 1)" \
+            "${line:-<none>}"
+        # `painted`, not `encoded`: the renderer is allowed to skip graphics it
+        # believes are unchanged (`lastGraphics`), so "the encoder produced bytes"
+        # says nothing about whether the terminal was written. Both numbers are on
+        # the line precisely so this assertion can be about the second one.
+        # `kitty=`, the count of kitty sequences in what the *renderer* wrote. A byte
+        # count would not do: the text frame alone is a few kilobytes, so
+        # "painted > 1000" passes with no image at all (verified by injecting a
+        # renderer that drops graphics — painted fell 26546 -> 4542 and still passed).
+        local kitty
+        kitty=$(printf '%s' "$line" | sed -n 's/.*kitty=\([0-9]*\).*/\1/p')
+        check "the renderer wrote kitty sequences to the terminal" \
+            "$([ -n "$kitty" ] && [ "$kitty" -ge 2 ] && echo 0 || echo 1)" \
+            "kitty sequences in the renderer output: ${kitty:-<none>}"
+    }
+}
+
 # Named keys really reach the program (issue #92).
 #
 # `kraal-gui key --char escape` used to take the first character of its argument
@@ -3601,7 +3683,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics"; }
 
 # ---------------------------------------------------------------- entrypoint
 

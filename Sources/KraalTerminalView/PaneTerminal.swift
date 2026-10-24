@@ -38,6 +38,17 @@ public final class PaneTerminalModel {
         }
     )
     private var renderer = SurfaceANSIRenderer()
+    /// Turns the daemon's graphics scene into kitty bytes (issue #105, parent #37).
+    ///
+    /// Must be reset together with `renderer` — see `resetSurfaces()`.
+    private var graphicsEncoder = GraphicsEncoder()
+    /// The machine this pane belongs to, used only to scope graphics image ids.
+    ///
+    /// Image ids are a hash of `scope + asset key`, so two machines that both name
+    /// a pane `w1:p1` would otherwise share an id namespace and one pane's
+    /// `d=I` would delete the other's picture. Pane ids are scoped to one daemon —
+    /// upstream says so outright (`docs/next/website/.../connecting-machines.mdx:118`).
+    private let machine: String
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
@@ -57,6 +68,19 @@ public final class PaneTerminalModel {
     private var pendingFrame: FrameData?
     /// The retry chain that keeps trying to paint `pendingFrame`.
     private var pendingRetryTask: Task<Void, Never>?
+
+    /// The frame parked because the terminal had no grid yet, if any.
+    ///
+    /// Exposed read-only so tests can see what `apply(surface:)` produced without a
+    /// Ghostty surface: with no grid, the frame is parked rather than painted, and
+    /// parking is the observable seam. It is also the *real* path — `apply` is what
+    /// the view calls — so a test on it cannot pass while the wiring is cut.
+    var parkedFrame: FrameData? { pendingFrame }
+
+    /// How many times a screen reset has been applied. Test-observable because the
+    /// reset and the image bytes race inside one `apply` call, and `parkedFrame`
+    /// alone cannot say whether the reset ran.
+    private(set) var screenResetCount = 0
 
     /// Clears the visible screen and the scrollback, then homes the cursor.
     ///
@@ -93,16 +117,95 @@ public final class PaneTerminalModel {
             return
         }
         pendingFrame = nil
-        renderer.reset()
+        resetSurfaces()
         session.receive(Data(clearScreenSequence.utf8))
         session.receive(renderer.render(frame))
+    }
+
+    /// One line per frame that carried graphics, recording **both** the encoder's
+    /// output and what the renderer actually produced.
+    ///
+    /// Both numbers, because they answer different questions and only the pair is
+    /// evidence. `encoded` proves the client turned the daemon's scene into kitty
+    /// bytes; `kitty` proves the renderer wrote sequences out. An encoder whose
+    /// output the renderer drops looks identical to a working chain if only the
+    /// first number is logged — `SurfaceANSIRenderer` skips graphics it believes are
+    /// unchanged (`lastGraphics`), so "encoded > 0, kitty == 0" is a real state
+    /// (measured while injecting that bug for the GUI gate).
+    ///
+    /// Narrow on purpose: a line per frame would make "an image arrived"
+    /// unfalsifiable.
+    private func logGraphics(encoded: Data, painted: Data, assets: Int, placements: Int) {
+        guard !encoded.isEmpty || !painted.isEmpty else { return }
+        kraalLog("graphics: pane=\(paneId) scope=\(graphicsScope) "
+            + "assets=\(assets) placements=\(placements) "
+            + "encoded=\(encoded.count) painted=\(painted.count) "
+            + "kitty=\(Self.kittySequenceCount(painted))")
+    }
+
+    /// How many kitty graphics sequences an output buffer contains.
+    static func kittySequenceCount(_ bytes: Data) -> Int {
+        let needle = Data("\u{1B}_G".utf8)
+        var count = 0
+        var searchStart = bytes.startIndex
+        while searchStart < bytes.endIndex,
+              let found = bytes.range(of: needle, in: searchStart ..< bytes.endIndex) {
+            count += 1
+            searchStart = found.upperBound
+        }
+        return count
+    }
+
+    /// Shifts a scene's placements into this pane's coordinate space, dropping the
+    /// ones that fall outside it.
+    ///
+    /// Placements are surface-absolute (upstream `client_host_piece` adds the pane
+    /// origin to get them), and this terminal is only the pane. A placement whose
+    /// cells are entirely outside the pane is dropped rather than clamped: kitty
+    /// would draw it over the neighbouring pane's cells, and this terminal has no
+    /// way to clip it.
+    private func sceneInPaneSpace(
+        _ scene: SurfaceGraphicsScene,
+        origin: (x: Int, y: Int),
+        paneSize: (width: Int, height: Int)
+    ) -> SurfaceGraphicsScene {
+        guard origin.x != 0 || origin.y != 0 else { return scene }
+        let width = paneSize.width
+        let height = paneSize.height
+        var shifted = scene
+        shifted.placements = scene.placements.compactMap { placement in
+            // Compare in signed space: the placement's cells are unsigned on the
+            // wire, so a origin shift can go negative only if the data is wrong.
+            let column = Int(placement.cellX) - origin.x
+            let row = Int(placement.cellY) - origin.y
+            guard column >= 0, row >= 0 else { return nil }
+            // A pane with no measured size yet cannot answer "is this inside", so
+            // keep everything and let the next frame decide.
+            if width > 0, column >= width { return nil }
+            if height > 0, row >= height { return nil }
+            var moved = placement
+            moved.cellX = UInt16(column)
+            moved.cellY = UInt16(row)
+            return moved
+        }
+        return shifted
+    }
+
+    /// The id namespace for this pane's images.
+    ///
+    /// `machine + paneId`, not `paneId`: two machines both name a pane `w1:p1`, and
+    /// image ids are a hash of this string. Sharing it would put both daemons'
+    /// images in one namespace, where one pane's `d=I` deletes the other's picture.
+    private var graphicsScope: String {
+        machine.isEmpty ? paneId : "\(machine)/\(paneId)"
     }
 
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
-    init(paneId: String, onInput: @escaping @Sendable (Data) -> Void) {
+    init(paneId: String, machine: String = "", onInput: @escaping @Sendable (Data) -> Void) {
         self.paneId = paneId
+        self.machine = machine
         session = InMemoryTerminalSession(
             write: { data in
                 // Ghostty -> daemon: key bytes, paste payloads, replies to queries.
@@ -127,10 +230,18 @@ public final class PaneTerminalModel {
         guard let geometry = surface.panes.first(where: { $0.paneId == paneId }) else {
             return
         }
-        let frame = paneFrame(from: surface, geometry: geometry)
-        // A different projection means the screen this renderer built its
-        // baseline from is gone, whatever the numbers say. It has to be taken as
-        // a whole frame, not diffed against cells that came from somewhere else.
+        // Decide whether this frame needs a screen reset **before** encoding it.
+        //
+        // The order matters and it is subtle: `paneFrame` encodes the graphics
+        // scene, and `GraphicsEncoder` is stateful — a frame whose images did not
+        // change encodes to *zero* bytes. If the reset ran after that encode, the
+        // frame would be computed against the pre-reset cache (possibly empty
+        // bytes), then `resetSurfaces()` would forget the images, and the `2J`
+        // would erase them with nothing to put back. The picture would stay gone
+        // until the next frame — which for a still program may never come.
+        //
+        // A grid change reaches this on every resize (dragging a window,
+        // splitting), so this is not a rare path.
         let projection = SurfaceGeometry.ProjectionIdentity(
             bootId: surface.bootId,
             revision: surface.projectionRevision
@@ -139,6 +250,22 @@ public final class PaneTerminalModel {
             previous: lastProjection,
             current: projection
         )
+        let resetNeeded = projectionChanged || SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
+                previousRevision: lastRevision,
+                incomingRevision: geometry.contentRevision
+            ),
+            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
+            currentGrid: (width: Int(surface.frame.width), height: Int(surface.frame.height))
+        )
+        if resetNeeded {
+            screenResetCount += 1
+            resetSurfaces()
+        }
+        let frame = paneFrame(from: surface, geometry: geometry)
+        // A different projection means the screen this renderer built its
+        // baseline from is gone, whatever the numbers say. It has to be taken as
+        // a whole frame, not diffed against cells that came from somewhere else.
         lastProjection = projection
 
         // A pane's content revision only moves when its *content* changes, so the
@@ -159,7 +286,11 @@ public final class PaneTerminalModel {
             // without changing the grid, so neither cheap reason above fires. The
             // cells are the only thing that says the screen changed — see
             // `needsRepaint`'s note on scrolling.
-            cellsDiffer: SurfaceGeometry.cellsChanged(previous: frameGrid, current: frame)
+            cellsDiffer: SurfaceGeometry.cellsChanged(previous: frameGrid, current: frame),
+            // An image can move or change without touching a cell: the cells it
+            // covers are not part of the daemon's cell buffer. Comparing cells alone
+            // dropped those frames, freezing the picture at its old position (#105).
+            graphicsDiffer: frameGrid?.graphics != frame.graphics
         ) else { return }
         // Printed only when the cells alone decided a repaint — the revision and the
         // grid both said "nothing changed" and the frame's contents said otherwise.
@@ -174,14 +305,7 @@ public final class PaneTerminalModel {
                 + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
                 + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
         }
-        if projectionChanged || SurfaceGeometry.needsScreenReset(
-            deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
-                previousRevision: lastRevision,
-                incomingRevision: geometry.contentRevision
-            ),
-            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
-            currentGrid: (width: Int(frame.width), height: Int(frame.height))
-        ) {
+        if resetNeeded {
             // Revisions going backwards means this pane's delta stream restarted:
             // the daemon began a fresh projection (a tab switch, a reconnect, a
             // new boot) and renumbered from scratch. The renderer still holds the
@@ -196,7 +320,10 @@ public final class PaneTerminalModel {
             // the reset for the case that actually needs it (the old rows are the
             // wrong width, so incremental repainting would leave them behind) and
             // lets a cursor move or fresh text go out as a delta.
-            renderer.reset()
+            //
+            // `resetSurfaces()` already ran above, *before* the encode, so this
+            // frame's graphics were computed against an empty cache and therefore
+            // re-send the image the `2J` is about to erase.
             session.receive(Data(clearScreenSequence.utf8))
             needsCleanRepaint = false
         }
@@ -259,11 +386,15 @@ public final class PaneTerminalModel {
             // the rows written at the wrong width cannot reappear, then paint the
             // whole frame instead of a delta.
             needsCleanRepaint = false
-            renderer.reset()
+            resetSurfaces()
             session.receive(Data(clearScreenSequence.utf8))
         }
 
-        session.receive(renderer.render(frame))
+        let painted = renderer.render(frame)
+        logGraphics(encoded: frame.graphics, painted: painted,
+                    assets: surface.graphics.assets.count,
+                    placements: surface.graphics.placements.count)
+        session.receive(painted)
     }
 
     /// Reports the renderer's measured cell size, in device pixels.
@@ -306,9 +437,11 @@ public final class PaneTerminalModel {
         pendingFrame = nil
         lastRevision = 0
         frameGrid = nil
-        renderer.reset()
+        resetSurfaces()
         let clear = Data(clearScreenSequence.utf8)
         let painted = renderer.render(frame)
+        logGraphics(encoded: frame.graphics, painted: painted,
+                    assets: 0, placements: 0)
 
         session.receive(clear)
         session.receive(painted)
@@ -386,7 +519,7 @@ public final class PaneTerminalModel {
     /// something writes again. Dropping the memory forces the next apply to send
     /// the whole frame.
     func prepareForNewTerminalView() {
-        renderer.reset()
+        resetSurfaces()
         lastRevision = 0
         frameGrid = nil
         lastProjection = nil
@@ -399,8 +532,22 @@ public final class PaneTerminalModel {
         pendingRetryTask = nil
     }
 
-    func reset() {
+    /// Forgets everything the terminal was told: cells *and* graphics.
+    ///
+    /// The two resets are one operation on purpose. `GraphicsEncoder.reset()` emits
+    /// no deletes, and the reason it can get away with that is that the screen was
+    /// cleared — the renderer's next frame sends `2J`, and the terminal's `ED2`
+    /// reclaims the images. Doing one without the other breaks that reasoning in
+    /// the direction that hurts: reset the renderer alone and the encoder still
+    /// believes it uploaded the image, so the next frame sends no `a=t` and the
+    /// picture stays erased **permanently** (#101 review, `GraphicsSeamTests`).
+    func resetSurfaces() {
         renderer.reset()
+        graphicsEncoder.reset()
+    }
+
+    func reset() {
+        resetSurfaces()
         lastRevision = 0
         lastProjection = nil
         frameGrid = nil
@@ -425,6 +572,27 @@ public final class PaneTerminalModel {
         from surface: PaneSurfaceFrame,
         geometry: PaneSurfacePane
     ) -> FrameData {
+        // Encode *here*, once per frame, so every path that paints this frame —
+        // including the parked-frame retries below — carries the graphics without
+        // each one having to remember. The encoder diffs against what it already
+        // sent, so a frame with unchanged images contributes no bytes.
+        //
+        // The scene is in **surface** coordinates: a placement's `cellX`/`cellY`
+        // address the whole tab, while this terminal only knows its own pane. The
+        // cells below are cropped by `innerRect` for exactly that reason, and the
+        // placements have to be shifted the same way or an image in a split pane is
+        // drawn at the wrong column. Upstream does the same addition in reverse
+        // (`client_host_piece`, `kitty_graphics/surface.rs:1032`: `origin.0 +
+        // placement.x`), so subtracting the origin here restores pane-local space.
+        let paneOrigin = (x: Int(geometry.innerRect.originX), y: Int(geometry.innerRect.originY))
+        let paneSize = (
+            width: Int(geometry.innerRect.width),
+            height: Int(geometry.innerRect.height)
+        )
+        let graphics = graphicsEncoder.encode(
+            scene: sceneInPaneSpace(surface.graphics, origin: paneOrigin, paneSize: paneSize),
+            scope: graphicsScope
+        )
         let area = geometry.innerRect
         let width = Int(area.width)
         let height = Int(area.height)
@@ -474,11 +642,14 @@ public final class PaneTerminalModel {
             height: UInt16(height),
             cursor: cursor,
             hyperlinks: surface.frame.hyperlinks,
-            // The daemon pre-encodes kitty graphics into this byte stream; the
-            // renderer writes it through. It used to be `Data()` here, which
-            // decoded an image, laid it out with the cell grid, and then threw it
-            // away (issue #37).
-            graphics: surface.frame.graphics
+            // The encoder's output, not `surface.frame.graphics`. Kitty graphics do
+            // not live in the cell frame: the daemon sends them as a *scene*
+            // (`surface.graphics`) and the client encodes it. Reading
+            // `surface.frame.graphics` here — what this used to do — reads the ANSI
+            // path's field, which the daemon leaves empty for semantic clients, so
+            // an image was decoded, laid out against the grid, and thrown away
+            // (issues #37, #105).
+            graphics: graphics
         )
     }
 }
@@ -538,7 +709,7 @@ public final class PaneTerminalPool {
         if let existing = models[key] {
             return existing
         }
-        let model = PaneTerminalModel(paneId: paneId) { [weak self] data in
+        let model = PaneTerminalModel(paneId: paneId, machine: key.machine) { [weak self] data in
             self?.onInput(paneId, data)
         }
         models[key] = model

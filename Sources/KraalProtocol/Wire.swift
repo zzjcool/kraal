@@ -395,11 +395,35 @@ public struct SurfaceGraphicsAssetKey: Equatable, Hashable, Sendable {
     public var format: SurfaceGraphicsFormat
     public var dataLen: UInt64
     public var dataFingerprint: UInt64
+
+    /// Public so a scene can be built outside this module — the performance probe
+    /// (`Scripts/bench.sh`) has no testable import, and issue #105 asks for a
+    /// measured cost for graphics encoding.
+    public init(
+        source: SurfaceGraphicsSource,
+        imageWidth: UInt32,
+        imageHeight: UInt32,
+        format: SurfaceGraphicsFormat,
+        dataLen: UInt64,
+        dataFingerprint: UInt64
+    ) {
+        self.source = source
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.format = format
+        self.dataLen = dataLen
+        self.dataFingerprint = dataFingerprint
+    }
 }
 
 public struct SurfaceGraphicsAsset: Equatable, Sendable {
     public var key: SurfaceGraphicsAssetKey
     public var data: Data
+
+    public init(key: SurfaceGraphicsAssetKey, data: Data) {
+        self.key = key
+        self.data = data
+    }
 }
 
 public struct SurfaceGraphicsPlacement: Equatable, Sendable {
@@ -417,6 +441,38 @@ public struct SurfaceGraphicsPlacement: Equatable, Sendable {
     public var yOffset: UInt32
     public var layer: Int32
     public var scrollbackOffset: UInt32
+
+    public init(
+        asset: SurfaceGraphicsAssetKey,
+        logicalPlacementId: UInt32,
+        cellX: UInt16,
+        cellY: UInt16,
+        cols: UInt32,
+        rows: UInt32,
+        sourceX: UInt32,
+        sourceY: UInt32,
+        sourceWidth: UInt32,
+        sourceHeight: UInt32,
+        xOffset: UInt32,
+        yOffset: UInt32,
+        layer: Int32,
+        scrollbackOffset: UInt32
+    ) {
+        self.asset = asset
+        self.logicalPlacementId = logicalPlacementId
+        self.cellX = cellX
+        self.cellY = cellY
+        self.cols = cols
+        self.rows = rows
+        self.sourceX = sourceX
+        self.sourceY = sourceY
+        self.sourceWidth = sourceWidth
+        self.sourceHeight = sourceHeight
+        self.xOffset = xOffset
+        self.yOffset = yOffset
+        self.layer = layer
+        self.scrollbackOffset = scrollbackOffset
+    }
 }
 
 public struct SurfaceGraphicsScene: Equatable, Sendable {
