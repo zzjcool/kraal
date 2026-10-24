@@ -96,13 +96,11 @@ extension AppStore {
         // decoder captured once would keep answering with the old mode.
         decoder.reportsAllKeys = keyboardReportAll
         var events = decoder.decode(data)
-        if events.isEmpty {
-            // A lone Esc produces a single byte and no follow-up; flush it once
-            // the chunk ends so the key is not swallowed.
-            if let escape = decoder.flushEscape() {
-                events.append(escape)
-            }
-        }
+        // Always, not only when the chunk produced nothing: a chunk can end
+        // `"ab<ESC>"`, which yields `text("ab")` *and* a stranded ESC. Waiting for an
+        // empty result left that ESC in the buffer, where it turned the next keystroke
+        // into Alt+key (issue #110 review, M1).
+        events.append(contentsOf: decoder.flushEscape())
         inputDecoders[key] = decoder
         guard !events.isEmpty else { return }
 
@@ -147,9 +145,7 @@ extension AppStore {
         var decoder = inputDecoders[key] ?? TerminalInputDecoder()
         decoder.reportsAllKeys = keyboardReportAll
         var events = decoder.decode(data)
-        if events.isEmpty, let escape = decoder.flushEscape() {
-            events.append(escape)
-        }
+        events.append(contentsOf: decoder.flushEscape())
         inputDecoders[key] = decoder
         guard !events.isEmpty else { return }
 

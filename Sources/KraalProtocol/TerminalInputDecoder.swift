@@ -49,6 +49,13 @@ public struct TerminalInputDecoder {
     /// if the peer never completes one.
     private static let maxPending = 32
 
+    /// Bound for an in-flight APC, which is exempt from `maxPending` because kitty
+    /// responses carry image ids and error text and are routinely longer.
+    ///
+    /// Still finite on purpose: see the truncation site for why an unbounded APC is
+    /// worse than a truncated one.
+    private static let maxAPCPending = 4096
+
     /// Translates raw terminal input bytes into semantic events.
     public mutating func decode(_ data: Data) -> [ClientPaneInputEvent] {
         pending.append(contentsOf: data)
@@ -66,7 +73,30 @@ public struct TerminalInputDecoder {
                     break
                 }
                 let next = pending[index + 1]
-                if next == 0x5F, index + 2 < pending.count, pending[index + 2] == 0x47 { // '_G'
+                if next == 0x5F {
+                    // `_` is a legal key, so `ESC _` alone is Alt+`_` — but it is also
+                    // the first half of an APC. Which one it is depends on a byte we
+                    // may not have yet, so wait instead of guessing: emitting Alt+`_`
+                    // here would (a) invent a keystroke and (b) drop the APC header, so
+                    // the rest of the response would arrive as text. `flushEscape`
+                    // turns a stranded `ESC _` back into Alt+`_` once the stream idles.
+                    guard index + 2 < pending.count else { break }
+                    guard pending[index + 2] == 0x47 else { // 'G'
+                        // Not an APC: fall through to the Alt branch below.
+                        events.append(.key(
+                            code: keyCode(for: next),
+                            modifiers: InputModifiers.alt.rawValue,
+                            kind: .press,
+                            repeatCount: 1,
+                            shiftedCodepoint: nil,
+                            generatedText: nil,
+                            tracksRelease: false,
+                            physicalKeyId: nil,
+                            windowsRecord: nil
+                        ))
+                        index += 2
+                        continue
+                    }
                     // `ESC _ G` specifically, not `ESC _`: `_` is a legal key and a
                     // human can type Alt+`_` (`ESC _`), which must still be input.
                     // Only kitty graphics responses start with `ESC _ G` (the `G`
@@ -134,10 +164,35 @@ public struct TerminalInputDecoder {
         }
 
         pending.removeFirst(min(index, pending.count))
-        if pending.count > Self.maxPending {
+        // `maxPending` guards against a peer that never completes a *sequence*. An
+        // APC is different: kitty graphics responses carry image ids and error text
+        // (`EINVAL: decompression failed`), so one can exceed 32 bytes, and dropping
+        // the buffer mid-APC turns its tail into text and keys. Measured before this
+        // guard: a 70-byte APC produced textCommit("\\"), and the same APC split
+        // across two chunks produced 32 `x`s as text plus an Alt+`\\` key.
+        //
+        // The bound still applies to the case it was written for — a leftover ESC that
+        // never grows — because `isWaitingForAPC` is false there.
+        // An APC gets its own, still-finite bound. Unbounded would be worse than the
+        // bug it fixes: the APC sits at `pending[0]`, `index` never advances, and every
+        // later chunk appends and is rescanned without producing an event — the user's
+        // keystrokes would stop reaching the program entirely, which is the exact
+        // "silently eats keys" shape this file is trying to prevent.
+        let limit = isWaitingForAPC ? Self.maxAPCPending : Self.maxPending
+        if pending.count > limit {
             pending.removeAll()
         }
         return events
+    }
+
+    /// Whether `pending` holds an unfinished APC.
+    ///
+    /// Used to exempt an in-flight APC from `maxPending`: the graphics responses this
+    /// decoder strips can be longer than that bound, and truncating one leaks its tail
+    /// as text and keystrokes.
+    private var isWaitingForAPC: Bool {
+        guard pending.count >= 3 else { return false }
+        return pending[0] == 0x1B && pending[1] == 0x5F && pending[2] == 0x47
     }
 
     /// Index just past an APC's `ESC \` terminator, or nil while the APC is still
@@ -160,20 +215,51 @@ public struct TerminalInputDecoder {
 
     /// Emits a pending lone ESC. Call when the input stream goes idle, since a
     /// bare Esc key press produces exactly one byte and no follow-up.
-    public mutating func flushEscape() -> ClientPaneInputEvent? {
-        guard pending == [0x1B] else { return nil }
-        pending.removeAll()
-        return .key(
-            code: .esc,
-            modifiers: 0,
-            kind: .press,
-            repeatCount: 1,
-            shiftedCodepoint: nil,
-            generatedText: nil,
-            tracksRelease: false,
-            physicalKeyId: nil,
-            windowsRecord: nil
-        )
+    /// Emits whatever the pending buffer holds once the input stream goes idle.
+    ///
+    /// Returns an array rather than one event because a stranded prefix is not always
+    /// a lone `ESC`: `ESC _` is also stranded when the stream stops mid-APC (the third
+    /// byte never arrived), and that one is Alt+`_`. Returning only the first would
+    /// leave the `_` behind to glue onto the next keystroke.
+    ///
+    /// Called unconditionally by the callers, not just when `decode` returned nothing:
+    /// a chunk can end `"ab<ESC>"`, which produces `text("ab")` *and* a stranded ESC.
+    /// Waiting for an empty result left that ESC in the buffer, where it turned the
+    /// next key into Alt+key (measured, issue #110 review).
+    public mutating func flushEscape() -> [ClientPaneInputEvent] {
+        guard !pending.isEmpty else { return [] }
+        if pending == [0x1B] {
+            pending.removeAll()
+            return [.key(
+                code: .esc,
+                modifiers: 0,
+                kind: .press,
+                repeatCount: 1,
+                shiftedCodepoint: nil,
+                generatedText: nil,
+                tracksRelease: false,
+                physicalKeyId: nil,
+                windowsRecord: nil
+            )]
+        }
+        if pending == [0x1B, 0x5F] {
+            // A stranded APC header. It was held back because the byte that decides
+            // (the `G` of a kitty graphics response) never arrived, so treat it as what
+            // a human typing it would mean: Alt+`_`.
+            pending.removeAll()
+            return [.key(
+                code: keyCode(for: 0x5F),
+                modifiers: InputModifiers.alt.rawValue,
+                kind: .press,
+                repeatCount: 1,
+                shiftedCodepoint: nil,
+                generatedText: nil,
+                tracksRelease: false,
+                physicalKeyId: nil,
+                windowsRecord: nil
+            )]
+        }
+        return []
     }
 
     // MARK: - Control characters
@@ -375,7 +461,7 @@ public struct TerminalInputDecoder {
         while end < bytes.count {
             let byte = bytes[end]
             // ESC starts an escape sequence, not text. Without this, a chunk like
-            // `a<ESC>_Gi=1;OK<ESC>\\bc` was consumed as one text commit and the
+            // `a<ESC>_Gi=1;OK<ESC>\bc` was consumed as one text commit and the
             // APC never reached the branch that strips it (issue #110).
             guard byte != 0x1B else { break }
             let length = utf8Length(for: byte)
