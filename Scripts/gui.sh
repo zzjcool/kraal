@@ -857,14 +857,22 @@ if not cont:
     sys.exit(1)
 cont_w, cont_h, grid_cols, grid_rows = (int(v) for v in cont.groups())
 
+# The real position of the container inside the window, reported by the app. Deriving it
+# as `windowHeight - containerHeight` was wrong by the title bar plus the gap below
+# the container: it produced 96 where the container starts at 71, and the 25pt
+# shift never showed up in click tests (same cell) while it moved every pixel
+# assertion (issue #103).
+origin = re.search(r"containerOrigin=(-?\d+),(-?\d+)", container_line)
+if not origin:
+    sys.exit(1)
+left_inset, top_inset = int(origin.group(1)), int(origin.group(2))
+
 layout = json.loads(layout_text)["result"]["layout"]
 target_pane = next((p for p in layout["panes"] if p["pane_id"] == target), None)
 if target_pane is None:
     sys.exit(1)
 
 rect = target_pane["rect"]
-left_inset = win_w - cont_w
-top_inset = win_h - cont_h
 x = left_inset + rect["x"] / grid_cols * cont_w
 y = top_inset + rect["y"] / grid_rows * cont_h
 w = rect["width"] / grid_cols * cont_w
@@ -2994,6 +3002,11 @@ case_kitty_graphics() {
             waited=$((waited + 1))
             sleep 1
         done
+        # The probe writes `.deleted` only after it has written the delete sequence.
+        # Without this check, a probe that never cleaned up would simply be waited
+        # out and then measured: `after` would read 4032 and the case would report
+        # "the image is still on screen", which reads like a product bug.
+        printf '%s' "$waited" >"$host_dir/waited.txt"
         sleep 2
         driver shot -o "$dir/after.png" >/dev/null 2>&1
         driver pixels --in "$dir/after.png" --rect "$rect" \
@@ -3052,7 +3065,7 @@ case_kitty_graphics() {
         rect_line=$(cat "$host_dir/rect.txt" 2>/dev/null)
         check "the pane's rect inside the window was located" \
             "$(printf '%s' "$rect_line" | grep -qE '^[0-9]+ [0-9]+ [0-9]+ [0-9]+$' && echo 0 || echo 1)" \
-            "${rect_line:-no rect for pane $target}"
+            "${rect_line:-no rect for the pane; see rect.txt}"
         # The control (#103): the same region, sampled before the probe ran, has
         # essentially no magenta. Without it "4032 magenta pixels" could be the
         # pane's own background, a theme colour, or a stale frame from a previous
@@ -3063,10 +3076,38 @@ case_kitty_graphics() {
             "$([ -n "$before_matched" ] && [ "$before_matched" -lt 50 ] && echo 0 || echo 1)" \
             "magenta pixels after the probe deleted its image: ${before_matched:-<not measured>}"
 
+        # The probe recorded that it deleted its image. Without this, a probe that
+        # never cleaned up would be waited out and then measured; `after` would read
+        # 4032 and the failure would read as "the image is still on screen" — a
+        # product bug report for a harness problem.
+        local waited
+        waited=$(cat "$host_dir/waited.txt" 2>/dev/null)
+        check "the probe recorded its image deletion" \
+            "$([ -n "$waited" ] && [ "$waited" -lt 45 ] && echo 0 || echo 1)" \
+            "waited ${waited:-?}s for the .deleted marker"
+
+        # The region actually sampled has to be the pane's rect. This is the guard
+        # for coordinate-space mistakes, which are silent by nature: a screen-space
+        # rect against a window image clamps to the overlap and the count then
+        # describes a band nobody asked for (measured once: 959x664 became 959x314
+        # and `matched` still looked plausible). `sampled` is `w*h*scale^2`, so a
+        # clamp shows up here even when `matched` happens to survive it.
+        local sampled region
+        sampled=$(printf '%s' "$pixels_line" | sed -n 's/.*sampled=\([0-9]*\).*/\1/p')
+        region=$(printf '%s' "$pixels_line" | sed -n 's/.*region=\([0-9]*x[0-9]*\).*/\1/p')
+        local want_want
+        want_want=$(printf '%s' "$rect_line" | awk '{ printf "%d", $3 * $4 }')
+        check "the sampled area is the whole pane rect" \
+            "$([ -n "$sampled" ] && [ "$sampled" -eq "$want_want" ] && echo 0 || echo 1)" \
+            "sampled=${sampled:-<none>} want=$want_want (region=${region:-?})"
+
         local matched
         matched=$(printf '%s' "$pixels_line" | sed -n 's/.*matched=\([0-9]*\).*/\1/p')
+        # Upper bound as well as lower: a full-screen magenta window would satisfy
+        # "more than 200" too, and that is not an image in the pane.
         check "the image is visible on the screen" \
-            "$([ -n "$matched" ] && [ "$matched" -gt 200 ] && echo 0 || echo 1)" \
+            "$([ -n "$matched" ] && [ "$matched" -gt 200 ] && [ "$matched" -lt "$((want_want / 2))" ] \
+                && echo 0 || echo 1)" \
             "magenta pixels in the pane: ${matched:-<none>} (${pixels_line:-no pixels run})"
     }
 }

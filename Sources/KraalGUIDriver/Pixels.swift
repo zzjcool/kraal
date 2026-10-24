@@ -24,12 +24,21 @@ import Foundation
 /// bytes" and "the renderer wrote them" are not enough — only a screenshot is
 /// (#103).
 ///
-/// `--rect X Y W H` is **screen** coordinates, the same space `driver click
-/// --at-screen` and `screencapture` use. The image is in pixels and a Retina screen
-/// has more of them than points, so the rect is scaled by the image's own size
-/// relative to the display, not assumed 1:1.
+/// `--rect X Y W H` is **top-left** anchored: y counts down from the image's top
+/// edge, the same way the harness derives pane rectangles from the window.
+///
+/// That is *not* what a `CGContext` uses, and getting it backwards is silent —
+/// measured: a `y=0` band on the top-white window image reported 0 white pixels
+/// while `y=750` reported 11702, i.e. the image is addressed bottom-up by default.
+/// The flip happens here, once, so no caller has to remember it.
+///
+/// The rect is in **points** and the image in **pixels**; `--scale` (defaulting to
+/// the screen's backing factor) converts. `--origin "X Y"` subtracts the window
+/// origin, for a rect derived in screen space against a window capture.
 func commandPixels(_ args: Arguments) -> Never {
-    guard let path = args.string("in") else { fail(.harness, "pixels needs -i/--in") }
+    // Only `--in`: `-i` is taken by `id` in the shared short-name table, so
+    // advertising it here would send callers down a path that always fails.
+    guard let path = args.string("in") else { fail(.harness, "pixels needs --in") }
     guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
           let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
     else { fail(.harness, "cannot read \(path) as an image") }
@@ -49,9 +58,24 @@ func commandPixels(_ args: Arguments) -> Never {
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { fail(.harness, "cannot create a drawing context") }
+    // `region` is top-down (y counts from the image's top). Drawing needs the
+    // image's bottom-up origin offset so that the band lands in the output.
+    //
+    // The sign and the anchoring were **measured, not derived** — three variants
+    // were run against a window capture whose image sits in the upper half
+    // (`--rect "0 0 1180 380"` must find it, `--rect "0 380 1180 380"` must not):
+    //
+    //   `-region.minY`                 → reversed (found it in the lower band)
+    //   `+region.minY`                 → blank (image drawn outside the output)
+    //   `-(imageHeight - region.maxY)` → correct
+    //
+    // The comment that used to sit here described the second variant, which is why
+    // this is written as a measurement rather than as an argument.
+    let imageHeight = Double(image.height)
+    let bottomUpY = -(imageHeight - region.maxY)
     context.draw(
         image,
-        in: CGRect(x: -region.origin.x, y: -region.origin.y,
+        in: CGRect(x: -region.origin.x, y: bottomUpY,
                    width: CGFloat(image.width), height: CGFloat(image.height))
     )
 
@@ -60,31 +84,23 @@ func commandPixels(_ args: Arguments) -> Never {
     // tolerances differ per case (a solid magenta image vs an antialiased one).
     let match = args.string("match") ?? "r>0"
 
+    // Parsed once, before any pixel is read: a typo has to be an error, not a
+    // predicate that silently becomes always-true. Measured failure modes of a
+    // permissive parser — `r>>200` and `r>xyz` both counted every pixel (`Int(">200")
+    // ?? 0`), an uppercase `R` dropped the whole channel test, and `blue>200` was
+    // always false. Each of those turns "is the image on screen" into a constant.
+    let clauses: [MatchClause]
+    switch parseMatch(match) {
+    case let .success(parsed):
+        clauses = parsed
+    case let .failure(error):
+        fail(.harness, "cannot parse --match clause '\(error.text)';"
+            + " expected e.g. r>200,g<80,b>200")
+    }
+
     func satisfies(red: Int, green: Int, blue: Int) -> Bool {
-        for clause in match.split(separator: ",") {
-            let text = clause.trimmingCharacters(in: .whitespaces)
-            guard text.count >= 2 else { continue }
-            // `text.first` can never be nil here (the guard above), but writing it as
-            // an unwrap would make the linter's job impossible in a file whose whole
-            // purpose is parsing a user-supplied predicate.
-            guard let channel = text.first else { continue }
-            let rest = text.dropFirst()
-            let value = Int(rest.dropFirst()) ?? 0
-            let actual: Int
-            switch channel {
-            case "r": actual = red
-            case "g": actual = green
-            case "b": actual = blue
-            default: continue
-            }
-            let passes: Bool
-            switch rest.first {
-            case ">": passes = actual > value
-            case "<": passes = actual < value
-            case "=": passes = actual == value
-            default: passes = false
-            }
-            if !passes { return false }
+        for clause in clauses where !clause.isSatisfied(red: red, green: green, blue: blue) {
+            return false
         }
         return true
     }
@@ -100,6 +116,59 @@ func commandPixels(_ args: Arguments) -> Never {
     }
     print("pixels matched=\(matched) sampled=\(sampled) region=\(width)x\(height)")
     exit(Exit.success.rawValue)
+}
+
+/// One comparison in a `--match` predicate, e.g. `r>200`.
+private struct MatchClause {
+    enum Channel: Character { case red = "r", green = "g", blue = "b" }
+    enum Comparison: Character { case greater = ">", less = "<", equal = "=" }
+
+    let channel: Channel
+    let comparison: Comparison
+    let value: Int
+
+    func isSatisfied(red: Int, green: Int, blue: Int) -> Bool {
+        let actual: Int
+        switch channel {
+        case .red: actual = red
+        case .green: actual = green
+        case .blue: actual = blue
+        }
+        switch comparison {
+        case .greater: return actual > value
+        case .less: return actual < value
+        case .equal: return actual == value
+        }
+    }
+}
+
+/// Parses `"r>200,g<80,b>200"`, refusing anything it does not fully understand.
+///
+/// Strict on purpose — see the note at the call site for the four ways a permissive
+/// version turned the predicate into a constant.
+private func parseMatch(_ text: String) -> Result<[MatchClause], MatchParseError> {
+    var clauses: [MatchClause] = []
+    for clause in text.split(separator: ",") {
+        let trimmed = clause.trimmingCharacters(in: .whitespaces)
+        // Both `first` calls are guarded by the length check, but written as
+        // unwraps-with-guard rather than `!` so the linter's force_unwrapping rule
+        // stays meaningful in this file.
+        guard trimmed.count >= 3,
+              let channelText = trimmed.first,
+              let channel = MatchClause.Channel(rawValue: channelText),
+              let comparisonText = trimmed.dropFirst().first,
+              let comparison = MatchClause.Comparison(rawValue: comparisonText),
+              let value = Int(trimmed.dropFirst(2))
+        else {
+            return .failure(MatchParseError(text: trimmed))
+        }
+        clauses.append(MatchClause(channel: channel, comparison: comparison, value: value))
+    }
+    return .success(clauses)
+}
+
+private struct MatchParseError: Error {
+    let text: String
 }
 
 /// The region of the image to count, in image pixels.
@@ -144,6 +213,18 @@ private func regionOfInterest(args: Arguments, image: CGImage) -> CGRect {
             localX -= parts2[0]
             localY -= parts2[1]
         }
+        // **The flip.** `--rect`'s y counts down from the top (that is what the
+        // harness derives from the window layout); `CGContext`/`CGImage` address rows
+        // from the bottom. Converting here, once, is the whole point of this
+        // function owning the conversion — a caller that had to remember would get
+        // it wrong, and it fails silently: measured on a window image whose top band
+        // is white, `--rect "0 0 1180 10"` reported 0 white pixels and
+        // `--rect "0 750 1180 10"` reported 11702.
+        // The rect arrives **top-down**; keep it that way here. The conversion to
+        // the drawing context's bottom-up space happens in one place, at the draw
+        // call, because doing it twice cancels out silently (measured: flipping here
+        // *and* subtracting the origin at the draw made `--rect y=600` — far from
+        // the image — report all 4032 magenta pixels).
         region = CGRect(
             x: localX * scale, y: localY * scale,
             width: regionW * scale, height: regionH * scale
