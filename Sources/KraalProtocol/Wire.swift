@@ -491,6 +491,40 @@ public struct SurfaceGraphicsScene: Equatable, Sendable {
     }
 }
 
+extension SurfaceGraphicsScene {
+    /// Keeps only what belongs to the popup `terminalId`.
+    ///
+    /// Placements are dropped along with their assets: a placement whose asset was
+    /// removed would reference an image the terminal never received, and kitty
+    /// answers that with an error rather than a no-op.
+    ///
+    /// Pane placements address cells inside the pane's grid, not the popup's, so
+    /// keeping them would draw a pane's picture over the popup (upstream splits on
+    /// exactly this: `client_placement_origin` uses `popup_origin` for
+    /// popup-sourced placements, `kitty_graphics/surface.rs:938-958`).
+    public func filtered(toPopup terminalId: String) -> SurfaceGraphicsScene {
+        let kept = placements.filter { placement in
+            if case let .terminal(target: .popup(id), _) = placement.asset.source {
+                return id == terminalId
+            }
+            return false
+        }
+        let keys = Set(kept.map(\.asset))
+        return SurfaceGraphicsScene(
+            assets: assets.filter { keys.contains($0.key) },
+            placements: kept,
+            // `retainedAssets` means "assets this client still holds even though
+            // their pane is outside the selected scene", and upstream only ever
+            // puts *pane*-sourced keys there (`offscreen_assets` filters to
+            // `Terminal { target: Pane }`, `kitty_graphics/surface.rs:811-818`). So
+            // for a popup this filter is empty in practice; it is kept so a pane's
+            // retained keys cannot leak into the popup's id space, where their ids
+            // were never uploaded.
+            retainedAssets: retainedAssets.filter { keys.contains($0) }
+        )
+    }
+}
+
 public enum ClientShellPopupSize: Equatable, Sendable {
     case cells(UInt16)
     case percent(UInt8)

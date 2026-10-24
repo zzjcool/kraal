@@ -551,6 +551,34 @@ struct PopupGraphicsTests {
         }
     }
 
+    /// A popup paints when its grid exists, not before.
+    ///
+    /// This is the half of the park/drop story that *is* testable: with no grid the
+    /// frame is parked (never written), and once the grid matches it is painted by
+    /// `flushPendingFrame`. The other half — a popup whose first frame is parked,
+    /// dropped by `prepareForNewTerminalView()`, and never replayed because no later
+    /// revision arrives — is a SwiftUI lifecycle fact that no unit test here can
+    /// produce. It was measured in the real app instead:
+    ///
+    /// ```text
+    /// park rev=7                       <- applyPopup, no grid yet
+    /// prepare hadPending=true          <- onAppear drops the park
+    /// paint rev=8 grid=60x12           <- painted only because SwiftUI rebuilt body
+    /// onChange -> replay: pending=false
+    /// ```
+    ///
+    /// The last line is why the replay that was tried for it was removed: by the time
+    /// `onChange(of: surfaceSize)` fires, a later `applyPopup` has already painted and
+    /// the revision guard drops the replay. See #107 for the open question.
+    @Test("a popup parks its frame until the grid exists")
+    func popupParksUntilGridExists() {
+        let model = makeModel()
+        let key = assetKey(target: .popup(terminalId: "popup-1"))
+        model.applyPopup(frame: popupFrame(), revision: 7, scene: scene(for: key))
+        #expect(model.parkedFrame?.width == 4, "the frame was not parked before the grid")
+        #expect(model.parkedFrame?.graphics.isEmpty == false, "the parked frame lost its image")
+    }
+
     private func imageId(in bytes: Data) -> UInt32? {
         guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }
         for chunk in text.components(separatedBy: "\u{1B}_G").dropFirst() {

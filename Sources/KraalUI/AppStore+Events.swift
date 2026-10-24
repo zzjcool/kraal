@@ -244,6 +244,7 @@ extension AppStore {
             return
         }
         let previousPanes = Set(self.surface?.panes.map(\.paneId) ?? [])
+        let previousPopups = self.surface?.popup.map { [$0.terminalId] } ?? []
         self.surface = incoming
         surfaceIsStale = false
         // The baseline is whole again: whatever triggered the re-projection (or
@@ -254,6 +255,10 @@ extension AppStore {
         let paneIds = Set(incoming.panes.map(\.paneId))
         if paneIds != previousPanes {
             onPaneSetChanged?(paneIds)
+        }
+        let popupIds = Set(incoming.popup.map { [$0.terminalId] } ?? [])
+        if popupIds != Set(previousPopups) {
+            onPopupSetChanged?(popupIds)
         }
     }
 

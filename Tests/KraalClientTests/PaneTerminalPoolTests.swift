@@ -93,4 +93,52 @@ struct PaneTerminalPoolTests {
 
         #expect(pool.model(for: "w1:p1") === kept)
     }
+
+    /// A popup is not a pane, so `prune(keeping:)` must leave it alone: its id is
+    /// never in `paneIds`, and a key that compared against `paneIds` would drop the
+    /// popup's Ghostty surface every time any pane opened or closed — throwing away
+    /// its image cache mid-display.
+    @Test("pruning panes keeps popups alive")
+    func pruningPanesKeepsPopups() {
+        let pool = makePool()
+
+        pool.selectMachine("m")
+        let popup = pool.model(for: "term-1", isPopup: true)
+        _ = pool.model(for: "w1:p1")
+
+        pool.prune(keeping: [])
+
+        #expect(pool.model(for: "term-1", isPopup: true) === popup,
+                "pruning panes dropped the popup's terminal")
+    }
+
+    /// The other half: a closed popup's terminal has to be released, or every popup
+    /// ever opened leaves a Ghostty surface behind. This is the leak that a
+    /// `"popup:<id>"` key caused — it never matched `paneIds`, so nothing ever
+    /// removed it.
+    @Test("a closed popup's terminal is released")
+    func closedPopupIsReleased() {
+        let pool = makePool()
+
+        pool.selectMachine("m")
+        let popup = pool.model(for: "term-1", isPopup: true)
+
+        pool.prunePopups(keeping: [])
+
+        #expect(pool.model(for: "term-1", isPopup: true) !== popup,
+                "a closed popup left its terminal (and its surface) behind")
+    }
+
+    /// And a pane's id must not collide with a popup's: sharing one model would give
+    /// them one image-id space, where one side's delete removes the other's picture.
+    @Test("a popup and a pane with the same id are two terminals")
+    func popupAndPaneWithSameIdAreTwoTerminals() {
+        let pool = makePool()
+
+        pool.selectMachine("m")
+        let pane = pool.model(for: "term-1")
+        let popup = pool.model(for: "term-1", isPopup: true)
+
+        #expect(pane !== popup)
+    }
 }

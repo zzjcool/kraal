@@ -152,6 +152,15 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             pool.prune(keeping: paneIds)
         }
 
+        // Popups are not in `paneIds`, so they need their own sweep — keyed on the
+        // popup the surface currently carries. Without it every popup left a
+        // Ghostty surface behind: a prefixed `"popup:<id>"` key never matched
+        // `paneIds`, so `prune(keeping:)` skipped it forever.
+        store.onPopupSetChanged = { [weak self] terminalIds in
+            _ = self
+            pool.prunePopups(keeping: terminalIds)
+        }
+
         // Mouse events are observed, not intercepted: Ghostty keeps its own
         // selection and scroll behaviour, and panes that asked for mouse
         // reporting additionally get semantic events on the daemon connection.
