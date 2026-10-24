@@ -1169,6 +1169,22 @@ case_popup() {
         esac
         check "the popup carries its own terminal id" "$identified" \
             "routeInput keys on this id, not on a pane id"
+
+        # The popup's frame reached its terminal.
+        #
+        # Deliberately *not* claimed here: that this would catch a missing replay
+        # after `prepareForNewTerminalView()`. It would not. In this fixture the
+        # popup's grid already exists by the time `applyPopup` runs (the window is
+        # live before the popup opens), so the first frame is painted directly
+        # instead of being parked and dropped — measured: removing the replay leaves
+        # this assertion green and the log unchanged (`popup frame: … painted=683`).
+        # The park-then-drop path needs a popup opened before its terminal attaches,
+        # which this fixture cannot produce. See #107's comment for the reasoning and
+        # what an honest test would have to set up.
+        local frame_line
+        frame_line=$(grep 'popup frame: ' "$host_dir/kraal.log" 2>/dev/null | tail -1)
+        check "the popup's frame reached its terminal" \
+            "$([ -n "$frame_line" ] && echo 0 || echo 1)" "${frame_line:-no popup frame painted}"
     }
 }
 

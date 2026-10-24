@@ -41,14 +41,21 @@ public final class PaneTerminalModel {
     /// Turns the daemon's graphics scene into kitty bytes (issue #105, parent #37).
     ///
     /// Must be reset together with `renderer` — see `resetSurfaces()`.
-    private var graphicsEncoder = GraphicsEncoder()
+    var graphicsEncoder = GraphicsEncoder()
     /// The machine this pane belongs to, used only to scope graphics image ids.
     ///
     /// Image ids are a hash of `scope + asset key`, so two machines that both name
     /// a pane `w1:p1` would otherwise share an id namespace and one pane's
     /// `d=I` would delete the other's picture. Pane ids are scoped to one daemon —
     /// upstream says so outright (`docs/next/website/.../connecting-machines.mdx:118`).
-    private let machine: String
+    let machine: String
+    /// Whether this model draws a popup rather than a pane.
+    ///
+    /// It changes two things, both about id spaces: which graphics targets this
+    /// terminal accepts, and the scope its image ids are hashed from. The pool keys
+    /// popup models by the popup's `terminalId`, which can coincide with a pane id,
+    /// so the kind cannot be inferred from the id alone.
+    let isPopup: Bool
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
@@ -105,9 +112,31 @@ public final class PaneTerminalModel {
     ///
     /// - Parameter revision: the daemon's `contentRevision` for this popup, used only
     ///   to skip frames that changed nothing.
-    public func applyPopup(frame: FrameData, revision: UInt64) {
+    public func applyPopup(frame: FrameData, revision: UInt64, scene: SurfaceGraphicsScene) {
         guard revision != lastRevision || frameGrid == nil else { return }
         lastRevision = revision
+        var frame = frame
+        // Only the popup's own images belong here. The scene is the whole tab's —
+        // pane placements address cells inside the pane's grid, and this terminal is
+        // the popup, so drawing them would put a pane's picture over the popup
+        // (upstream does the same split: `client_placement_origin` picks
+        // `popup_origin` for popup-sourced placements and `main_origin` for
+        // everything else, `kitty_graphics/surface.rs:938-958`).
+        //
+        // Reset first, for the same reason as `apply(surface:)`: the encoder is
+        // stateful, so encoding before the reset would produce the pre-reset
+        // (possibly zero) bytes for a frame that just cleared the screen.
+        // Note what is *not* done here, unlike the pane path: no `sceneInPaneSpace`.
+        // A pane subtracts its `innerRect` origin because placements are
+        // surface-absolute; a popup's are already popup-local — upstream adds
+        // `popup_origin` on the host side (`client_host_piece`,
+        // `kitty_graphics/surface.rs:938-958` + `:1032`), so subtracting anything
+        // here would shift the image by the popup's own position.
+        resetSurfaces()
+        frame.graphics = graphicsEncoder.encode(
+            scene: scene.filtered(toPopup: paneId),
+            scope: graphicsScope
+        )
         frameGrid = frame
 
         // Same reason as `apply(surface:)`: the terminal attaches asynchronously, and
@@ -117,95 +146,24 @@ public final class PaneTerminalModel {
             return
         }
         pendingFrame = nil
-        resetSurfaces()
         session.receive(Data(clearScreenSequence.utf8))
-        session.receive(renderer.render(frame))
-    }
-
-    /// One line per frame that carried graphics, recording **both** the encoder's
-    /// output and what the renderer actually produced.
-    ///
-    /// Both numbers, because they answer different questions and only the pair is
-    /// evidence. `encoded` proves the client turned the daemon's scene into kitty
-    /// bytes; `kitty` proves the renderer wrote sequences out. An encoder whose
-    /// output the renderer drops looks identical to a working chain if only the
-    /// first number is logged — `SurfaceANSIRenderer` skips graphics it believes are
-    /// unchanged (`lastGraphics`), so "encoded > 0, kitty == 0" is a real state
-    /// (measured while injecting that bug for the GUI gate).
-    ///
-    /// Narrow on purpose: a line per frame would make "an image arrived"
-    /// unfalsifiable.
-    private func logGraphics(encoded: Data, painted: Data, assets: Int, placements: Int) {
-        guard !encoded.isEmpty || !painted.isEmpty else { return }
-        kraalLog("graphics: pane=\(paneId) scope=\(graphicsScope) "
-            + "assets=\(assets) placements=\(placements) "
-            + "encoded=\(encoded.count) painted=\(painted.count) "
-            + "kitty=\(Self.kittySequenceCount(painted))")
-    }
-
-    /// How many kitty graphics sequences an output buffer contains.
-    static func kittySequenceCount(_ bytes: Data) -> Int {
-        let needle = Data("\u{1B}_G".utf8)
-        var count = 0
-        var searchStart = bytes.startIndex
-        while searchStart < bytes.endIndex,
-              let found = bytes.range(of: needle, in: searchStart ..< bytes.endIndex) {
-            count += 1
-            searchStart = found.upperBound
-        }
-        return count
-    }
-
-    /// Shifts a scene's placements into this pane's coordinate space, dropping the
-    /// ones that fall outside it.
-    ///
-    /// Placements are surface-absolute (upstream `client_host_piece` adds the pane
-    /// origin to get them), and this terminal is only the pane. A placement whose
-    /// cells are entirely outside the pane is dropped rather than clamped: kitty
-    /// would draw it over the neighbouring pane's cells, and this terminal has no
-    /// way to clip it.
-    private func sceneInPaneSpace(
-        _ scene: SurfaceGraphicsScene,
-        origin: (x: Int, y: Int),
-        paneSize: (width: Int, height: Int)
-    ) -> SurfaceGraphicsScene {
-        guard origin.x != 0 || origin.y != 0 else { return scene }
-        let width = paneSize.width
-        let height = paneSize.height
-        var shifted = scene
-        shifted.placements = scene.placements.compactMap { placement in
-            // Compare in signed space: the placement's cells are unsigned on the
-            // wire, so a origin shift can go negative only if the data is wrong.
-            let column = Int(placement.cellX) - origin.x
-            let row = Int(placement.cellY) - origin.y
-            guard column >= 0, row >= 0 else { return nil }
-            // A pane with no measured size yet cannot answer "is this inside", so
-            // keep everything and let the next frame decide.
-            if width > 0, column >= width { return nil }
-            if height > 0, row >= height { return nil }
-            var moved = placement
-            moved.cellX = UInt16(column)
-            moved.cellY = UInt16(row)
-            return moved
-        }
-        return shifted
-    }
-
-    /// The id namespace for this pane's images.
-    ///
-    /// `machine + paneId`, not `paneId`: two machines both name a pane `w1:p1`, and
-    /// image ids are a hash of this string. Sharing it would put both daemons'
-    /// images in one namespace, where one pane's `d=I` deletes the other's picture.
-    private var graphicsScope: String {
-        machine.isEmpty ? paneId : "\(machine)/\(paneId)"
+        let painted = renderer.render(frame)
+        logPopupFrame(frame: frame, revision: revision, painted: painted, scene: scene)
+        session.receive(painted)
     }
 
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
-    init(paneId: String, machine: String = "", onInput: @escaping @Sendable (Data) -> Void) {
+    init(
+        paneId: String,
+        machine: String = "",
+        isPopup: Bool = false,
+        onInput: @escaping @Sendable (Data) -> Void
+    ) {
         self.paneId = paneId
         self.machine = machine
+        self.isPopup = isPopup
         session = InMemoryTerminalSession(
             write: { data in
                 // Ghostty -> daemon: key bytes, paste payloads, replies to queries.
@@ -676,6 +634,12 @@ public final class PaneTerminalPool {
     private struct Key: Hashable {
         let machine: String
         let paneId: String
+        /// `paneId` for a pane, the popup's terminal id for a popup.
+        ///
+        /// A separate field rather than a `"popup:"` prefix on `paneId`: `prune`
+        /// compares `paneId` against the live pane set, and a prefixed id never
+        /// matches, so every popup's Ghostty surface would be leaked forever.
+        let isPopup: Bool
     }
 
     /// The machine whose panes the pool currently holds.
@@ -704,12 +668,21 @@ public final class PaneTerminalPool {
         models.removeAll()
     }
 
-    public func model(for paneId: String) -> PaneTerminalModel {
-        let key = Key(machine: machine ?? "", paneId: paneId)
+    /// The model for a pane, or for a popup when `isPopup` is set.
+    ///
+    /// The two live in separate key spaces because their graphics scopes differ and
+    /// a popup's `terminalId` can coincide with a pane id: sharing one model would
+    /// let a popup and a pane fight over the same image ids in one terminal.
+    public func model(for paneId: String, isPopup: Bool = false) -> PaneTerminalModel {
+        let key = Key(machine: machine ?? "", paneId: paneId, isPopup: isPopup)
         if let existing = models[key] {
             return existing
         }
-        let model = PaneTerminalModel(paneId: paneId, machine: key.machine) { [weak self] data in
+        let model = PaneTerminalModel(
+            paneId: paneId,
+            machine: key.machine,
+            isPopup: isPopup
+        ) { [weak self] data in
             self?.onInput(paneId, data)
         }
         models[key] = model
@@ -718,7 +691,26 @@ public final class PaneTerminalPool {
 
     /// Drops terminals for panes that no longer exist, releasing their surfaces.
     public func prune(keeping paneIds: Set<String>) {
-        for key in models.keys where !paneIds.contains(key.paneId) {
+        // Popups are excluded on purpose: `paneIds` is the set of *panes*, a popup
+        // is not one, and its lifetime is the popup's — it closes when the surface
+        // stops carrying one (`applyPopup` is not called, and the view goes away with
+        // the model). Pruning by `paneId` would drop a popup's terminal every time
+        // the pane set changed, throwing away its image cache mid-display.
+        for key in models.keys where !key.isPopup && !paneIds.contains(key.paneId) {
+            models.removeValue(forKey: key)
+        }
+    }
+
+    /// Drops popup terminals for popups the surface no longer carries.
+    ///
+    /// Called from the same place as `prune(keeping:)` — when the store's surface
+    /// changes — but keyed on the popup instead of the pane set. A popup is not in
+    /// `paneIds`, so folding the two together would either leak every popup's
+    /// Ghostty surface (what a `"popup:"`-prefixed `paneId` did) or delete live
+    /// panes.
+    public func prunePopups(keeping terminalIds: Set<String>) {
+        for key in models.keys
+        where key.isPopup && !terminalIds.contains(key.paneId) {
             models.removeValue(forKey: key)
         }
     }

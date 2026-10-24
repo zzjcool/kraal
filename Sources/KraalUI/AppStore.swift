@@ -109,6 +109,12 @@ public final class AppStore {
     /// release surfaces for panes that no longer exist.
     @ObservationIgnored
     public var onPaneSetChanged: ((Set<String>) -> Void)?
+    /// Called when the set of popup terminals the surface carries changes.
+    ///
+    /// Separate from `onPaneSetChanged` because a popup is not a pane: its id is not
+    /// in `panes`, and a pool that folded the two together would either leak popup
+    /// surfaces or delete live panes.
+    public var onPopupSetChanged: ((Set<String>) -> Void)?
 
     /// Each pane view's rectangle in its window's content view, top-left origin.
     ///

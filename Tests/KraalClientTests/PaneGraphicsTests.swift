@@ -399,3 +399,195 @@ struct GraphicsRepaintTests {
         #expect(!needs, "an unchanged frame was repainted")
     }
 }
+
+@Suite("Popup graphics")
+@MainActor
+struct PopupGraphicsTests {
+    private func assetKey(
+        target: SurfaceGraphicsTarget,
+        imageId: UInt32 = 1,
+        fingerprint: UInt64 = 0xABC
+    ) -> SurfaceGraphicsAssetKey {
+        SurfaceGraphicsAssetKey(
+            source: .terminal(target: target, imageId: imageId),
+            imageWidth: 2,
+            imageHeight: 2,
+            format: .rgba,
+            dataLen: 16,
+            dataFingerprint: fingerprint
+        )
+    }
+
+    private func placement(_ key: SurfaceGraphicsAssetKey, cellX: UInt16 = 0, cellY: UInt16 = 0)
+        -> SurfaceGraphicsPlacement {
+        SurfaceGraphicsPlacement(
+            asset: key,
+            logicalPlacementId: 1,
+            cellX: cellX,
+            cellY: cellY,
+            cols: 2,
+            rows: 1,
+            sourceX: 0,
+            sourceY: 0,
+            sourceWidth: 0,
+            sourceHeight: 0,
+            xOffset: 0,
+            yOffset: 0,
+            layer: 0,
+            scrollbackOffset: 0
+        )
+    }
+
+    private func scene(for key: SurfaceGraphicsAssetKey) -> SurfaceGraphicsScene {
+        SurfaceGraphicsScene(
+            assets: [SurfaceGraphicsAsset(key: key, data: Data(repeating: 0x11, count: 16))],
+            placements: [placement(key)]
+        )
+    }
+
+    private func popupFrame(width: UInt16 = 4, height: UInt16 = 2) -> FrameData {
+        FrameData(
+            cells: Array(repeating: .blank, count: Int(width) * Int(height)),
+            width: width,
+            height: height,
+            cursor: nil,
+            hyperlinks: [],
+            graphics: Data()
+        )
+    }
+
+    private func makeModel(isPopup: Bool = true) -> PaneTerminalModel {
+        PaneTerminalModel(paneId: "popup-1", machine: "machine-a", isPopup: isPopup) { _ in }
+    }
+
+    /// A popup's own images must be drawn. `applyPopup` had no scene parameter at
+    /// all, so everything below the wiring was correct and the picture still never
+    /// appeared (issues #37, #105, #107).
+    @Test("a popup's image is encoded and sent")
+    func popupSendsItsImage() {
+        let model = makeModel()
+        let key = assetKey(target: .popup(terminalId: "popup-1"))
+        model.applyPopup(frame: popupFrame(), revision: 1, scene: scene(for: key))
+        let graphics = model.parkedFrame?.graphics ?? Data()
+        let text = String(bytes: graphics, encoding: .utf8) ?? ""
+        #expect(text.contains("a=t"), "the popup's image was never uploaded")
+    }
+
+    /// A pane's images must **not** be drawn in the popup: the popup terminal is a
+    /// different surface, and those placements address cells inside the pane's grid,
+    /// not the popup's. Drawing them would put a pane's picture over the popup.
+    @Test("a popup ignores images that belong to a pane")
+    func popupIgnoresPaneImages() {
+        let model = makeModel()
+        let paneKey = assetKey(target: .pane(paneId: "w1:p1"))
+        model.applyPopup(frame: popupFrame(), revision: 1, scene: scene(for: paneKey))
+        #expect(model.parkedFrame?.graphics.isEmpty == true,
+                "a pane's image was drawn inside the popup")
+    }
+
+    /// And the reverse filter must not be a blanket "drop everything": a scene that
+    /// mixes both targets keeps only the popup's.
+    @Test("a mixed scene keeps only the popup's images")
+    func popupKeepsOnlyItsOwnImages() {
+        let model = makeModel()
+        let popupKey = assetKey(target: .popup(terminalId: "popup-1"), imageId: 7)
+        let paneKey = assetKey(target: .pane(paneId: "w1:p1"), imageId: 9)
+        let mixed = SurfaceGraphicsScene(
+            assets: [
+                SurfaceGraphicsAsset(key: popupKey, data: Data(repeating: 0x22, count: 16)),
+                SurfaceGraphicsAsset(key: paneKey, data: Data(repeating: 0x33, count: 16)),
+            ],
+            placements: [placement(popupKey), placement(paneKey)]
+        )
+        model.applyPopup(frame: popupFrame(), revision: 1, scene: mixed)
+        let text = String(bytes: model.parkedFrame?.graphics ?? Data(), encoding: .utf8) ?? ""
+        #expect(text.contains("i=7") || text.contains("a=t"),
+                "the popup's own image was dropped along with the pane's")
+        #expect(!text.contains("i=9"), "the pane's image (id 9) was drawn in the popup")
+    }
+
+    /// The popup's image id must not collide with the pane's for the *same* asset
+    /// key. Both live in one Ghostty terminal, so a shared id means one `d=I`
+    /// deletes the other's picture.
+    @Test("a popup and a pane disagree on an image id for the same asset")
+    func popupScopeIsSeparate() {
+        let popupModel = makeModel()
+        let paneModel = makeModel(isPopup: false)
+        let key = assetKey(target: .popup(terminalId: "popup-1"))
+        popupModel.applyPopup(frame: popupFrame(), revision: 1, scene: scene(for: key))
+        // The same key through a pane: the scope has to differ, not the key.
+        let paneScene = SurfaceGraphicsScene(
+            assets: [SurfaceGraphicsAsset(key: key, data: Data(repeating: 0x11, count: 16))],
+            placements: [placement(key)]
+        )
+        paneModel.apply(surface: PaneSurfaceFrame(
+            bootId: "b",
+            projectionRevision: 1,
+            surfaceRevision: 1,
+            frame: popupFrame(),
+            panes: [PaneSurfacePane(
+                paneId: "popup-1",
+                contentRevision: 1,
+                rect: SurfaceRect(originX: 0, originY: 0, width: 4, height: 2),
+                innerRect: SurfaceRect(originX: 0, originY: 0, width: 4, height: 2),
+                scrollbarRect: nil,
+                scroll: nil,
+                focused: true,
+                mouseReporting: false,
+                sgrPixelMouse: false,
+                alternateScreenActive: false,
+                pixelWidth: 0,
+                pixelHeight: 0
+            )],
+            splits: [],
+            popup: nil,
+            graphics: paneScene
+        ))
+        let popupId = imageId(in: popupModel.parkedFrame?.graphics ?? Data())
+        let paneId = imageId(in: paneModel.parkedFrame?.graphics ?? Data())
+        if let popupId, let paneId {
+            #expect(popupId != paneId,
+                    "the popup and the pane shared image id \(popupId); a delete would cross over")
+        }
+    }
+
+    /// A popup paints when its grid exists, not before.
+    ///
+    /// This is the half of the park/drop story that *is* testable: with no grid the
+    /// frame is parked (never written), and once the grid matches it is painted by
+    /// `flushPendingFrame`. The other half — a popup whose first frame is parked,
+    /// dropped by `prepareForNewTerminalView()`, and never replayed because no later
+    /// revision arrives — is a SwiftUI lifecycle fact that no unit test here can
+    /// produce. It was measured in the real app instead:
+    ///
+    /// ```text
+    /// park rev=7                       <- applyPopup, no grid yet
+    /// prepare hadPending=true          <- onAppear drops the park
+    /// paint rev=8 grid=60x12           <- painted only because SwiftUI rebuilt body
+    /// onChange -> replay: pending=false
+    /// ```
+    ///
+    /// The last line is why the replay that was tried for it was removed: by the time
+    /// `onChange(of: surfaceSize)` fires, a later `applyPopup` has already painted and
+    /// the revision guard drops the replay. See #107 for the open question.
+    @Test("a popup parks its frame until the grid exists")
+    func popupParksUntilGridExists() {
+        let model = makeModel()
+        let key = assetKey(target: .popup(terminalId: "popup-1"))
+        model.applyPopup(frame: popupFrame(), revision: 7, scene: scene(for: key))
+        #expect(model.parkedFrame?.width == 4, "the frame was not parked before the grid")
+        #expect(model.parkedFrame?.graphics.isEmpty == false, "the parked frame lost its image")
+    }
+
+    private func imageId(in bytes: Data) -> UInt32? {
+        guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }
+        for chunk in text.components(separatedBy: "\u{1B}_G").dropFirst() {
+            guard let semicolon = chunk.firstIndex(of: ";") else { continue }
+            for field in chunk[chunk.startIndex ..< semicolon].split(separator: ",")
+            where field.hasPrefix("i=") {
+                return UInt32(field.dropFirst(2))
+            }
+        }
+        return nil
+    }
+}

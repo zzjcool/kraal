@@ -152,6 +152,15 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             pool.prune(keeping: paneIds)
         }
 
+        // Popups are not in `paneIds`, so they need their own sweep — keyed on the
+        // popup the surface currently carries. Without it every popup left a
+        // Ghostty surface behind: a prefixed `"popup:<id>"` key never matched
+        // `paneIds`, so `prune(keeping:)` skipped it forever.
+        store.onPopupSetChanged = { [weak self] terminalIds in
+            _ = self
+            pool.prunePopups(keeping: terminalIds)
+        }
+
         // Mouse events are observed, not intercepted: Ghostty keeps its own
         // selection and scroll behaviour, and panes that asked for mouse
         // reporting additionally get semantic events on the daemon connection.
@@ -236,7 +245,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             return AnyView(Color(nsColor: .textBackgroundColor))
         }
         pool.selectMachine(surface.bootId)
-        let model = pool.model(for: popup.terminalId)
+        let model = pool.model(for: popup.terminalId, isPopup: true)
         model.onCellMetrics = { [weak store] cellSize in
             guard let store else { return }
             Task { @MainActor in store.updateCellMetrics(cellSize) }
@@ -263,7 +272,11 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         // actually produce (a popup open on the daemon side, or a malformed row),
         // so the path is unreachable in practice. If it ever becomes reachable, guard
         // on `frameGrid == frame` *before* `lastRevision` instead of widening this.
-        model.applyPopup(frame: popup.frame, revision: surface.surfaceRevision)
+        model.applyPopup(
+            frame: popup.frame,
+            revision: surface.surfaceRevision,
+            scene: surface.graphics
+        )
         return AnyView(GhosttyPopupView(model: model, terminalId: popup.terminalId))
     }
 
