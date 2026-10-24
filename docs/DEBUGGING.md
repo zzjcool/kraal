@@ -334,6 +334,32 @@ let clamped = CGPoint(x: window.frame.origin.x + min(max(offsetX, 0), width - 1)
 判据用**窗口 frame**而不是内容区：AX 把 window 元素报成整个 frame（含标题栏），
 而 app 确实会往标题栏画东西，按内容区收窄会在没证据的前提下拒掉合法点。
 
+### 12.1 同一类错误的第二个方向：原点之外还有**方向**（issue #103，2026-10-25）
+
+修完「屏幕 vs 窗口」这个空间混淆后，同一个像素断言又量错了一次，因为还有第二个自由度：
+**y 从哪一端数**。
+
+- `pane_window_rect` 输出的是 **top-down**（y 从顶边往下，和窗口布局一致）
+- `CGContext` / `CGImage` 的位图行号是 **bottom-up**（y 从底边往上）
+
+`CGRect.intersection` 不报错，`context.draw` 也不报错。实测症状：断言报
+`matched=4032`（绿），但这个 4032 是从**另一条带子**里数出来的，恰好 blob 在两条带子的
+交集里。判据是 `sampled`：请求 `959×664 = 636776`，实际 `301126 = 959×314`。
+
+两个空间错误叠加时更难看出来，因为**数字都在合理范围内**。护栏有两条，缺一不可：
+
+1. `sampled == w * h * scale²` 的**对账断言** —— 它不看内容，只看「量的地方对不对」
+2. 驱动在裁剪发生时**报错退出**，而不是静默缩小区域 —— `fail(.harness, "region clamped
+   from WxH to WxHx — the rect and the image are in different coordinate spaces")`
+
+还有一条只对「值不值得信」有用的：`--match` 的谓词解析**不能 fail-open**。实测一个笔误
+`r>>200` 让断言从「图在不在」退化成「恒真」——`Int(">200") ?? 0` 把比较符吃掉了。
+断言变恒真是最坏的一类假绿：它绿得比真绿还稳。
+
+**这一条的要害**：翻转像素读法的变体我试了三个才对（`-minY` 反、`+minY` 全 0、
+`-(imageHeight - maxY)` 正确），**三个变体都不报错** —— 前两个只是给了错的数。所以
+「推导出来的」不算数，注释里记的是实测出来的那一个。
+
 ---
 
 ## 附：观察工具
