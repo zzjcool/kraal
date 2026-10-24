@@ -2752,7 +2752,16 @@ case_context_menu_remote() {
         lower=$(machine_layout menu-a 2>/dev/null | python3 -c '
 import json, sys
 panes = json.load(sys.stdin)["result"]["layout"]["panes"]
-print(max(panes, key=lambda p: p["rect"]["y"])["pane_id"])
+# Only panes with a real size: a workspace that has accumulated splits keeps the
+# closed ones in the layout with width/height == 0. Taking the plain maximum `y`
+# picked one of those, so the expected id was a pane that is not on screen at all
+# (measured: expected w1:pN (116x0) while the menu was correctly raised for w1:p2,
+# the only visible pane). Requiring a painted size picks a pane a pointer can
+# actually land on, which is what this case is about.
+visible = [p for p in panes if p["rect"]["width"] > 0 and p["rect"]["height"] > 0]
+if not visible:
+    sys.exit(1)
+print(max(visible, key=lambda p: p["rect"]["y"])["pane_id"])
 ')
         printf '%s' "$lower" >"$host_dir/expected-pane.txt"
         local point
