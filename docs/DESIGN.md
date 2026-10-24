@@ -1023,6 +1023,37 @@ Kraal/
 | 3 | 三个 optional codec 开启后的收益 | 对比 patch 大小 | 优化项 |
 | 4 | Ghostty `InMemoryTerminalSession` 喂 herdr ANSI 的实际渲染 | 跑通 M2 | 核心假设，已在 pyte 上验证 |
 
+### 12.1 kitty graphics 的响应会不会污染输入流（#110，2026-10-25 实测）
+
+`directGraphics` 至今是 `false`（`Sources/KraalProtocol/Endpoint.swift`）。要不要打开它，卡在一个问题上：
+**kitty 的 `OK` 响应会不会流进「终端 → daemon」的通道，被当成用户按键**。这是 `DEBUGGING.md` §9
+（`tracksRelease`）那种「静默吞键」的形状，所以先测再谈实现。
+
+**测法**：`InMemoryTerminalSession` 的 `write` 闭包是终端唯一的出口（`PaneTerminal.swift:167`），
+临时在那里加一行日志记录每个字节；然后用现有的 `kitty-graphics` GUI 用例真跑一遍。
+
+**结论（三层，都有实测）**：
+
+| 情形 | 结果 |
+| --- | --- |
+| 编码器现有的 `q=2`（静默） | `write` 被调用 **0 次** —— 响应根本不产生 |
+| 把上传命令临时改成 `q=0`（要求响应） | `write` 收到 `ESC _ G i=367726,p=343071;OK ESC \`（25 字节） |
+| 改回 `q=2` | 回到 0 次 |
+
+那个 25 字节的 APC 序列如果不去管，会被 `routeInput`（`KraalMacMain.swift:213`）原样转发给
+daemon —— 它没有 APC 过滤。**这就是 `tracksRelease` 的同形风险，而且它真实存在。**
+
+**但它是可剥离的**：APC 有明确边界（`ESC _` … `ESC \`），剥离后普通按键（`a`）和方向键
+（`ESC [ A`）原样保留；跨包的不完整序列可以缓冲到下一个包。
+
+**所以**：`directGraphics` 不是死路，但启用它的前置条件是把 APC 剥离加进 `routeInput`，
+并且必须有测试证明「剥离器不会吃掉以 `ESC _` 开头的**合法按键序列**」——键盘也能产生 `ESC`，
+而 `_` 是合法按键，只有紧跟其后的字节才能判断。
+
+**未验证**：真的打开 `directGraphics` + `pixel_mouse` 之后 daemon 会发来什么（`graphicsFile` /
+`graphicsTransmissionRetired` 的实际形态），需要上游的 `native_graphics.rs` 行为在真实 daemon 上复现。
+这一步留在 #110 的后续单里。
+
 ---
 
 ## 附录 A：实测数据速查

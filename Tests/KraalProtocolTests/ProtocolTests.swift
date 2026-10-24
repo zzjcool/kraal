@@ -699,9 +699,10 @@ struct TerminalInputDecoderTests {
     func loneEscape() {
         var decoder = TerminalInputDecoder()
         #expect(decoder.decode(Data([0x1B])).isEmpty)
-        let flushed = decoder.flushEscape()
-        #expect(flushed != nil)
-        #expect(decoder.flushEscape() == nil)
+        // `flushEscape` returns an array since #110: a stranded `ESC _` needs two
+        // events' worth of treatment, and a single optional could only ever carry one.
+        #expect(codes(decoder.flushEscape()) == ["key(esc, m0)"])
+        #expect(decoder.flushEscape().isEmpty)
     }
 
     @Test("Alt-modified characters carry the alt modifier")
