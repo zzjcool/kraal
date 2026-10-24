@@ -21,6 +21,33 @@ import KraalProtocol
 import KraalUI
 import SwiftUI
 
+extension SurfaceGraphicsScene {
+    /// Keeps only what belongs to the popup `terminalId`.
+    ///
+    /// Placements are dropped along with their assets: a placement whose asset was
+    /// removed would reference an image the terminal never received, and kitty
+    /// answers that with an error rather than a no-op.
+    ///
+    /// Pane placements address cells inside the pane's grid, not the popup's, so
+    /// keeping them would draw a pane's picture over the popup (upstream splits on
+    /// exactly this: `client_placement_origin` uses `popup_origin` for
+    /// popup-sourced placements, `kitty_graphics/surface.rs:938-958`).
+    func filtered(toPopup terminalId: String) -> SurfaceGraphicsScene {
+        let kept = placements.filter { placement in
+            if case let .terminal(target: .popup(id), _) = placement.asset.source {
+                return id == terminalId
+            }
+            return false
+        }
+        let keys = Set(kept.map(\.asset))
+        return SurfaceGraphicsScene(
+            assets: assets.filter { keys.contains($0.key) },
+            placements: kept,
+            retainedAssets: retainedAssets.filter { keys.contains($0) }
+        )
+    }
+}
+
 /// One pane's terminal, keyed by pane id.
 @MainActor
 public final class PaneTerminalModel {
@@ -49,6 +76,13 @@ public final class PaneTerminalModel {
     /// `d=I` would delete the other's picture. Pane ids are scoped to one daemon —
     /// upstream says so outright (`docs/next/website/.../connecting-machines.mdx:118`).
     private let machine: String
+    /// Whether this model draws a popup rather than a pane.
+    ///
+    /// It changes two things, both about id spaces: which graphics targets this
+    /// terminal accepts, and the scope its image ids are hashed from. The pool keys
+    /// popup models by the popup's `terminalId`, which can coincide with a pane id,
+    /// so the kind cannot be inferred from the id alone.
+    private let isPopup: Bool
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
@@ -105,9 +139,25 @@ public final class PaneTerminalModel {
     ///
     /// - Parameter revision: the daemon's `contentRevision` for this popup, used only
     ///   to skip frames that changed nothing.
-    public func applyPopup(frame: FrameData, revision: UInt64) {
+    public func applyPopup(frame: FrameData, revision: UInt64, scene: SurfaceGraphicsScene) {
         guard revision != lastRevision || frameGrid == nil else { return }
         lastRevision = revision
+        var frame = frame
+        // Only the popup's own images belong here. The scene is the whole tab's —
+        // pane placements address cells inside the pane's grid, and this terminal is
+        // the popup, so drawing them would put a pane's picture over the popup
+        // (upstream does the same split: `client_placement_origin` picks
+        // `popup_origin` for popup-sourced placements and `main_origin` for
+        // everything else, `kitty_graphics/surface.rs:938-958`).
+        //
+        // Reset first, for the same reason as `apply(surface:)`: the encoder is
+        // stateful, so encoding before the reset would produce the pre-reset
+        // (possibly zero) bytes for a frame that just cleared the screen.
+        resetSurfaces()
+        frame.graphics = graphicsEncoder.encode(
+            scene: scene.filtered(toPopup: paneId),
+            scope: graphicsScope
+        )
         frameGrid = frame
 
         // Same reason as `apply(surface:)`: the terminal attaches asynchronously, and
@@ -117,9 +167,11 @@ public final class PaneTerminalModel {
             return
         }
         pendingFrame = nil
-        resetSurfaces()
         session.receive(Data(clearScreenSequence.utf8))
-        session.receive(renderer.render(frame))
+        let painted = renderer.render(frame)
+        logGraphics(encoded: frame.graphics, painted: painted,
+                    assets: scene.assets.count, placements: scene.placements.count)
+        session.receive(painted)
     }
 
     /// One line per frame that carried graphics, recording **both** the encoder's
@@ -197,15 +249,26 @@ public final class PaneTerminalModel {
     /// image ids are a hash of this string. Sharing it would put both daemons'
     /// images in one namespace, where one pane's `d=I` deletes the other's picture.
     private var graphicsScope: String {
-        machine.isEmpty ? paneId : "\(machine)/\(paneId)"
+        let base = machine.isEmpty ? paneId : "\(machine)/\(paneId)"
+        // A popup and a pane never draw into the same terminal, but the image ids
+        // they hand to Ghostty are per *terminal*, and a popup model is keyed by the
+        // same string a pane can be. Tagging the kind keeps the two id spaces apart
+        // even when the ids coincide, so one's `d=I` cannot delete the other's image.
+        return isPopup ? "popup/\(base)" : "pane/\(base)"
     }
 
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
-    init(paneId: String, machine: String = "", onInput: @escaping @Sendable (Data) -> Void) {
+    init(
+        paneId: String,
+        machine: String = "",
+        isPopup: Bool = false,
+        onInput: @escaping @Sendable (Data) -> Void
+    ) {
         self.paneId = paneId
         self.machine = machine
+        self.isPopup = isPopup
         session = InMemoryTerminalSession(
             write: { data in
                 // Ghostty -> daemon: key bytes, paste payloads, replies to queries.
@@ -704,12 +767,21 @@ public final class PaneTerminalPool {
         models.removeAll()
     }
 
-    public func model(for paneId: String) -> PaneTerminalModel {
-        let key = Key(machine: machine ?? "", paneId: paneId)
+    /// The model for a pane, or for a popup when `isPopup` is set.
+    ///
+    /// The two live in separate key spaces because their graphics scopes differ and
+    /// a popup's `terminalId` can coincide with a pane id: sharing one model would
+    /// let a popup and a pane fight over the same image ids in one terminal.
+    public func model(for paneId: String, isPopup: Bool = false) -> PaneTerminalModel {
+        let key = Key(machine: machine ?? "", paneId: isPopup ? "popup:\(paneId)" : paneId)
         if let existing = models[key] {
             return existing
         }
-        let model = PaneTerminalModel(paneId: paneId, machine: key.machine) { [weak self] data in
+        let model = PaneTerminalModel(
+            paneId: paneId,
+            machine: key.machine,
+            isPopup: isPopup
+        ) { [weak self] data in
             self?.onInput(paneId, data)
         }
         models[key] = model

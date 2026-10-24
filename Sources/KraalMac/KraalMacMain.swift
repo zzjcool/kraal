@@ -236,7 +236,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             return AnyView(Color(nsColor: .textBackgroundColor))
         }
         pool.selectMachine(surface.bootId)
-        let model = pool.model(for: popup.terminalId)
+        let model = pool.model(for: popup.terminalId, isPopup: true)
         model.onCellMetrics = { [weak store] cellSize in
             guard let store else { return }
             Task { @MainActor in store.updateCellMetrics(cellSize) }
@@ -263,7 +263,11 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         // actually produce (a popup open on the daemon side, or a malformed row),
         // so the path is unreachable in practice. If it ever becomes reachable, guard
         // on `frameGrid == frame` *before* `lastRevision` instead of widening this.
-        model.applyPopup(frame: popup.frame, revision: surface.surfaceRevision)
+        model.applyPopup(
+            frame: popup.frame,
+            revision: surface.surfaceRevision,
+            scene: surface.graphics
+        )
         return AnyView(GhosttyPopupView(model: model, terminalId: popup.terminalId))
     }
 
