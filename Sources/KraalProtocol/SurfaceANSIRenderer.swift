@@ -35,6 +35,11 @@ public struct SurfaceANSIRenderer {
     /// The DECSCUSR shape currently applied, so the sequence is only re-emitted
     /// when it changes.
     private var lastShape: UInt8 = 0
+    /// The kitty graphics bytes the terminal already holds.
+    ///
+    /// Diffed like the cells: a frame that changed one row must not resend a
+    /// megabyte of image data (issue #37).
+    private var lastGraphics = Data()
 
     public init() {}
 
@@ -50,6 +55,9 @@ public struct SurfaceANSIRenderer {
         // that no longer has content.
         lastVisibleCursor = nil
         lastShape = 0
+        // The screen is cleared, which takes any placed image with it. Forgetting
+        // the bytes here is what makes the next frame write them again.
+        lastGraphics = Data()
     }
 
     /// Returns the ANSI bytes that bring a terminal from the previous frame to
@@ -117,6 +125,30 @@ public struct SurfaceANSIRenderer {
             lastShape = hostCursor.shape
         }
         output.appendUTF8(hostCursor.visible ? "\u{1B}[?25h" : "\u{1B}[?25l")
+
+        // Kitty graphics, at the end of the block and inside it (issue #37).
+        //
+        // `frame.graphics` is a ready-to-write kitty byte stream the daemon
+        // already encoded — not a scene to compose. A client's whole job is to put
+        // it in the output, which it did not: `PaneTerminal` passed `Data()` here,
+        // so an image was decoded, measured with the cell grid, and then dropped.
+        //
+        // Three details, all from upstream `frame_output.rs::write_composed_frame`:
+        //
+        //   * inside the synchronized-output pair — outside it the terminal paints
+        //     cells and image in two flushes, which reads as a flicker;
+        //   * after the cells — written first, the row repaint would cover it;
+        //   * wrapped in DECSC/DECRC — a graphics sequence leaves the cursor where
+        //     it stopped, and the next frame's CUP would start from there.
+        //
+        // Only when the bytes changed. A diff frame runs on every keystroke, and
+        // resending a whole image then would cost more than the frame itself.
+        if !frame.graphics.isEmpty, frame.graphics != lastGraphics {
+            output.appendUTF8("\u{1B}7")
+            output.append(frame.graphics)
+            output.appendUTF8("\u{1B}8")
+            lastGraphics = frame.graphics
+        }
 
         // Close the synchronized-output pair opened above. Unconditional, to
         // match the unconditional open — a diff frame that opened `?2026h` and
