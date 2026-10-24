@@ -134,7 +134,8 @@ public enum SurfaceGeometry {
         contentRevisionChanged: Bool,
         previousGrid: (width: Int, height: Int)?,
         currentGrid: (width: Int, height: Int),
-        cellsDiffer: @autoclosure () -> Bool = false
+        cellsDiffer: @autoclosure () -> Bool = false,
+        graphicsDiffer: @autoclosure () -> Bool = false
     ) -> Bool {
         if contentRevisionChanged { return true }
         guard let previousGrid else { return true }
@@ -143,7 +144,13 @@ public enum SurfaceGeometry {
         // Last, and lazily: comparing every cell is only worth it once the cheap
         // reasons have been ruled out. `@autoclosure` keeps a frame that repainted
         // for one of those reasons from paying for a comparison nobody asked.
-        return cellsDiffer()
+        //
+        // Graphics are a third, independent reason. An image can move, appear or be
+        // removed without a single cell changing: the cells under it are covered by
+        // the image, so the daemon's cell buffer is identical. Comparing cells alone
+        // therefore dropped those frames and the picture froze at its old position
+        // until something else happened to repaint (#105).
+        return cellsDiffer() || graphicsDiffer()
     }
 
     /// Whether the cells changed, ignoring the cursor.

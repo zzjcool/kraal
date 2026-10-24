@@ -38,6 +38,17 @@ public final class PaneTerminalModel {
         }
     )
     private var renderer = SurfaceANSIRenderer()
+    /// Turns the daemon's graphics scene into kitty bytes (issue #105, parent #37).
+    ///
+    /// Must be reset together with `renderer` — see `resetSurfaces()`.
+    private var graphicsEncoder = GraphicsEncoder()
+    /// The machine this pane belongs to, used only to scope graphics image ids.
+    ///
+    /// Image ids are a hash of `scope + asset key`, so two machines that both name
+    /// a pane `w1:p1` would otherwise share an id namespace and one pane's
+    /// `d=I` would delete the other's picture. Pane ids are scoped to one daemon —
+    /// upstream says so outright (`docs/next/website/.../connecting-machines.mdx:118`).
+    private let machine: String
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private var frameGrid: FrameData?
@@ -57,6 +68,14 @@ public final class PaneTerminalModel {
     private var pendingFrame: FrameData?
     /// The retry chain that keeps trying to paint `pendingFrame`.
     private var pendingRetryTask: Task<Void, Never>?
+
+    /// The frame parked because the terminal had no grid yet, if any.
+    ///
+    /// Exposed read-only so tests can see what `apply(surface:)` produced without a
+    /// Ghostty surface: with no grid, the frame is parked rather than painted, and
+    /// parking is the observable seam. It is also the *real* path — `apply` is what
+    /// the view calls — so a test on it cannot pass while the wiring is cut.
+    var parkedFrame: FrameData? { pendingFrame }
 
     /// Clears the visible screen and the scrollback, then homes the cursor.
     ///
@@ -93,16 +112,48 @@ public final class PaneTerminalModel {
             return
         }
         pendingFrame = nil
-        renderer.reset()
+        resetSurfaces()
         session.receive(Data(clearScreenSequence.utf8))
         session.receive(renderer.render(frame))
+    }
+
+    /// Puts a frame on the terminal, with the daemon's graphics scene encoded into
+    /// the kitty bytes the renderer writes through.
+    ///
+    /// The encoder is what turns the scene (assets + placements) into `\x1b_G…`
+    /// sequences. Without it the pane passes `surface.frame.graphics` — the *ANSI
+    /// path's* field, which the daemon leaves empty for semantic clients — so an
+    /// image was decoded, laid out against the cell grid, and thrown away
+    /// (issue #37, then #105 for this last hop).
+    ///
+    /// Returns what was handed to the terminal so callers (and tests) can see the
+    /// bytes that actually went out. An empty return means nothing was written.
+    @discardableResult
+    func paint(_ frame: FrameData, scene: SurfaceGraphicsScene) -> Data {
+        var painted = frame
+        painted.graphics = graphicsEncoder.encode(scene: scene, scope: graphicsScope)
+        let bytes = renderer.render(painted)
+        if !bytes.isEmpty {
+            session.receive(bytes)
+        }
+        return bytes
+    }
+
+    /// The id namespace for this pane's images.
+    ///
+    /// `machine + paneId`, not `paneId`: two machines both name a pane `w1:p1`, and
+    /// image ids are a hash of this string. Sharing it would put both daemons'
+    /// images in one namespace, where one pane's `d=I` deletes the other's picture.
+    private var graphicsScope: String {
+        machine.isEmpty ? paneId : "\(machine)/\(paneId)"
     }
 
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
-    init(paneId: String, onInput: @escaping @Sendable (Data) -> Void) {
+    init(paneId: String, machine: String = "", onInput: @escaping @Sendable (Data) -> Void) {
         self.paneId = paneId
+        self.machine = machine
         session = InMemoryTerminalSession(
             write: { data in
                 // Ghostty -> daemon: key bytes, paste payloads, replies to queries.
@@ -159,7 +210,11 @@ public final class PaneTerminalModel {
             // without changing the grid, so neither cheap reason above fires. The
             // cells are the only thing that says the screen changed — see
             // `needsRepaint`'s note on scrolling.
-            cellsDiffer: SurfaceGeometry.cellsChanged(previous: frameGrid, current: frame)
+            cellsDiffer: SurfaceGeometry.cellsChanged(previous: frameGrid, current: frame),
+            // An image can move or change without touching a cell: the cells it
+            // covers are not part of the daemon's cell buffer. Comparing cells alone
+            // dropped those frames, freezing the picture at its old position (#105).
+            graphicsDiffer: frameGrid?.graphics != frame.graphics
         ) else { return }
         // Printed only when the cells alone decided a repaint — the revision and the
         // grid both said "nothing changed" and the frame's contents said otherwise.
@@ -196,7 +251,7 @@ public final class PaneTerminalModel {
             // the reset for the case that actually needs it (the old rows are the
             // wrong width, so incremental repainting would leave them behind) and
             // lets a cursor move or fresh text go out as a delta.
-            renderer.reset()
+            resetSurfaces()
             session.receive(Data(clearScreenSequence.utf8))
             needsCleanRepaint = false
         }
@@ -259,7 +314,7 @@ public final class PaneTerminalModel {
             // the rows written at the wrong width cannot reappear, then paint the
             // whole frame instead of a delta.
             needsCleanRepaint = false
-            renderer.reset()
+            resetSurfaces()
             session.receive(Data(clearScreenSequence.utf8))
         }
 
@@ -306,7 +361,7 @@ public final class PaneTerminalModel {
         pendingFrame = nil
         lastRevision = 0
         frameGrid = nil
-        renderer.reset()
+        resetSurfaces()
         let clear = Data(clearScreenSequence.utf8)
         let painted = renderer.render(frame)
 
@@ -386,7 +441,7 @@ public final class PaneTerminalModel {
     /// something writes again. Dropping the memory forces the next apply to send
     /// the whole frame.
     func prepareForNewTerminalView() {
-        renderer.reset()
+        resetSurfaces()
         lastRevision = 0
         frameGrid = nil
         lastProjection = nil
@@ -399,8 +454,22 @@ public final class PaneTerminalModel {
         pendingRetryTask = nil
     }
 
-    func reset() {
+    /// Forgets everything the terminal was told: cells *and* graphics.
+    ///
+    /// The two resets are one operation on purpose. `GraphicsEncoder.reset()` emits
+    /// no deletes, and the reason it can get away with that is that the screen was
+    /// cleared — the renderer's next frame sends `2J`, and the terminal's `ED2`
+    /// reclaims the images. Doing one without the other breaks that reasoning in
+    /// the direction that hurts: reset the renderer alone and the encoder still
+    /// believes it uploaded the image, so the next frame sends no `a=t` and the
+    /// picture stays erased **permanently** (#101 review, `GraphicsSeamTests`).
+    func resetSurfaces() {
         renderer.reset()
+        graphicsEncoder.reset()
+    }
+
+    func reset() {
+        resetSurfaces()
         lastRevision = 0
         lastProjection = nil
         frameGrid = nil
@@ -425,6 +494,22 @@ public final class PaneTerminalModel {
         from surface: PaneSurfaceFrame,
         geometry: PaneSurfacePane
     ) -> FrameData {
+        // Encode *here*, once per frame, so every path that paints this frame —
+        // including the parked-frame retries below — carries the graphics without
+        // each one having to remember. The encoder diffs against what it already
+        // sent, so a frame with unchanged images contributes no bytes.
+        let graphics = graphicsEncoder.encode(scene: surface.graphics, scope: graphicsScope)
+        // One line per frame that actually carries graphics. This is the only
+        // evidence that a *daemon* sent assets and placements at all: the wire
+        // type exists either way, and a test can only assert what the client does
+        // with a scene it was handed. Narrow on purpose — logging every frame
+        // would make "an image arrived" unfalsifiable.
+        if !graphics.isEmpty {
+            kraalLog("graphics: pane=\(paneId) scope=\(graphicsScope) "
+                + "assets=\(surface.graphics.assets.count) "
+                + "placements=\(surface.graphics.placements.count) "
+                + "bytes=\(graphics.count)")
+        }
         let area = geometry.innerRect
         let width = Int(area.width)
         let height = Int(area.height)
@@ -474,11 +559,14 @@ public final class PaneTerminalModel {
             height: UInt16(height),
             cursor: cursor,
             hyperlinks: surface.frame.hyperlinks,
-            // The daemon pre-encodes kitty graphics into this byte stream; the
-            // renderer writes it through. It used to be `Data()` here, which
-            // decoded an image, laid it out with the cell grid, and then threw it
-            // away (issue #37).
-            graphics: surface.frame.graphics
+            // The encoder's output, not `surface.frame.graphics`. Kitty graphics do
+            // not live in the cell frame: the daemon sends them as a *scene*
+            // (`surface.graphics`) and the client encodes it. Reading
+            // `surface.frame.graphics` here — what this used to do — reads the ANSI
+            // path's field, which the daemon leaves empty for semantic clients, so
+            // an image was decoded, laid out against the grid, and thrown away
+            // (issues #37, #105).
+            graphics: graphics
         )
     }
 }
@@ -538,7 +626,7 @@ public final class PaneTerminalPool {
         if let existing = models[key] {
             return existing
         }
-        let model = PaneTerminalModel(paneId: paneId) { [weak self] data in
+        let model = PaneTerminalModel(paneId: paneId, machine: key.machine) { [weak self] data in
             self?.onInput(paneId, data)
         }
         models[key] = model
