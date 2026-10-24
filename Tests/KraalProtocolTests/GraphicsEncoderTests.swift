@@ -217,6 +217,13 @@ struct GraphicsEncoderTests {
                                    scope: "daemon-a")
         #expect(upload(from: bytes) == nil,
                 "an asset with no bytes was uploaded anyway")
+        // And no placement either. Asserting `a=t` absence alone would accept an
+        // orphaned `a=p`, which references an image the terminal never received:
+        // kitty answers that with an error printed into the pane and draws nothing
+        // (`ordereredPlacements` skips it for that reason). Zero sequences is the
+        // correct outcome for "nothing to draw".
+        #expect(kittySequences(bytes).isEmpty,
+                "an undrawable placement was still emitted: \(kittySequences(bytes))")
     }
 
     @Test("an asset whose length disagrees with its key is not uploaded")
@@ -236,11 +243,13 @@ struct GraphicsEncoderTests {
 
 }
 
-// Builders and stream inspection, split out so the suite body stays inside
-// SwiftLint's 400-line type limit. Helper-only: no test lives here.
+// The second half of the suite, split out because the struct passed SwiftLint's
+// 400-line body limit. Tests live in both halves on purpose: the struct above
+// holds builders and byte-shape assertions, this extension holds the cache state
+// machine plus the helpers both use.
 extension GraphicsEncoderTests {
-    // Tests for the cache state machine (issue #101) — the half whose bugs are
-    // silent: a missed delete leaves an image on screen forever.
+    // The cache state machine's own bugs are silent ones: a missed delete leaves
+    // an image on screen forever, a missed upload leaves it erased.
 
     // MARK: - Cache
 
@@ -347,6 +356,20 @@ extension GraphicsEncoderTests {
         let ids = keys.map { GraphicsEncoder.imageId(for: $0, scope: "daemon-a") }
         #expect(Set(ids).count == ids.count,
                 "two different sources produced the same image id: \(ids)")
+
+        // The one construction where a duplicated target tag is *fatal*, and the
+        // reason the test above cannot be trusted on its own: `.pane` and `.popup`
+        // carry the same shape (`String`), so the tag is the only thing separating
+        // them. Measured with the same string on both sides and the same target
+        // tag: both hash to 13271382181840493718 — one image id for two panes, and
+        // one pane's `d=I` deletes the other's picture.
+        let sameShape = [
+            key(.terminal(target: .pane(paneId: "SAME"), imageId: 1)),
+            key(.terminal(target: .popup(terminalId: "SAME"), imageId: 1)),
+        ]
+        let sameShapeIds = sameShape.map { GraphicsEncoder.imageId(for: $0, scope: "daemon-a") }
+        #expect(sameShapeIds[0] != sameShapeIds[1],
+                "a duplicated target tag collides when the string is identical: \(sameShapeIds)")
     }
 
     @Test("a redrawn image does not reuse the previous id")
