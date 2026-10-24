@@ -2865,13 +2865,19 @@ case_kitty_graphics() {
         check "the encoded frame carries an asset and a placement" \
             "$(printf '%s' "$line" | grep -qE 'assets=[1-9]' && printf '%s' "$line" | grep -qE 'placements=[1-9]' && echo 0 || echo 1)" \
             "${line:-<none>}"
-        # And the payload is non-trivial: an upload of a 64x64 RGBA image plus its
-        # placement is thousands of bytes, not a stray escape sequence.
-        local count
-        count=$(printf '%s' "$line" | sed -n 's/.*bytes=\([0-9]*\).*/\1/p')
-        check "the payload is a real kitty upload, not a stray byte" \
-            "$([ -n "$count" ] && [ "$count" -gt 1000 ] && echo 0 || echo 1)" \
-            "bytes=${count:-<none>}"
+        # `painted`, not `encoded`: the renderer is allowed to skip graphics it
+        # believes are unchanged (`lastGraphics`), so "the encoder produced bytes"
+        # says nothing about whether the terminal was written. Both numbers are on
+        # the line precisely so this assertion can be about the second one.
+        # `kitty=`, the count of kitty sequences in what the *renderer* wrote. A byte
+        # count would not do: the text frame alone is a few kilobytes, so
+        # "painted > 1000" passes with no image at all (verified by injecting a
+        # renderer that drops graphics — painted fell 26546 -> 4542 and still passed).
+        local kitty
+        kitty=$(printf '%s' "$line" | sed -n 's/.*kitty=\([0-9]*\).*/\1/p')
+        check "the renderer wrote kitty sequences to the terminal" \
+            "$([ -n "$kitty" ] && [ "$kitty" -ge 2 ] && echo 0 || echo 1)" \
+            "kitty sequences in the renderer output: ${kitty:-<none>}"
     }
 }
 

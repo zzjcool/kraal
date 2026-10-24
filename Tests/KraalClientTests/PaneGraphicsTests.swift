@@ -47,7 +47,11 @@ struct PaneGraphicsTests {
         )
     }
 
-    private func scene(fingerprint: UInt64 = 0xABC, cellX: UInt16 = 1) -> SurfaceGraphicsScene {
+    private func scene(
+        fingerprint: UInt64 = 0xABC,
+        cellX: UInt16 = 1,
+        cellY: UInt16 = 0
+    ) -> SurfaceGraphicsScene {
         let key = assetKey(fingerprint: fingerprint)
         return SurfaceGraphicsScene(
             assets: [SurfaceGraphicsAsset(key: key, data: Data(repeating: 0x11, count: 16))],
@@ -55,7 +59,7 @@ struct PaneGraphicsTests {
                 asset: key,
                 logicalPlacementId: 1,
                 cellX: cellX,
-                cellY: 0,
+                cellY: cellY,
                 cols: 2,
                 rows: 1,
                 sourceX: 0,
@@ -106,17 +110,27 @@ struct PaneGraphicsTests {
     // MARK: - Acceptance 1: the scene reaches the terminal
 
     /// A surface frame for `w1:p1`, 4x1 cells, with the given graphics scene.
-    private func surface(_ scene: SurfaceGraphicsScene, revision: UInt64 = 1) -> PaneSurfaceFrame {
+    private func surface(
+        _ scene: SurfaceGraphicsScene,
+        revision: UInt64 = 1,
+        gridWidth: UInt16 = 4,
+        paneOrigin: (x: UInt16, y: UInt16) = (x: 0, y: 0)
+    ) -> PaneSurfaceFrame {
         PaneSurfaceFrame(
             bootId: "boot-1",
             projectionRevision: 1,
             surfaceRevision: revision,
-            frame: blankFrame(),
+            frame: blankFrame(width: gridWidth),
             panes: [PaneSurfacePane(
                 paneId: "w1:p1",
                 contentRevision: revision,
                 rect: SurfaceRect(originX: 0, originY: 0, width: 4, height: 1),
-                innerRect: SurfaceRect(originX: 0, originY: 0, width: 4, height: 1),
+                innerRect: SurfaceRect(
+                    originX: paneOrigin.x,
+                    originY: paneOrigin.y,
+                    width: 4,
+                    height: 1
+                ),
                 scrollbarRect: nil,
                 scroll: nil,
                 focused: true,
@@ -156,14 +170,20 @@ struct PaneGraphicsTests {
                 "an empty scene produced graphics bytes")
     }
 
-    /// And the whole point of the issue, end to end through the model: an asset the
-    /// daemon sent becomes kitty bytes on the pane's terminal.
+    /// The whole point of the issue, end to end through the model: an asset the
+    /// daemon sent becomes kitty bytes for the pane's terminal.
+    ///
+    /// Through `apply`, not a test-only helper: `apply` is what the view calls, and
+    /// a helper that encodes on its own would keep passing with the real wiring cut
+    /// (that is exactly how the first version of these tests was green while the
+    /// product was broken).
     @Test("a pane with an image sends kitty graphics")
     func paneSendsGraphics() {
         let model = makeModel()
-        let painted = model.paint(blankFrame(), scene: scene())
-        #expect(hasUpload(painted), "no kitty upload reached the terminal")
-        #expect(imageId(in: painted) != nil, "no image id in the stream")
+        model.apply(surface: surface(scene()))
+        let graphics = model.parkedFrame?.graphics ?? Data()
+        #expect(hasUpload(graphics), "no kitty upload for the pane")
+        #expect(imageId(in: graphics) != nil, "no image id in the stream")
     }
 
     /// Acceptance 2: nothing to draw must stay nothing to draw. An encoder handed
@@ -172,7 +192,8 @@ struct PaneGraphicsTests {
     @Test("a pane with no image sends no kitty graphics")
     func paneWithoutGraphicsSendsNothing() {
         let model = makeModel()
-        let painted = model.paint(blankFrame(), scene: SurfaceGraphicsScene())
+        model.apply(surface: surface(SurfaceGraphicsScene()))
+        let painted = model.parkedFrame?.graphics ?? Data()
         #expect(!hasUpload(painted), "an empty scene produced an upload")
         // No kitty sequence at all — not "no synchronized output". `?2026h` frames
         // the *cell* update and is always there; asserting its absence would be a
@@ -184,27 +205,38 @@ struct PaneGraphicsTests {
         #expect(!text.contains("\u{1B}_G"), "the renderer emitted a kitty sequence for no graphics")
     }
 
-    /// Acceptance 3: the encoder's cache is what makes an unchanged image free.
-    /// The *pane* must not defeat it by re-encoding a scene that did not change —
-    /// note the second paint is a real paint (cells are re-sent if they differ),
-    /// so this asserts on the graphics payload specifically, not on the output
-    /// being empty.
-    @Test("an unchanged scene is not uploaded twice")
-    func unchangedSceneIsNotReuploaded() {
+    /// A repeat of the same scene still reaches the terminal.
+    ///
+    /// The *caching* half of this (a second identical frame costs zero bytes) belongs
+    /// to `GraphicsEncoderTests` — it cannot be observed here, because in a test every
+    /// `apply` takes the reset branch: with no Ghostty grid `previousGrid` is nil, so
+    /// `needsScreenReset` always says yes, which clears the encoder and forces a
+    /// re-upload. What this pins is the safety property that matters on this side:
+    /// repeating a scene never yields a frame with no image.
+    @Test("repeating a scene still carries the image")
+    func repeatedSceneStillCarriesTheImage() {
         let model = makeModel()
-        _ = model.paint(blankFrame(), scene: scene())
-        let second = model.paint(blankFrame(), scene: scene())
-        #expect(!hasUpload(second), "the image was uploaded again for an unchanged scene")
+        model.apply(surface: surface(scene(), revision: 1))
+        let first = model.parkedFrame?.graphics ?? Data()
+        model.apply(surface: surface(scene(), revision: 2))
+        let second = model.parkedFrame?.graphics ?? Data()
+        #expect(hasUpload(first) && hasUpload(second),
+                "one of the two frames carried no image")
     }
 
-    /// The complement: a *changed* scene must be uploaded. Without this, the test
-    /// above would pass on a model that never uploads anything at all.
-    @Test("a changed image is uploaded")
+    /// The complement: a *changed* scene must be uploaded, and its id must differ.
+    /// Without this, the assertion above would pass on a model that uploads the same
+    /// thing forever regardless of what the daemon sent.
+    @Test("a changed image is uploaded under a new id")
     func changedSceneIsUploaded() {
         let model = makeModel()
-        _ = model.paint(blankFrame(), scene: scene(fingerprint: 0xABC))
-        let second = model.paint(blankFrame(), scene: scene(fingerprint: 0xDEF))
+        model.apply(surface: surface(scene(fingerprint: 0xABC), revision: 1))
+        let first = model.parkedFrame?.graphics ?? Data()
+        model.apply(surface: surface(scene(fingerprint: 0xDEF), revision: 2))
+        let second = model.parkedFrame?.graphics ?? Data()
         #expect(hasUpload(second), "a redrawn image was not uploaded")
+        #expect(imageId(in: first) != imageId(in: second),
+                "a redrawn image kept the old image id, so the terminal keeps the old bitmap")
     }
 
     // MARK: - Acceptance 2 (issue #101's contract): paired reset
@@ -216,15 +248,85 @@ struct PaneGraphicsTests {
     @Test("resetting the surfaces makes the next frame upload again")
     func resetPairingReuploads() {
         let model = makeModel()
-        _ = model.paint(blankFrame(), scene: scene())
+        model.apply(surface: surface(scene(), revision: 1))
 
         model.resetSurfaces()
 
-        let afterReset = model.paint(blankFrame(), scene: scene())
+        model.apply(surface: surface(scene(), revision: 2))
+        let afterReset = model.parkedFrame?.graphics ?? Data()
         #expect(hasUpload(afterReset),
                 "the encoder was not reset with the renderer, so the image would stay erased")
     }
 
+    /// The reset must run **before** the encode, not after.
+    ///
+    /// `GraphicsEncoder` is stateful: a frame whose images did not change encodes to
+    /// zero bytes. If `resetSurfaces()` ran after that encode, the frame would carry
+    /// the pre-reset (empty) bytes while the `2J` that follows erases the picture —
+    /// and it would stay erased until the next frame, which for a still program may
+    /// never come. A grid change reaches this on every resize, so it is not rare.
+    ///
+    /// This is asserted as a *contract* rather than by reconstructing the race: in a
+    /// test the encoder is never in the "cached, unchanged" state when a reset lands,
+    /// because every `apply` here resets (no Ghostty grid means `previousGrid` is
+    /// nil). So the observable consequence is stated directly — a frame that resets
+    /// the screen must re-upload — and the ordering that guarantees it lives in the
+    /// code with a comment explaining why it cannot be moved.
+    @Test("a frame that resets the screen re-uploads the image")
+    func resetFrameReuploads() {
+        let model = makeModel()
+        model.apply(surface: surface(scene(), revision: 1))
+        #expect(model.parkedFrame?.graphics.isEmpty == false)
+
+        let resetsBefore = model.screenResetCount
+        model.apply(surface: surface(scene(), revision: 1, gridWidth: 5))
+        #expect(model.screenResetCount > resetsBefore,
+                "the fixture never reached the reset branch, so it proves nothing")
+        #expect(hasUpload(model.parkedFrame?.graphics ?? Data()),
+                "the frame that cleared the screen carried no upload")
+    }
+
+    /// Placements are in **surface** coordinates; this terminal is only the pane.
+    ///
+    /// A split pane's `innerRect` origin is not (0,0), so an image whose placement
+    /// says column 20 must be drawn at column 20 minus this pane's origin. Without
+    /// the shift the picture lands in the neighbouring pane — and the GUI gate would
+    /// not notice, because its fixture is a single pane at the origin.
+    ///
+    /// Upstream does the inverse addition (`client_host_piece`,
+    /// `kitty_graphics/surface.rs:1032`), which is what makes the shift correct
+    /// rather than invented.
+    @Test("a placement is shifted into the pane's own coordinates")
+    func placementIsShiftedIntoPaneSpace() {
+        let model = makeModel()
+        // The pane starts at column 20, so a placement at surface column 22 must be
+        // drawn at column 2 of this pane.
+        model.apply(surface: surface(scene(cellX: 22, cellY: 5), paneOrigin: (x: 20, y: 5)))
+        guard let graphics = model.parkedFrame?.graphics else {
+            Issue.record("no parked frame")
+            return
+        }
+        let text = String(bytes: graphics, encoding: .utf8) ?? ""
+        // Placement row 6 (surface row 5 + 1) becomes row 1 here; column 22 becomes 2.
+        #expect(text.contains("\u{1B}[1;3H"),
+                "the placement was not shifted to the pane origin: \(text.prefix(160))")
+    }
+
+    /// A placement entirely outside the pane is dropped, not clamped: drawing it at
+    /// column 0 would put the image over this pane's own cells, where it does not
+    /// belong.
+    @Test("a placement outside the pane is dropped")
+    func placementOutsidePaneIsDropped() {
+        let model = makeModel()
+        // Origin column 20, width 4: a placement at surface column 30 is outside.
+        model.apply(surface: surface(scene(cellX: 30), paneOrigin: (x: 20, y: 0)))
+        let graphics = model.parkedFrame?.graphics ?? Data()
+        #expect(!hasUpload(graphics),
+                "a placement outside the pane was still uploaded/placed")
+    }
+
+    // MARK: - Scope
+    // MARK: - Scope
     // MARK: - Scope
 
     /// Two machines both have a `w1:p1`. Their image ids must not collide, or one
@@ -233,8 +335,10 @@ struct PaneGraphicsTests {
     func scopeSeparatesMachines() {
         let first = makeModel(machine: "machine-a")
         let second = makeModel(machine: "machine-b")
-        guard let firstId = imageId(in: first.paint(blankFrame(), scene: scene())),
-              let secondId = imageId(in: second.paint(blankFrame(), scene: scene()))
+        first.apply(surface: surface(scene()))
+        second.apply(surface: surface(scene()))
+        guard let firstId = imageId(in: first.parkedFrame?.graphics ?? Data()),
+              let secondId = imageId(in: second.parkedFrame?.graphics ?? Data())
         else {
             Issue.record("could not read an image id out of one of the streams")
             return
@@ -252,8 +356,10 @@ struct PaneGraphicsTests {
         // new view would get fresh ids and the terminal would accumulate orphans.
         let first = makeModel()
         let second = makeModel()
-        guard let firstId = imageId(in: first.paint(blankFrame(), scene: scene())),
-              let secondId = imageId(in: second.paint(blankFrame(), scene: scene()))
+        first.apply(surface: surface(scene()))
+        second.apply(surface: surface(scene()))
+        guard let firstId = imageId(in: first.parkedFrame?.graphics ?? Data()),
+              let secondId = imageId(in: second.parkedFrame?.graphics ?? Data())
         else {
             Issue.record("could not read an image id out of one of the streams")
             return
