@@ -826,6 +826,53 @@ print(f"{int(x)} {int(y)} {int(w)} {int(h)}")
 ' "$target" "$window_text" "$layout_text" "$container"
 }
 
+# The pane's rectangle **inside the window**, as "X Y W H".
+#
+# Different space from `pane_screen_rect`: a `screencapture -l` image is the window,
+# so its origin is the window's top-left, not the screen's. Feeding a screen-space
+# rect to a window image does not fail — it silently clamps to the overlap, and the
+# pixel count then describes a band nobody asked about (measured: a 959x664 rect
+# against a 1180x760 window became 959x314, and the "4032 magenta pixels" that
+# assertion reported came from that band).
+pane_window_rect() {
+    local target="$1"
+    local window_text layout_text container
+    window_text=$(driver window 2>/dev/null) || return 1
+    layout_text=$(machine_layout "${2:-}" 2>/dev/null) || layout_text=$(pane_layout 2>/dev/null) || return 1
+    container=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
+    [ -n "$container" ] || return 1
+    python3 -c '
+import json, re, sys
+
+target = sys.argv[1]
+window_text, layout_text, container_line = sys.argv[2], sys.argv[3], sys.argv[4]
+
+win = re.search(r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", window_text)
+if not win:
+    sys.exit(1)
+_, _, win_w, win_h = (int(v) for v in win.groups())
+
+cont = re.search(r"container=(\d+)x(\d+) grid=(\d+)x(\d+)", container_line)
+if not cont:
+    sys.exit(1)
+cont_w, cont_h, grid_cols, grid_rows = (int(v) for v in cont.groups())
+
+layout = json.loads(layout_text)["result"]["layout"]
+target_pane = next((p for p in layout["panes"] if p["pane_id"] == target), None)
+if target_pane is None:
+    sys.exit(1)
+
+rect = target_pane["rect"]
+left_inset = win_w - cont_w
+top_inset = win_h - cont_h
+x = left_inset + rect["x"] / grid_cols * cont_w
+y = top_inset + rect["y"] / grid_rows * cont_h
+w = rect["width"] / grid_cols * cont_w
+h = rect["height"] / grid_rows * cont_h
+print(f"{int(x)} {int(y)} {int(w)} {int(h)}")
+' "$target" "$window_text" "$layout_text" "$container"
+}
+
 pane_body_point() {
     local target="$1"
     local window_text layout_text container
@@ -2918,7 +2965,10 @@ case_kitty_graphics() {
         local with_image="$dir/with-image.png"
         driver shot -o "$with_image" >"$host_dir/shot.txt" 2>&1
         echo "exit=$?" >>"$host_dir/shot.txt"
-        if ! rect=$(pane_screen_rect "$target" 2>/dev/null); then
+        # Window space, because `screencapture -l` produced a window image
+        # (`shot.txt` reports `window=<n>`). A screen-space rect here would clamp
+        # silently — see `pane_window_rect` for the measurement that caught it.
+        if ! rect=$(pane_window_rect "$target" 2>/dev/null); then
             echo "no pane rect" >"$host_dir/rect.txt"
             return 0
         fi
@@ -3000,7 +3050,7 @@ case_kitty_graphics() {
         local pixels_line rect_line
         pixels_line=$(cat "$host_dir/pixels.txt" 2>/dev/null | head -1)
         rect_line=$(cat "$host_dir/rect.txt" 2>/dev/null)
-        check "the pane's screen rect was located" \
+        check "the pane's rect inside the window was located" \
             "$(printf '%s' "$rect_line" | grep -qE '^[0-9]+ [0-9]+ [0-9]+ [0-9]+$' && echo 0 || echo 1)" \
             "${rect_line:-no rect for pane $target}"
         # The control (#103): the same region, sampled before the probe ran, has
