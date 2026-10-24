@@ -98,14 +98,52 @@ public final class KraalLog: @unchecked Sendable {
         try? FileManager.default.removeItem(at: url)
     }
 
-    private static func timestamp() -> String {
+    /// One formatter, not one per line.
+    ///
+    /// Measured (issue #56): building a `DateFormatter` and formatting a date cost
+    /// 32.3 us, against 0.667 us for a shared formatter — 47x. `DateFormatter` is
+    /// not thread-safe, so every read goes through `formatterLock`; `write` already
+    /// held `lock`, but a second lock kept the two concerns from nesting badly and
+    /// makes this callable from the tests directly.
+    private static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    private static let formatterLock = NSLock()
+
+    static func timestamp() -> String {
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
         return formatter.string(from: Date())
     }
+
+    /// The timestamp as the log would write it, for tests that pin its shape.
+    static func timestampForTesting() -> String { timestamp() }
 }
 
+/// Logs a message, but only builds it when logging is on.
+///
+/// The `enabled` check used to live inside `write`, so `message()` had already run
+/// by the time it was reached: `@autoclosure` defers evaluation to the function
+/// body, not past it. Measured on the input path that was 0.955 us per keystroke
+/// and 103.7 us for a 200-byte paste, spent purely to build strings that were then
+/// discarded — while `KRAAL_LOG=0` (issue #56).
+///
+/// The parameter stays `@autoclosure` so existing call sites need no change; what
+/// moves is the guard, in front of the evaluation instead of behind it.
 public func kraalLog(_ message: @autoclosure () -> String) {
+    guard KraalLog.shared.isEnabled else { return }
+    KraalLog.shared.write(message())
+}
+
+/// Logs a message that costs something to build (a hex dump, a joined list).
+///
+/// Same as `kraalLog`, and explicit at the call site: a reader can see that this
+/// expression is deferred, which is the property that keeps it off the input path.
+public func kraalLogLazy(_ message: () -> String) {
+    guard KraalLog.shared.isEnabled else { return }
     KraalLog.shared.write(message())
 }
 

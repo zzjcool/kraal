@@ -216,7 +216,29 @@ build_driver() {
         || die "failed to build KraalGUIDriver"
 }
 
+# Refuse to run against a stale app bundle.
+#
+# `build-app.sh` must be re-run after any app change, and forgetting it makes an
+# A/B test green for the wrong reason: the bundle still holds the *old* code, so
+# the injected regression never ships. Measured during issue #55 — the A/B was
+# green until `build-app.sh` was re-run, because `build/Kraal.app` predated the
+# edit by a minute.
+#
+# A timestamp check turns that silent false pass into a one-line error naming the
+# command to run. It compares against the newest source rather than trying to
+# rebuild here: packaging is `build-app.sh`'s job, and doing it twice per case
+# would make the suite much slower for no benefit.
+check_app_fresh() {
+    local app="$ROOT/build/Kraal.app"
+    local newest
+    newest=$(find "$ROOT/Sources" -name '*.swift' -newer "$app" -print -quit 2>/dev/null)
+    if [ -n "$newest" ]; then
+        die "build/Kraal.app is older than $newest; run: ./Scripts/build-app.sh"
+    fi
+}
+
 vm_deploy() {
+    check_app_fresh
     build_driver
     [ -x "$DRIVER" ] || die "no driver at $DRIVER; run: swift build --product KraalGUIDriver"
     [ -d "$ROOT/build/Kraal.app" ] || die "no build/Kraal.app; run: ./Scripts/build-app.sh"
@@ -2836,6 +2858,14 @@ case_key_named() {
         driver key --char escape >"$host_dir/key-barchar.txt" 2>&1
         echo "exit=$?" >>"$host_dir/key-barchar.txt"
         sleep 1
+        # A burst of keys into one pane, for issue #55: every keystroke used to post
+        # its own `pane.focus`, 7x the socket cost of the keystroke itself. Driven
+        # here rather than in a unit test because the count that matters is what the
+        # app actually sends, and only its log knows that.
+        for _ in $(seq 1 20); do
+            driver key --char b >/dev/null 2>&1 || true
+        done
+        sleep 2
     }
     assert() {
         local events="$host_dir/key-events.txt"
@@ -2898,6 +2928,16 @@ PYEOF
                 && grep -aq 'use --name' "$host_dir/key-barchar.txt" 2>/dev/null \
                 && echo 0 || echo 1)" \
             "exit=$bad_char_exit $(head -1 "$host_dir/key-barchar.txt" 2>/dev/null)"
+
+        # Issue #55: 23 keystrokes into the same pane must not produce 23 focus
+        # requests. The ceiling is 2 rather than 1 so a legitimate re-focus (a
+        # snapshot that arrived naming no pane, which invalidates the belief) does
+        # not make the case flaky — what is being ruled out is "one per keystroke".
+        local focus_calls
+        focus_calls=$(grep -ac "call: ok pane.focus" "$host_dir/kraal.log" 2>/dev/null || true)
+        check "typing does not re-focus the pane on every keystroke" \
+            "$([ "${focus_calls:-99}" -le 2 ] && echo 0 || echo 1)" \
+            "pane.focus calls=${focus_calls:-none} for 23 keystrokes into one pane"
     }
 }
 

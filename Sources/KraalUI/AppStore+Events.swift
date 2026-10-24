@@ -92,6 +92,11 @@ extension AppStore {
             false
         }
         self.snapshot = snapshot
+        // Reconcile the focus belief with the daemon's own answer (issue #55).
+        // A snapshot naming a different pane means this client's belief is stale and
+        // the next keystroke must re-send; a snapshot naming the same pane is
+        // silence about an in-flight request and must change nothing.
+        focusConfirmation.observe(focusedPaneId: snapshot.focusedPaneId)
         // The selected machine's own group reads from the main snapshot; keep its
         // catalog entry in step so switching away and back does not show the rows
         // from before the last snapshot arrived.
@@ -133,6 +138,10 @@ extension AppStore {
             // A new boot id means the old frame belongs to a dead daemon; there is
             // nothing meaningful to keep.
             surface = nil
+            // And no pane of the old daemon is focused in the new one, so the local
+            // focus belief has to go with it (issue #55): keeping it would skip the
+            // first focus after a reconnect.
+            focusConfirmation.invalidate()
             // The baseline this latch was waiting on no longer exists, so nothing is
             // pending any more: settle the latch and its budget.
             clearResyncLatch()

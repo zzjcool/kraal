@@ -202,8 +202,14 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// turns into a real data race the moment anything that reads `store`
     /// moves above the hop.
     nonisolated private func routeInput(target: String, data: Data) {
-        kraalLog("input: target=\(target) bytes=\(data.count) "
-            + "raw=\(data.map { String(format: "%02x", $0) }.joined(separator: " "))")
+        // The hex dump is the expensive half: one `String(format:)` and one
+        // allocation per byte, 103.7 us for a 200-byte paste (issue #56). It is a
+        // debug aid, so it waits until logging is on — `kraalLogLazy` checks
+        // `enabled` before the closure runs, which `@autoclosure` alone did not.
+        kraalLogLazy {
+            "input: target=\(target) bytes=\(data.count) "
+                + "raw=\(data.map { String(format: "%02x", $0) }.joined(separator: " "))"
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             if self.store.hasPopup, self.store.activePopup?.terminalId == target {
