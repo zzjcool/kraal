@@ -96,8 +96,13 @@ def main() -> int:
             readable, _, _ = select.select([stdin_fd], [], [], 0.2)
             if readable:
                 os.read(stdin_fd, 4096)
-        # Drop the image on the way out so it cannot leak into the next case.
+        # Drop the image on the way out so it cannot leak into the next case, and
+        # record that it happened. A control assertion ("no magenta pixels when the
+        # image is gone") is only honest if the image was actually removed, and the
+        # harness cannot see the screen without it.
         os.write(1, b"\x1b_Ga=d,d=A\x1b\\")
+        with open(out_path + ".deleted", "w", encoding="utf-8") as marker:
+            marker.write("image deleted\n")
     finally:
         termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved)
     return 0

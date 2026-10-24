@@ -780,6 +780,52 @@ sys.exit(1)
 #     layout: container=1219x2434 grid=143x131 ...
 #
 # So: cell → fraction of the grid → point inside the container → screen point.
+# The pane's rectangle in **screen** coordinates, as "X Y W H".
+#
+# Same derivation as `pane_body_point`, but returning the whole rect instead of its
+# centre: pixel assertions need the region, not a click target. Screen coordinates,
+# matching `driver click --at-screen` and `screencapture`; the window-internal
+# coordinates `driver click --at` uses are AppKit bottom-left and must not be mixed
+# in (docs/DEBUGGING.md §12).
+pane_screen_rect() {
+    local target="$1"
+    local window_text layout_text container
+    window_text=$(driver window 2>/dev/null) || return 1
+    layout_text=$(machine_layout "${2:-}" 2>/dev/null) || layout_text=$(pane_layout 2>/dev/null) || return 1
+    container=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
+    [ -n "$container" ] || return 1
+    python3 -c '
+import json, re, sys
+
+target = sys.argv[1]
+window_text, layout_text, container_line = sys.argv[2], sys.argv[3], sys.argv[4]
+
+win = re.search(r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", window_text)
+if not win:
+    sys.exit(1)
+win_x, win_y, win_w, win_h = (int(v) for v in win.groups())
+
+cont = re.search(r"container=(\d+)x(\d+) grid=(\d+)x(\d+)", container_line)
+if not cont:
+    sys.exit(1)
+cont_w, cont_h, grid_cols, grid_rows = (int(v) for v in cont.groups())
+
+layout = json.loads(layout_text)["result"]["layout"]
+target_pane = next((p for p in layout["panes"] if p["pane_id"] == target), None)
+if target_pane is None:
+    sys.exit(1)
+
+rect = target_pane["rect"]
+left_inset = win_w - cont_w
+top_inset = win_h - cont_h
+x = win_x + left_inset + rect["x"] / grid_cols * cont_w
+y = win_y + top_inset + rect["y"] / grid_rows * cont_h
+w = rect["width"] / grid_cols * cont_w
+h = rect["height"] / grid_rows * cont_h
+print(f"{int(x)} {int(y)} {int(w)} {int(h)}")
+' "$target" "$window_text" "$layout_text" "$container"
+}
+
 pane_body_point() {
     local target="$1"
     local window_text layout_text container
@@ -2857,6 +2903,51 @@ case_kitty_graphics() {
         # Give the daemon time to composite a frame that carries the image and push
         # it to the client, then let the client paint it.
         sleep 4
+        # The pixel evidence (#103). Everything above proves bytes reached the
+        # terminal; none of it proves a picture is on the screen — and that gap is
+        # where this repository's most expensive bugs lived. A screenshot cropped to
+        # the pane is the only thing that closes it.
+        local target rect
+        target=$(cat "$host_dir/target-pane.txt" 2>/dev/null)
+        # Guest paths, not host ones: `driver` runs inside the vm under the vm
+        # backend, so a host path is a path on the other machine (docs §4.4 of
+        # ENVIRONMENT.md). The reports are copied out afterwards.
+        # Guest paths, not host ones: `driver` runs inside the vm under the vm
+        # backend, so a host path is a path on the other machine (docs/ENVIRONMENT.md
+        # §4.4). The reports are copied out afterwards.
+        local with_image="$dir/with-image.png"
+        driver shot -o "$with_image" >"$host_dir/shot.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/shot.txt"
+        if ! rect=$(pane_screen_rect "$target" 2>/dev/null); then
+            echo "no pane rect" >"$host_dir/rect.txt"
+            return 0
+        fi
+        printf '%s' "$rect" >"$host_dir/rect.txt"
+        # The probe draws a solid magenta rectangle. The predicate is loose on
+        # purpose: the image is scaled onto a cell grid, so its edges blend.
+        driver pixels --in "$with_image" --rect "$rect" \
+            --match "r>200,g<80,b>200" >"$host_dir/pixels.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/pixels.txt"
+
+        # The control: the probe deletes its image (`a=d,d=A`) when it exits, so
+        # waiting for it to finish and re-measuring gives the same region with no
+        # image in it. Both numbers come from one run, which is the point — a
+        # hardcoded "before" could be measured on a different machine.
+        #
+        # The probe runs for 30s (see `fixture`); this waits for it to exit without
+        # guessing at a fixed sleep: `pane read` reports the shell prompt coming back.
+        local waited=0
+        while [ "$waited" -lt 45 ]; do
+            if tart exec "$VM" /bin/bash -lc "test -s $dir/graphics-probe.txt.deleted" 2>/dev/null; then
+                break
+            fi
+            waited=$((waited + 1))
+            sleep 1
+        done
+        sleep 2
+        driver shot -o "$dir/after.png" >/dev/null 2>&1
+        driver pixels --in "$dir/after.png" --rect "$rect" \
+            --match "r>200,g<80,b>200" >"$host_dir/after-pixels.txt" 2>&1
     }
     assert() {
         local sent
@@ -2870,8 +2961,14 @@ case_kitty_graphics() {
 
         # The product log line. `collect_app_log_tail` reads the guest's log under
         # the vm backend, which is where the app writes it.
+        # The line that carried the image, not the last one: the probe deletes its
+        # image when it exits (`a=d,d=A`), and that produces a later
+        # `assets=0 … encoded=0` frame. Taking `tail -1` would assert on the
+        # deletion instead of the upload (measured: the run went red after the
+        # control was added, purely from this).
         local line
-        line=$(collect_app_log_tail 2>/dev/null | grep -a 'graphics: pane=' | tail -1)
+        line=$(collect_app_log_tail 2>/dev/null | grep -a 'graphics: pane=' \
+            | grep -a 'assets=[1-9]' | tail -1)
         printf '%s\n' "${line:-<none>}" >"$host_dir/graphics-log.txt"
         check "the pane encoded the daemon's graphics scene" \
             "$([ -n "$line" ] && echo 0 || echo 1)" \
@@ -2894,6 +2991,33 @@ case_kitty_graphics() {
         check "the renderer wrote kitty sequences to the terminal" \
             "$([ -n "$kitty" ] && [ "$kitty" -ge 2 ] && echo 0 || echo 1)" \
             "kitty sequences in the renderer output: ${kitty:-<none>}"
+
+        # And the picture is on the screen. `matched` is magenta-ish pixels inside
+        # the pane's screen rect: a solid 64x64 image scaled onto the cell grid is
+        # hundreds of pixels, so the threshold is a floor, not a tight bound. The
+        # rect is asserted to exist first — a missing rect would otherwise read as
+        # "zero magenta pixels", which is the same number a missing image gives.
+        local pixels_line rect_line
+        pixels_line=$(cat "$host_dir/pixels.txt" 2>/dev/null | head -1)
+        rect_line=$(cat "$host_dir/rect.txt" 2>/dev/null)
+        check "the pane's screen rect was located" \
+            "$(printf '%s' "$rect_line" | grep -qE '^[0-9]+ [0-9]+ [0-9]+ [0-9]+$' && echo 0 || echo 1)" \
+            "${rect_line:-no rect for pane $target}"
+        # The control (#103): the same region, sampled before the probe ran, has
+        # essentially no magenta. Without it "4032 magenta pixels" could be the
+        # pane's own background, a theme colour, or a stale frame from a previous
+        # run — the assertion would pass on a machine where the image never draws.
+        local before_matched
+        before_matched=$(grep -o 'matched=[0-9]*' "$host_dir/after-pixels.txt" 2>/dev/null | head -1 | cut -d= -f2)
+        check "the pane has no magenta once the image is deleted" \
+            "$([ -n "$before_matched" ] && [ "$before_matched" -lt 50 ] && echo 0 || echo 1)" \
+            "magenta pixels after the probe deleted its image: ${before_matched:-<not measured>}"
+
+        local matched
+        matched=$(printf '%s' "$pixels_line" | sed -n 's/.*matched=\([0-9]*\).*/\1/p')
+        check "the image is visible on the screen" \
+            "$([ -n "$matched" ] && [ "$matched" -gt 200 ] && echo 0 || echo 1)" \
+            "magenta pixels in the pane: ${matched:-<none>} (${pixels_line:-no pixels run})"
     }
 }
 
