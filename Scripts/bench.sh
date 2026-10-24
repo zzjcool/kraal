@@ -254,12 +254,35 @@ func emit(
 /// the loop measures nothing at all: an early version of this script reported
 /// 0.36 us for work that takes 1547 us. Feeding two frames in turn makes the
 /// renderer's diff state change every call, so no call can be elided.
+/// Times one render, refusing to measure a case that cannot measure anything.
+///
+/// Issue #54: passing the *same* `FrameData` value as both arguments makes the
+/// row diff short-circuit on shared storage, so a full scan reported 0.29 us
+/// instead of 87 us -- 263x too fast. The separate self-check that was added for
+/// it rebuilt its own two frames, so it passed even while the measurement used
+/// one value for both (verified by injecting the regression: the self-check still
+/// said "no, ok" and the run exited 0).
+///
+/// Checking inside the measurement is the point: it tests the frames the timing
+/// actually consumes, not a pair reconstructed beside them.
 func measureRendering(
     _ label: String,
     iterations: Int,
     first: FrameData,
     second: FrameData
 ) {
+    // Row 0's storage, not an equality check: cells live in one array per row
+    // (issue #50), and per row is exactly the granularity at which storage must
+    // differ for the renderer's row diff to do any work.
+    if first.buffer.sharesRow(0, with: second.buffer) {
+        FileHandle.standardError.write(Data("""
+        bench refuses to measure "\(label)": both frames share row storage, so the
+        diff short-circuits and the number is meaningless (issue #54). Decode each
+        frame separately.
+
+        """.utf8))
+        exit(1)
+    }
     var renderer = SurfaceANSIRenderer()
     _ = renderer.render(first)
     for iteration in 0 ..< max(3, iterations / 10) {
@@ -376,27 +399,10 @@ if mode == "all" || mode == "render" {
     }
 }
 
-// `Array` comparison short-circuits when two values share a storage buffer, so
-// passing one frame as both arguments to measureRendering makes a full row scan
-// look 400x cheaper than it is. Check storage identity directly -- a ratio check
-// on timings measures the probe, not the hazard.
-if mode == "all" || mode == "render" {
-    header("")
-    header("=== self-check: no-op frames must not share storage ===")
-    for (label, width, height) in sizes {
-        let first = decodedFrame(width, height)
-        let second = decodedFrame(width, height)
-        // Row 0's storage, not an equality check: after issue #50 the cells live
-        // in one array per row, and per row is exactly the granularity at which
-        // storage must differ for the renderer's row diff to see a change.
-        let sameBuffer = first.buffer.sharesRow(0, with: second.buffer)
-        header("  \(label) first/second share buffer: \(sameBuffer ? "YES -> BROKEN" : "no, ok")")
-        if sameBuffer {
-            FileHandle.standardError.write(Data("bench self-check failed for \(label)\n".utf8))
-            exit(1)
-        }
-    }
-}
+// The storage check lives inside `measureRendering` rather than here. It used to
+// sit here, rebuilding its own two frames -- which is why injecting the #54
+// regression left it saying "no, ok" and the run exiting 0. A check that inspects
+// a different pair than the one being timed cannot fail for the right reason.
 
 if mode == "all" || mode == "patch" {
     header("")

@@ -119,6 +119,9 @@ public final class AppStore {
 
     /// Coalesced `pane.scroll` for wheel gestures (issue #94); see `PaneScrollQueue`.
     @ObservationIgnored public lazy var paneScrollQueue = Self.makePaneScrollQueue(self)
+    /// Which pane this client has confirmed focused, so per-keystroke input does
+    /// not re-send `pane.focus` (issue #55).
+    @ObservationIgnored public lazy var focusConfirmation = Self.makeFocusConfirmation(self)
 
     /// Where the foreground connection points.
     ///
@@ -440,9 +443,8 @@ public final class AppStore {
         }
     }
 
-    public func focus(paneId: String) {
-        Task { await call("pane.focus", ["pane_id": paneId]) }
-    }
+    // `focus(paneId:)` and `sendPaneFocus` live in `AppStore+Focus.swift`: this
+    // file is at SwiftLint's type-length limit.
 
     /// Jumps to a navigator target, switching machines when it lives on another
     /// one.

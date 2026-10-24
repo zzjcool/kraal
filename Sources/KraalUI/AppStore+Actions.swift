@@ -142,6 +142,17 @@ extension AppStore {
         Task { await call("pane.scroll", ["pane_id": paneId, "offset_from_bottom": offset]) }
     }
 
+    /// Builds the focus tracker, kept out of `AppStore.swift` for the same reason
+    /// as the queue below: that file is at SwiftLint's type-length limit.
+    ///
+    /// Captures `store` weakly — the tracker must not keep its store alive.
+    @MainActor
+    static func makeFocusConfirmation(_ store: AppStore) -> FocusConfirmation {
+        FocusConfirmation { [weak store] paneId in
+            await store?.sendPaneFocus(paneId) ?? false
+        }
+    }
+
     /// Builds the coalescing queue, kept out of `AppStore.swift` so that file stays
     /// under SwiftLint's type-length limit.
     ///
