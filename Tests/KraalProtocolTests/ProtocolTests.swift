@@ -648,6 +648,72 @@ struct TerminalInputDecoderTests {
         #expect(codes(events) == ["text(echo hi)"])
     }
 
+    // MARK: - kitty graphics responses (issue #110)
+
+    /// A kitty `OK`/error response must never become input.
+    ///
+    /// Measured (2026-10-25): when the graphics command asks for a reply (`q=0`),
+    /// Ghostty writes `ESC _ G i=367726,p=343071;OK ESC \` back through
+    /// `InMemoryTerminalSession.write`, which is the same channel as keystrokes.
+    /// Without this, `routeInput` forwards it to the daemon and the program receives
+    /// a burst of nonsense keys — the shape of `tracksRelease` (docs/DEBUGGING.md
+    /// §9), where the symptom was keys silently disappearing.
+    ///
+    /// Kraal's own encoder uses `q=2` (silent), so today these bytes do not occur;
+    /// they will the moment `directGraphics` is turned on, which is why the guard
+    /// belongs here rather than in a comment.
+    @Test("a kitty graphics response is not input")
+    func kittyResponseIsDropped() {
+        var decoder = TerminalInputDecoder()
+        let events = decoder.decode(Data("\u{1B}_Gi=367726,p=343071;OK\u{1B}\\".utf8))
+        #expect(codes(events) == [], "a kitty response was decoded as \(codes(events))")
+    }
+
+    /// The error form has the same shape and must go the same way.
+    @Test("a kitty graphics error response is not input")
+    func kittyErrorResponseIsDropped() {
+        var decoder = TerminalInputDecoder()
+        let events = decoder.decode(Data("\u{1B}_Gi=42;EINVAL: invalid data\u{1B}\\".utf8))
+        #expect(codes(events) == [], "a kitty error was decoded as \(codes(events))")
+    }
+
+    /// Keys typed after a response still arrive, in order.
+    ///
+    /// The dangerous fix is one that swallows the rest of the chunk; this pins that
+    /// only the APC body is removed.
+    @Test("keys around a kitty response survive")
+    func keysAroundResponseSurvive() {
+        var decoder = TerminalInputDecoder()
+        let data = Data("a\u{1B}_Gi=1;OK\u{1B}\\bc".utf8)
+        #expect(codes(decoder.decode(data)) == ["text(a)", "text(bc)"])
+    }
+
+    /// An Alt+`_`, typed by a human, is not an APC.
+    ///
+    /// `_` is a legal key and `ESC` a legal prefix, so a stripper keyed on
+    /// `ESC _` alone would eat real keystrokes. Only the byte after `ESC _` decides,
+    /// and here it is a `G` — same as a response — which is why the discriminator has
+    /// to be structural rather than "does it start with ESC _".
+    @Test("an Alt+underscore followed by text is still input")
+    func altUnderscoreIsNotSpoiled() {
+        var decoder = TerminalInputDecoder()
+        // `ESC _` alone (Alt+_), then `x`: no APC terminator, so it is not a response.
+        let events = decoder.decode(Data("\u{1B}_x".utf8))
+        #expect(codes(events) == ["key(char(\"_\"), m4)", "text(x)"])
+    }
+
+    /// A response split across two chunks is still removed.
+    ///
+    /// The terminal writes in whatever sizes it likes; a stripper that only handled
+    /// whole APCs in one buffer would leak the tail as keys.
+    @Test("a kitty response split across chunks is dropped")
+    func splitResponseIsDropped() {
+        var decoder = TerminalInputDecoder()
+        let first = decoder.decode(Data("\u{1B}_Gi=1;O".utf8))
+        let second = decoder.decode(Data("K\u{1B}\\".utf8))
+        #expect(codes(first + second) == [], "split response decoded as \(codes(first + second))")
+    }
+
     @Test("multi-byte UTF-8 survives splitting across writes")
     func splitUTF8() {
         var decoder = TerminalInputDecoder()

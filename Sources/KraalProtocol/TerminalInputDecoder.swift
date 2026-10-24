@@ -66,6 +66,29 @@ public struct TerminalInputDecoder {
                     break
                 }
                 let next = pending[index + 1]
+                if next == 0x5F, index + 2 < pending.count, pending[index + 2] == 0x47 { // '_G'
+                    // `ESC _ G` specifically, not `ESC _`: `_` is a legal key and a
+                    // human can type Alt+`_` (`ESC _`), which must still be input.
+                    // Only kitty graphics responses start with `ESC _ G` (the `G`
+                    // is the protocol's APC introducer) and those are never input.
+                    // The terminal answers kitty graphics commands with
+                    // `ESC _ G <id>;OK ESC \` through the same channel as
+                    // keystrokes (measured 2026-10-25: 25 bytes, `q=0` only; kraal's
+                    // encoder uses `q=2` and produces none). Forwarding one would
+                    // hand the program a burst of nonsense keys — the
+                    // `tracksRelease` shape (docs/DEBUGGING.md §9).
+                    //
+                    // Discriminated structurally, not by prefix: a human can type
+                    // Alt+`_` (`ESC _` too), and that must still be a key. Only a
+                    // terminated APC is dropped; an unterminated `ESC _` is left to
+                    // the Alt branch below, and a chunk that ends mid-APC is kept in
+                    // `pending` so the tail cannot leak as keys.
+                    guard let end = indexOfStringTerminator(pending, from: index + 2) else {
+                        break
+                    }
+                    index = end
+                    continue
+                }
                 if next == 0x5B || next == 0x4F { // '[' or 'O'
                     guard let (consumed, event) = parseCSI(pending, from: index) else {
                         // Incomplete sequence; keep it for the next call.
@@ -115,6 +138,24 @@ public struct TerminalInputDecoder {
             pending.removeAll()
         }
         return events
+    }
+
+    /// Index just past an APC's `ESC \` terminator, or nil while the APC is still
+    /// incomplete.
+    ///
+    /// APC (`ESC _`) and ST (`ESC \`) are the two-byte forms; kitty graphics uses
+    /// those rather than the 8-bit C1 codes. A stray `BEL` is not accepted as a
+    /// terminator here even though some terminals allow it for OSC, because guessing
+    /// would risk swallowing a keystroke when the terminator never arrives.
+    private func indexOfStringTerminator(_ bytes: [UInt8], from start: Int) -> Int? {
+        var cursor = start
+        while cursor + 1 < bytes.count {
+            if bytes[cursor] == 0x1B, bytes[cursor + 1] == 0x5C { // ESC \
+                return cursor + 2
+            }
+            cursor += 1
+        }
+        return nil
     }
 
     /// Emits a pending lone ESC. Call when the input stream goes idle, since a
@@ -333,6 +374,10 @@ public struct TerminalInputDecoder {
         var end = start
         while end < bytes.count {
             let byte = bytes[end]
+            // ESC starts an escape sequence, not text. Without this, a chunk like
+            // `a<ESC>_Gi=1;OK<ESC>\\bc` was consumed as one text commit and the
+            // APC never reached the branch that strips it (issue #110).
+            guard byte != 0x1B else { break }
             let length = utf8Length(for: byte)
             guard length > 0, end + length <= bytes.count else { break }
             // Every byte after the lead must be a continuation byte.
