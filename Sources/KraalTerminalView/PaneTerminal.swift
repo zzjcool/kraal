@@ -474,7 +474,11 @@ public final class PaneTerminalModel {
             height: UInt16(height),
             cursor: cursor,
             hyperlinks: surface.frame.hyperlinks,
-            graphics: Data()
+            // The daemon pre-encodes kitty graphics into this byte stream; the
+            // renderer writes it through. It used to be `Data()` here, which
+            // decoded an image, laid it out with the cell grid, and then threw it
+            // away (issue #37).
+            graphics: surface.frame.graphics
         )
     }
 }
