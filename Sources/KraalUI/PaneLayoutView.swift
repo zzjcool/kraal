@@ -39,6 +39,14 @@ struct PaneLayoutView: View {
     /// yields the same ratio.
     @State private var dragAnchor: (path: [Bool], position: UInt16)?
 
+    /// The container's top-left inside the window, in points, as last reported.
+    ///
+    /// Read from a `GeometryReader` in the global (window) space rather than derived
+    /// from sizes: `windowHeight - containerHeight` also counts the gap below the
+    /// container, and that error is invisible to click tests (a 25pt offset lands in
+    /// the same cell) while it shifts every pixel assertion by 25pt.
+    @State private var containerOriginInWindow = "?"
+
     /// The anchor for this split, capturing it on first use within a gesture.
     ///
     /// Returns the pre-drag position and stores it for the rest of the gesture.
@@ -258,6 +266,23 @@ struct PaneLayoutView: View {
             )
             .clipped()
             .negotiatingSurfaceGeometry()
+            // Records where the container actually sits inside the window. A
+            // zero-size overlay so it cannot affect layout; `GeometryReader` reports
+            // the frame in the window's coordinate space, which is exactly what a
+            // window screenshot uses.
+            .overlay {
+                GeometryReader { inner in
+                    Color.clear
+                        .task(id: inner.frame(in: .global).origin.debugDescription) {
+                            let box = inner.frame(in: .global)
+                            let text = "\(Int(box.minX)),\(Int(box.minY))"
+                            if text != containerOriginInWindow {
+                                containerOriginInWindow = text
+                            }
+                        }
+                }
+                .allowsHitTesting(false)
+            }
             .task(id: store.surface?.surfaceRevision) {
                 // One line per surface change, not per frame: this is the data
                 // needed to tell a sizing bug from a rendering one.
@@ -283,10 +308,17 @@ struct PaneLayoutView: View {
                     return "\(pane.paneId)=\(pane.innerRect.width)x\(pane.innerRect.height)"
                         + "->\(Int(frame.width))x\(Int(frame.height))pt"
                 }
+                // `containerOrigin` is the container's top-left **inside the
+                // window**, in points. It exists because the harness needs to map a
+                // pane onto a screenshot, and deriving the origin as
+                // `windowHeight - containerHeight` was wrong by the title bar plus
+                // the bottom gap: measured `96` where the container actually starts
+                // at `71`, which shifted every pixel assertion by 25pt (issue #103).
                 kraalLog("layout: container=\(Int(proxy.size.width))x\(Int(proxy.size.height)) "
                     + "grid=\(Int(grid.width))x\(Int(grid.height)) "
                     + "surfacePaned=\(store.surface != nil) "
                     + "cell=\(pointsPerCell.width)x\(pointsPerCell.height) "
+                    + "containerOrigin=\(containerOriginInWindow) "
                     + "panes=[\(panes.joined(separator: " "))]")
             }
         }
