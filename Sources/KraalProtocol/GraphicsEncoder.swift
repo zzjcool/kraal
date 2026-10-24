@@ -35,15 +35,15 @@
 
 import Foundation
 
-public struct GraphicsEncoder {
+public struct GraphicsEncoder: Sendable {
     /// Raw image bytes per escape sequence.
     ///
     /// Kitty caps the payload of one sequence at 4096 *characters*, and base64
-    /// grows by 4/3 — so 3072 raw bytes is exactly the 4096-character budget.
-    /// Upstream's `KITTY_CHUNK_BYTES` (`kitty_graphics.rs:22`) is 3072 for the
-    /// same reason. (Issue #101 §1 says "4096 原始字节"; that would be 5462
-    /// base64 characters per sequence, over kitty's limit, and a strict terminal
-    /// drops the chunk. See the report for this one deviation.)
+    /// grows by 4/3 — so 3072 raw bytes is exactly the 4096-character budget
+    /// (measured: `Data(count: 3072).base64EncodedData().count == 4096`; 4096 raw
+    /// bytes would be 5464 characters per sequence and a strict terminal drops
+    /// the chunk). Upstream's `KITTY_CHUNK_BYTES` (`kitty_graphics.rs:22`) is
+    /// 3072 for the same reason.
     static let chunkBytes = 3072
 
     /// Kitty image ids live above the range real programs use, and `0` is not a
@@ -70,9 +70,14 @@ public struct GraphicsEncoder {
     /// Forgets everything the terminal was told.
     ///
     /// Call this when the screen was cleared: the images went with it, so the
-    /// next frame has to upload them again. No deletes are emitted — deleting
-    /// ids that are already gone is noise, and a `d=I` for a stale id would be
-    /// answered with an error.
+    /// next frame has to upload them again. No deletes are emitted — deleting ids
+    /// the terminal already dropped is pure byte noise (and `q=2` would suppress
+    /// any answer anyway, so the round trip buys nothing).
+    ///
+    /// Call it together with `SurfaceANSIRenderer.reset()`: that is what makes the
+    /// next frame emit `2J`, and the terminal's `ED2` is what reclaimed the images
+    /// this type is now forgetting. One without the other leaves the image
+    /// permanently erased (`GraphicsSeamTests.resetPairsAcrossTheSeam`).
     public mutating func reset() {
         images.removeAll()
         placements.removeAll()
@@ -146,7 +151,11 @@ public struct GraphicsEncoder {
                 if images[item.imageId] != nil {
                     // Same id, different pixels — a hash collision, or the same
                     // source redrawn at another size. The terminal would keep
-                    // showing the old bitmap, so drop it first.
+                    // showing the old bitmap, so `d=I` first. That delete also
+                    // drops every placement of the image, including ones already
+                    // written this frame (they are now gone from the terminal),
+                    // so those are forgotten here and re-emitted by the next frame
+                    // — a one-frame blink, limited to genuine collisions.
                     Self.appendDeleteImage(item.imageId, to: &output)
                     placements = placements.filter { $0.key.imageId != item.imageId }
                 }

@@ -143,8 +143,12 @@ struct GraphicsEncoderTests {
             Issue.record("could not read ids back out of the stream")
             return
         }
-        #expect((10_000 ... 909_999).contains(imageId), "image id outside host range")
-        #expect((1 ... 900_000).contains(placementId), "placement id outside host range")
+        // Not a range check: `10_000 + hash % 900_000` is inside the range *by
+        // construction*, so asserting it could never fail. What actually matters
+        // is that id 0 never comes out — kitty reads 0 as "no id", and a placement
+        // or delete naming 0 would be silently ignored.
+        #expect(imageId != 0, "image id 0 is not addressable in kitty")
+        #expect(placementId != 0, "placement id 0 means \"no placement id\" to kitty")
     }
 
     @Test("format decides the f= code", arguments: [
@@ -198,18 +202,45 @@ struct GraphicsEncoderTests {
                 "the chunks do not decode back to the asset's bytes")
     }
 
-    @Test("empty data emits nothing at all")
+    @Test("an empty payload produces no upload sequence")
     func emptyDataEmitsNothing() {
-        // Upstream returns early when there is no first chunk. Writing a
-        // `\x1b_G…;\x1b\\` with an empty payload is a protocol error, and kitty
-        // answers it by deleting whatever image shares the id.
+        // Upstream returns early when there is no first chunk: a sequence with an
+        // empty payload is a protocol error, and kitty answers it by *deleting*
+        // whatever image shares the id.
+        //
+        // Asserting "no `a=t`" rather than "no output at all" matters: an encoder
+        // that dropped the whole placement would also produce empty output, and
+        // that is a different bug with the same symptom.
         let image = makeImage(byteCount: 0)
         var encoder = GraphicsEncoder()
         let bytes = encoder.encode(scene: scene(image, [makePlacement(image.key)]),
                                    scope: "daemon-a")
-        #expect(kittySequences(bytes).isEmpty,
-                "an empty asset produced a transaction")
+        #expect(upload(from: bytes) == nil,
+                "an asset with no bytes was uploaded anyway")
     }
+
+    @Test("an asset whose length disagrees with its key is not uploaded")
+    func truncatedAssetIsNotUploaded() {
+        // The other half of the delivery filter (upstream `ClientState::set_scene`,
+        // `surface.rs:367`): a key claiming 16 bytes with 10 bytes of data would
+        // upload a truncated, wrongly-sized image — kitty accepts it and draws
+        // garbage, which is worse than drawing nothing.
+        let whole = makeImage(byteCount: 16)
+        let truncated = (key: whole.key, data: Data(repeating: 0x5A, count: 10))
+        var encoder = GraphicsEncoder()
+        let bytes = encoder.encode(scene: scene(truncated, [makePlacement(whole.key)]),
+                                   scope: "daemon-a")
+        #expect(upload(from: bytes) == nil,
+                "a truncated delivery was uploaded as if it were whole")
+    }
+
+}
+
+// Builders and stream inspection, split out so the suite body stays inside
+// SwiftLint's 400-line type limit. Helper-only: no test lives here.
+extension GraphicsEncoderTests {
+    // Tests for the cache state machine (issue #101) — the half whose bugs are
+    // silent: a missed delete leaves an image on screen forever.
 
     // MARK: - Cache
 
@@ -284,6 +315,53 @@ struct GraphicsEncoderTests {
         let id = GraphicsEncoder.imageId(for: image.key, scope: "daemon-a")
         #expect(id == 163_700,
                 "the id derivation changed (got \(id)); if that was intended, update this literal")
+    }
+
+    @Test("every source and target branch hashes to its own id")
+    func idHashCoversEveryBranch() {
+        // `StableHash.mix` hand-flattens the two enums rather than hashing
+        // `hashValue` (per-process seeded, see `idsAreStableAcrossProcesses`). A
+        // hand-flattened enum is where a copy-paste slip turns two cases into the
+        // same field sequence — and two sources sharing one image id means one
+        // pane's `d=I` deletes the other pane's image.
+        //
+        // Scope, measured: this does *not* detect a duplicated tag constant on its
+        // own. Injecting `tag=0` for `.paneLayer` leaves all four ids distinct,
+        // because the remaining fields (a target tag + image id versus two strings)
+        // already separate them. What it does detect is two cases flattened into
+        // the *same* field sequence, which is the failure a tag was there to
+        // prevent in the first place.
+        func key(_ source: SurfaceGraphicsSource) -> SurfaceGraphicsAssetKey {
+            SurfaceGraphicsAssetKey(
+                source: source, imageWidth: 2, imageHeight: 2,
+                format: .rgba, dataLen: 4, dataFingerprint: 1
+            )
+        }
+        let keys = [
+            key(.terminal(target: .pane(paneId: "w1:p1"), imageId: 1)),
+            key(.terminal(target: .popup(terminalId: "popup-1"), imageId: 1)),
+            key(.paneLayer(paneId: "w1:p1", layerId: "layer-1")),
+            // A second paneLayer, so the paneId/layerId distinction is covered too.
+            key(.paneLayer(paneId: "w1:p2", layerId: "layer-1")),
+        ]
+        let ids = keys.map { GraphicsEncoder.imageId(for: $0, scope: "daemon-a") }
+        #expect(Set(ids).count == ids.count,
+                "two different sources produced the same image id: \(ids)")
+    }
+
+    @Test("a redrawn image does not reuse the previous id")
+    func fingerprintChangesTheId() {
+        // Same source, new pixels. The id has to move, otherwise the terminal keeps
+        // showing the old bitmap under an id the encoder believes it just updated.
+        let first = makeImage(byteCount: 16)
+        let redrawn = SurfaceGraphicsAssetKey(
+            source: first.key.source, imageWidth: first.key.imageWidth,
+            imageHeight: first.key.imageHeight, format: first.key.format,
+            dataLen: first.key.dataLen, dataFingerprint: first.key.dataFingerprint &+ 1
+        )
+        #expect(GraphicsEncoder.imageId(for: first.key, scope: "daemon-a")
+                != GraphicsEncoder.imageId(for: redrawn, scope: "daemon-a"),
+                "a changed fingerprint kept the same image id")
     }
 
     @Test("reset makes the next frame upload again")
@@ -518,25 +596,22 @@ struct GraphicsEncoderTests {
                 "the optional controls are not in upstream's order")
     }
 
-}
-
-// Builders and stream inspection, split out so the suite body stays inside
-// SwiftLint's 400-line type limit. Helper-only: no test lives here.
-extension GraphicsEncoderTests {
     // MARK: - Stream inspection
 
-    /// The individual `ESC _ G <control>;<payload> ESC \` sequences, in order.
+    /// The stream as text.
     ///
-    /// Everything between two sequences is dropped (a `CUP` sits between a
-    /// placement's position and its command), which is what most assertions
-    /// want; ordering is asserted through those markers separately.
-    /// The stream as text. `String(bytes:encoding:)` rather than
-    /// `String(decoding:as:)` so a broken stream shows up as a readable failure
-    /// instead of U+FFFD replacing the very byte the assertion was about.
+    /// `String(bytes:encoding:)` rather than `String(decoding:as:)` so a broken
+    /// stream shows up as a readable failure instead of U+FFFD replacing the very
+    /// byte the assertion was about.
     private func text(_ bytes: Data) -> String {
         String(bytes: bytes, encoding: .utf8) ?? "<not utf-8: \(bytes.count) bytes>"
     }
 
+    /// The individual `ESC _ G <control>;<payload> ESC \` sequences, in order.
+    ///
+    /// Everything between two sequences is dropped (a `CUP` sits between a
+    /// placement's position and its command), which is what most assertions want;
+    /// ordering is asserted through those markers separately.
     private func kittySequences(_ bytes: Data) -> [String] {
         let text = text(bytes)
         return text.components(separatedBy: "\u{1B}_G").dropFirst().compactMap { part in
