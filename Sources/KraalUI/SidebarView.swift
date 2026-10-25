@@ -689,6 +689,8 @@ private struct AgentRowView: View {
     let machineName: String
     let multiMachine: Bool
 
+    @Environment(\.palette) private var palette
+
     var body: some View {
         let context = SidebarRowContext(
             workspace: workspace,
@@ -730,6 +732,17 @@ private struct AgentRowView: View {
         }
         .padding(.vertical, 3)
         .padding(.horizontal, 6)
+        // The row is as wide as the sidebar, not as wide as its text.
+        //
+        // Without this the background wrapped the label and stopped: a focused row
+        // read as a chip floating in the list instead of a selected row, and the empty
+        // space to its right belonged to no row at all, so clicking beside an agent did
+        // nothing. `WorkspaceRowView` already had this for exactly the same reason and
+        // the agents list was missed.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Hit testing follows the drawn rect, so the whole row is clickable rather than
+        // only the glyphs SwiftUI happened to lay out.
+        .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
                 .fill(agent.focused ? Color.accentColor.opacity(0.20) : .clear)
@@ -742,8 +755,12 @@ private struct AgentRowView: View {
         case .stateIcon:
             StatusDot(status: agent.agentStatus, size: 7)
         case .agent:
+            // Upstream marks the agent name bold in both states, brightening it from
+            // `subtext0` to `text` when the row is focused (`agent_sidebar.rs:333-341`).
+            // A regular weight made the row's second line look like a caption.
             StyledText(text: token.text, style: token.style)
-                .font(.system(size: 12, weight: agent.focused ? .semibold : .regular))
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(agent.focused ? palette.textColor : palette.subtextColor)
                 .lineLimit(1)
         default:
             StyledText(text: token.text, style: token.style)
@@ -791,6 +808,11 @@ private struct PaneRowView: View {
         }
         .padding(.vertical, 3)
         .padding(.horizontal, 6)
+        // Full width for the same reason as the agent row: a background that stops at
+        // the text makes a focused row look like a chip, and leaves the space to its
+        // right belonging to no row.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
                 .fill(pane.focused ? Color.accentColor.opacity(0.20) : .clear)

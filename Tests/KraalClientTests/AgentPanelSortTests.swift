@@ -207,4 +207,46 @@ struct AgentPanelSortTests {
         )
         #expect(rows.map(\.agent.paneId) == ["a2", "a1"])
     }
+
+    /// The order a real 4-machine session produces, pinned.
+    ///
+    /// Taken from a live run (`agents: priority order …`): one `done` on `hw-laptop`,
+    /// two `working` (one on `host-workspace`, one on Local), and twelve `idle`
+    /// spread over every machine. The claim is the interleaving — all non-idle rows
+    /// before any idle row, regardless of which machine they came from — because that
+    /// is exactly what a per-machine concatenation cannot produce.
+    @Test("a real mixed-status session interleaves by status, not by machine")
+    func realSessionInterleaves() throws {
+        let rows = AgentAggregation.rows(
+            [
+                try source(id: "local", agents: [
+                    agentJSON(pane: "l1", status: "working"),
+                    agentJSON(pane: "l2", status: "idle"),
+                    agentJSON(pane: "l3", status: "idle"),
+                ]),
+                try source(id: "hw", agents: [
+                    agentJSON(pane: "h1", status: "done"),
+                    agentJSON(pane: "h2", status: "idle"),
+                    agentJSON(pane: "h3", status: "idle"),
+                ]),
+                try source(id: "ws", agents: [
+                    agentJSON(pane: "w1", status: "working"),
+                    agentJSON(pane: "w2", status: "idle"),
+                ]),
+            ],
+            activeEndpointID: "local",
+            sort: .priority
+        )
+        let order = rows.map { "\($0.agent.paneId):\($0.agent.agentStatus)" }
+        // Every non-idle row comes before every idle row.
+        let firstIdle = order.firstIndex { $0.hasSuffix(":idle") }
+        let lastBusy = order.lastIndex { !$0.hasSuffix(":idle") }
+        if let firstIdle, let lastBusy {
+            #expect(lastBusy < firstIdle,
+                    "an idle row outranked a busy one: \(order)")
+        }
+        // And the busiest status leads.
+        #expect(order.first?.hasSuffix(":done") == true,
+                "done should lead the list: \(order)")
+    }
 }

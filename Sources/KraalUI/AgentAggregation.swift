@@ -118,7 +118,7 @@ public enum AgentAggregation {
         hasViewLabel: Bool
     ) -> [AggregatedAgent] {
         guard sort == .priority, !hasViewLabel else { return rows }
-        return rows.sorted { (left: AggregatedAgent, right: AggregatedAgent) -> Bool in
+        let ordered = rows.sorted { (left: AggregatedAgent, right: AggregatedAgent) -> Bool in
             if left.stale != right.stale {
                 return !left.stale
             }
@@ -127,6 +127,18 @@ public enum AgentAggregation {
             }
             return left.recency > right.recency
         }
+        // Logged *after* ordering, so "why is this row above that one" is answerable
+        // from a user's own run. The first version logged `rows` — the unsorted
+        // parameter — and read as proof that cross-machine ordering was broken when it
+        // was working: the log showed `idle` before `done` because it printed the input.
+        if !ordered.isEmpty {
+            let summary = ordered.map {
+                "\($0.machineLabel)/\($0.agent.paneId)"
+                    + ":\($0.agent.agentStatus)(p\($0.agent.agentStatus.priority))"
+            }.joined(separator: " ")
+            kraalLog("agents: priority order \(summary)")
+        }
+        return ordered
     }
 
     /// Applies `sort` unless a view label is present.
