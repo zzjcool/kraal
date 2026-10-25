@@ -17,6 +17,26 @@ import Foundation
 
 /// The sidebar's two-pane split, as the user last left it.
 public enum SidebarPreferences {
+    /// The defaults this module reads and writes.
+    ///
+    /// Not `.standard` directly: the GUI gate runs the app against a scratch daemon
+    /// but the *user's* defaults are real and shared, so a case that drags the
+    /// divider wrote its split into the developer's own preferences and the next run
+    /// started at that ratio. That showed up as `sidebar-divider-drag` flipping
+    /// between passing and failing as the stored value drifted toward an edge.
+    ///
+    /// `KRAAL_PREFS_SUITE` points the app at its own domain, which is what the gate
+    /// sets. Unset means `.standard`, i.e. normal use.
+    public static var defaults: UserDefaults {
+        guard let suite = ProcessInfo.processInfo.environment["KRAAL_PREFS_SUITE"],
+              !suite.isEmpty,
+              let scoped = UserDefaults(suiteName: suite)
+        else {
+            return .standard
+        }
+        return scoped
+    }
+
     /// `nil` when the user has never dragged the divider.
     ///
     /// A `Double` rather than a `CGFloat` so `UserDefaults` round-trips it exactly;
@@ -28,24 +48,49 @@ public enum SidebarPreferences {
     /// A stored value outside `SidebarSections`' range is returned as-is: clamping is
     /// the layout's job (`SidebarSections.heights`), so a bad value written by a
     /// newer build cannot crash an older one.
-    public static func storedSplit(in defaults: UserDefaults = .standard) -> CGFloat? {
+    public static func storedSplit(in defaults: UserDefaults = SidebarPreferences.defaults) -> CGFloat? {
         guard defaults.object(forKey: splitKey) != nil else { return nil }
         let value = defaults.double(forKey: splitKey)
         return CGFloat(value)
     }
 
-    public static func storeSplit(_ ratio: CGFloat, in defaults: UserDefaults = .standard) {
+    public static func storeSplit(_ ratio: CGFloat, in defaults: UserDefaults = SidebarPreferences.defaults) {
         guard ratio.isFinite else { return }
         defaults.set(Double(ratio), forKey: splitKey)
     }
 
     /// Removes the stored split, so the next launch uses the default again.
-    public static func clearSplit(in defaults: UserDefaults = .standard) {
+    public static func clearSplit(in defaults: UserDefaults = SidebarPreferences.defaults) {
         defaults.removeObject(forKey: splitKey)
     }
 
     /// The ratio to start from: the stored one, or the default.
-    public static func initialSplit(in defaults: UserDefaults = .standard) -> CGFloat {
+    public static func initialSplit(in defaults: UserDefaults = SidebarPreferences.defaults) -> CGFloat {
         storedSplit(in: defaults) ?? SidebarSections.defaultRatio
+    }
+
+    // MARK: - Agents pane ordering
+
+    /// Mirror of upstream's `ClientChromePreferences.agent_panel_sort`
+    /// (`src/client/shell/preferences.rs:29`), which also lives client-side and is
+    /// `None` until the user changes it.
+    public static let agentSortKey = "kraal.sidebar.agentSort"
+
+    /// The stored ordering, or `nil` when the user has never changed it.
+    public static func storedAgentSort(in defaults: UserDefaults = SidebarPreferences.defaults) -> AgentPanelSort? {
+        guard let raw = defaults.string(forKey: agentSortKey) else { return nil }
+        return AgentPanelSort(rawValue: raw)
+    }
+
+    public static func storeAgentSort(
+        _ sort: AgentPanelSort,
+        in defaults: UserDefaults = SidebarPreferences.defaults
+    ) {
+        defaults.set(sort.rawValue, forKey: agentSortKey)
+    }
+
+    /// The ordering to start from.
+    public static func initialAgentSort(in defaults: UserDefaults = SidebarPreferences.defaults) -> AgentPanelSort {
+        storedAgentSort(in: defaults) ?? .default
     }
 }

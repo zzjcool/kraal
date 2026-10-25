@@ -48,12 +48,13 @@ public enum AgentAggregation {
     ///   than having them vanish.
     public static func rows(
         _ sources: [AgentAggregationSource],
-        activeEndpointID: String
+        activeEndpointID: String,
+        sort: AgentPanelSort = .default
     ) -> [AggregatedAgent] {
         var result: [AggregatedAgent] = []
         for source in sources {
             let isActive = source.endpointID == activeEndpointID
-            for agent in orderedAgents(in: source.snapshot, isActive: isActive) {
+            for agent in orderedAgents(in: source.snapshot, isActive: isActive, sort: sort) {
                 result.append(AggregatedAgent(
                     endpointID: source.endpointID,
                     machineLabel: source.label,
@@ -65,16 +66,44 @@ public enum AgentAggregation {
         return result
     }
 
+    /// Applies `sort` unless a view label is present.
+    ///
+    /// Upstream returns `agent_order` untouched when `agent_view_label` is set
+    /// (`src/client/shell/agent_sidebar.rs:23-31`): the label means "this list is a
+    /// filtered view", and re-sorting it would fight the order the filter implies.
+    static func sorted(
+        _ agents: [ClientShellAgent],
+        sort: AgentPanelSort,
+        hasViewLabel: Bool
+    ) -> [ClientShellAgent] {
+        guard sort == .priority, !hasViewLabel else { return agents }
+        // `stateChangeSeq` breaks ties the same way upstream does (`agent_sidebar.rs:
+        // 38-45`): within one status, the most recently changed agent comes first, so
+        // a row that just went `blocked` does not sit behind one that went `blocked`
+        // an hour ago.
+        //
+        // Sorting is stable in Swift, so equal `(priority, seq)` pairs keep the
+        // daemon's order rather than being shuffled.
+        return agents.sorted { (left: ClientShellAgent, right: ClientShellAgent) -> Bool in
+            if left.agentStatus.priority != right.agentStatus.priority {
+                return left.agentStatus.priority > right.agentStatus.priority
+            }
+            return left.stateChangeSeq > right.stateChangeSeq
+        }
+    }
+
     private static func orderedAgents(
         in snapshot: ClientShellSnapshot,
-        isActive: Bool
+        isActive: Bool,
+        sort: AgentPanelSort
     ) -> [ClientShellAgent] {
         let byPane = Dictionary(
             uniqueKeysWithValues: snapshot.agents.map { ($0.paneId, $0) }
         )
-        let ordered = snapshot.agentOrder.isEmpty
+        let daemonOrder = snapshot.agentOrder.isEmpty
             ? snapshot.agents
             : snapshot.agentOrder.compactMap { byPane[$0] }
+        let ordered = sorted(daemonOrder, sort: sort, hasViewLabel: snapshot.agentViewLabel != nil)
         guard !isActive else { return ordered }
         return ordered.map { agent in
             guard agent.focused else { return agent }

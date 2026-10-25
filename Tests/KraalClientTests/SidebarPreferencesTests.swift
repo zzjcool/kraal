@@ -86,4 +86,26 @@ struct SidebarPreferencesTests {
         )
         #expect(split == clamped)
     }
+
+    /// The agents ordering is remembered the same way the split is, and `nil` means
+    /// "never changed", so a future config-file default can still apply.
+    @Test("the agent sort round-trips, and absent means default")
+    func agentSortRoundTrips() {
+        let defaults = makeDefaults("agentsort")
+        #expect(SidebarPreferences.storedAgentSort(in: defaults) == nil)
+        #expect(SidebarPreferences.initialAgentSort(in: defaults) == .spaces)
+        SidebarPreferences.storeAgentSort(.priority, in: defaults)
+        #expect(SidebarPreferences.storedAgentSort(in: defaults) == .priority)
+        #expect(SidebarPreferences.initialAgentSort(in: defaults) == .priority)
+    }
+
+    /// An unrecognised stored value (written by a newer build) falls back to the
+    /// default rather than crashing or producing an empty list.
+    @Test("an unknown stored sort falls back to the default")
+    func unknownSortFallsBack() {
+        let defaults = makeDefaults("badsort")
+        defaults.set("some-future-mode", forKey: SidebarPreferences.agentSortKey)
+        #expect(SidebarPreferences.storedAgentSort(in: defaults) == nil)
+        #expect(SidebarPreferences.initialAgentSort(in: defaults) == .spaces)
+    }
 }

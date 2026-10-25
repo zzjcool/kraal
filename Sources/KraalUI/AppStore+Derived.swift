@@ -90,7 +90,8 @@ extension AppStore {
             },
             // `nil` when no machine is selected yet: then none of them is active, so
             // every row's `focused` is cleared, which is the truthful answer.
-            activeEndpointID: activeEndpointID?.storageKey ?? ""
+            activeEndpointID: activeEndpointID?.storageKey ?? "",
+            sort: agentPanelSort
         )
     }
 
