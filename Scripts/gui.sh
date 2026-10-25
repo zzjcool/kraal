@@ -610,6 +610,30 @@ stop_daemon() {
 #
 # Only the `[theme]` table is written; the rest of the file is the harness's business,
 # not this case's. The path is inside the guest, because the app runs there.
+# Switches the agents pane to `priority`, if it is not already.
+#
+# The label doubles as the toggle, and its text is the current mode, so reading it is
+# also how the case knows whether a click is needed. A case that assumed the mode was
+# already right passed without asserting anything the first time it ran.
+select_priority_sort() {
+    local label
+    label=$(driver ax --json --depth 22 2>/dev/null | python3 -c '
+import json, sys
+try:
+    tree = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+for node in tree["nodes"]:
+    if (node.get("identifier") or "") == "sidebar.agents.sort":
+        print((node.get("desc") or node.get("value") or "").strip())
+        break
+' 2>/dev/null)
+    [ "$label" = "priority" ] && return 0
+    driver press --id "sidebar.agents.sort" >/dev/null 2>&1 || return 1
+    sleep 1
+    return 0
+}
+
 theme_write_config() {
     local name="$1" extra="${2:-}"
     local body
@@ -4525,7 +4549,7 @@ plant_agent() {
     # the whole script at the stub's `;;` — `shellcheck` reported "clean" because it
     # also stopped parsing there.
     local script
-    script=$(printf '%s' 'IyEvYmluL2Jhc2gKIyBhcmd2WzBdIG11c3QgYmUgImNsYXVkZSIgZm9yIHRoZSBkYWVtb24gdG8gaWRlbnRpZnkgdGhlIGFnZW50OyB0aGUgc3RhdGUgY29tZXMgZnJvbQojIHdoYXQgdGhlIHNjcmVlbiBzaG93cyBhZ2FpbnN0IHRoZSBidW5kbGVkIG1hbmlmZXN0LgpwcmludGYgIlwwMzNbSFwwMzNbMkoiCmNhc2UgIiR7MTotaWRsZX0iIGluCmJsb2NrZWQpCiAgcHJpbnRmICJEbyB5b3Ugd2FudCB0byBwcm9jZWVkP1xuICAxLiBZZXNcbiAgMi4gTm9cbmVzYyB0byBjYW5jZWxcbmVudGVyIHRvIGNvbmZpcm1cbiIKICA7Owp3b3JraW5nKQogIHByaW50ZiAiXHhlMlx4YTBceDhiIFRoaW5raW5nXHhlMlx4ODBceGE2IChlc2MgdG8gaW50ZXJydXB0KVxuIgogIDs7CiopCiAgcHJpbnRmICJyZWFkeVxuIgogIDs7CmVzYWMKc2xlZXAgNjAwCg==' | base64 -d)
+    script=$(printf '%s' 'IyEvYmluL2Jhc2gKIyBhcmd2WzBdIG11c3QgYmUgImNsYXVkZSIgZm9yIHRoZSBkYWVtb24gdG8gaWRlbnRpZnkgdGhlIGFnZW50OyB0aGUgc3RhdGUgY29tZXMgZnJvbQojIHdoYXQgdGhlIHNjcmVlbiBzaG93cyBhZ2FpbnN0IHRoZSBidW5kbGVkIG1hbmlmZXN0LgojCiMgRWFjaCBzdGF0ZSBwcmludHMgZXhhY3RseSB3aGF0IGBzcmMvZGV0ZWN0L21hbmlmZXN0cy9jbGF1ZGUudG9tbGAgbWF0Y2hlczoKIwojICAgYmxvY2tlZCAtPiBgZXNjIHRvIGNhbmNlbGAgKyBgZW50ZXIgdG8gY29uZmlybWAgICAgICAgICAgKGNsYXVkZV9ibG9ja2VkLCA6ODEtODcpCiMgICB3b3JraW5nIC0+IGAqIExpdmUgdHVybmAgKyBgwrcgMSBNQ1AgdGFzayBzdGlsbCBydW5uaW5nYCAgKGJhY2tncm91bmRfbWNwX3Rhc2tfd29ya2luZywgOjM1LTQxKQojCiMgVHdvIHNpbXBsZXIgYXR0ZW1wdHMgZGlkIG5vdCB0YWtlLCBhbmQgdGhlIHJlYXNvbiBtYXR0ZXJzOiBgbGl2ZV90dXJuX3dvcmtpbmdgIHdhbnRzCiMgYOKPuGAvYOKPtWAgcGx1cyBgZXNjIHRvIGludGVycnVwdGAsIHdoaWNoIGEgKnRleHQtb25seSogc3R1YiBwcmludHMgb25jZSBhbmQgdGhlbiBsZWF2ZXMKIyBvbiBhIHNjcmVlbiB3aG9zZSBuZXh0IGxpbmUgaXMgdGhlIHNoZWxsIHByb21wdCDigJQgdGhlIHJlZ2lvbiBtYXRjaGVyIHN0aWxsIHJlamVjdGVkIGl0CiMgKG1lYXN1cmVkOiB0aGUgcGFuZSBzaG93ZWQgYOKPtSBSdW5uaW5nIHRlc3Rz4oCmIChlc2MgdG8gaW50ZXJydXB0KWAgd2hpbGUgdGhlIGRhZW1vbgojIHJlcG9ydGVkIGBpZGxlYCkuIFRoZSBNQ1AtdGFzayBydWxlIGlzIGEgcGxhaW4gbXVsdGktbGluZSB0ZXh0IG1hdGNoLCBzbyBpdCBmaXJlcwojIGZyb20gYSBzaW5nbGUgcHJpbnRmLgpwcmludGYgIlwwMzNbSFwwMzNbMkoiCmNhc2UgIiR7MTotaWRsZX0iIGluCmJsb2NrZWQpCiAgcHJpbnRmICJEbyB5b3Ugd2FudCB0byBwcm9jZWVkP1xuICAxLiBZZXNcbiAgMi4gTm9cbmVzYyB0byBjYW5jZWxcbmVudGVyIHRvIGNvbmZpcm1cbiIKICA7Owp3b3JraW5nKQogIHByaW50ZiAiKiBMaXZlIHR1cm5cbsK3IDEgTUNQIHRhc2sgc3RpbGwgcnVubmluZ1xuIgogIDs7CiopCiAgcHJpbnRmICJyZWFkeVxuIgogIDs7CmVzYWMKc2xlZXAgNjAwCg==' | base64 -d)
 
     # Reuse the same pane on purpose: the daemon notifies on a state *transition* of
     # one agent, so starting a second stub in a new pane would just add another idle
@@ -4785,14 +4809,7 @@ case_sidebar_priority_across_machines() {
         plant_agent alpha-b blocked || return 1
         # The priority mode has to be selected for the ordering to mean anything; the
         # label is also the control, so pressing it is the same action a user takes.
-        local label
-        label=$(python3 "$ROOT/Scripts/sidebar-sort-label.py" "$host_dir/sort-before.json" \
-            2>/dev/null) || label=""
-        if [ "$label" != "priority" ]; then
-            driver ax --json --depth 22 >"$host_dir/sort-before.json" 2>&1
-            driver press --id "sidebar.agents.sort" >/dev/null 2>&1 || return 1
-            sleep 1
-        fi
+        select_priority_sort || return 1
         return 0
     }
     action() {
