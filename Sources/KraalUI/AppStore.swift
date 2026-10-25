@@ -95,11 +95,13 @@ public final class AppStore {
     /// machine's workspace list stays visible, dimmed, while it reconnects.
     public internal(set) var endpoints: [EndpointState] = []
 
-    /// Backing storage for `agentPanelSort` (see `AppStore+Sidebar.swift`).
-    /// `@ObservationIgnored` would defeat the point: the pane must redraw when it
-    /// changes.
-    public internal(set) var storedAgentPanelSort: AgentPanelSort =
-        SidebarPreferences.initialAgentSort()
+    /// When each agent last changed, on a scale shared by every machine
+    /// (`AgentRecency`). Client-side state: it must survive snapshot replacement and
+    /// span machines. Not observed directly — the arriving snapshot is.
+    @ObservationIgnored public internal(set) var agentRecency = AgentRecency()
+    /// Backing storage for `agentPanelSort` (`AppStore+Sidebar.swift`). Observed on
+    /// purpose: the pane must redraw when it changes.
+    public internal(set) var storedAgentPanelSort = SidebarPreferences.initialAgentSort()
     /// The entry `target` currently points at.
     public internal(set) var activeEndpointID: EndpointID?
     /// `worktree.key` values whose child rows are folded shut, per endpoint.

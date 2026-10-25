@@ -13,8 +13,10 @@
 //
 
 import Foundation
+import KraalProtocol
 
 extension AppStore {
+
     /// How the agents pane orders its rows.
     ///
     /// Persisted locally (`SidebarPreferences`), mirroring upstream's
@@ -27,5 +29,22 @@ extension AppStore {
             storedAgentPanelSort = newValue
             SidebarPreferences.storeAgentSort(newValue)
         }
+    }
+
+    /// Stamp a machine's changed agents, then adopt its snapshot.
+    ///
+    /// Both halves in one call so a caller cannot replace the snapshot without
+    /// recording the change — the ordering would then be silently stale, which looks
+    /// like the sort "sometimes" being wrong.
+    func adoptSnapshot(
+        _ snapshot: ClientShellSnapshot,
+        for endpoint: EndpointState
+    ) {
+        agentRecency.observe(
+            endpointID: endpoint.id.storageKey,
+            snapshot: snapshot,
+            previous: endpoint.snapshot
+        )
+        endpoint.snapshot = snapshot
     }
 }

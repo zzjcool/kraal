@@ -459,7 +459,7 @@ public extension AppStore {
                 handleWelcome(welcome)
             }
         case let .snapshot(snapshot):
-            endpoint.snapshot = snapshot
+            adoptSnapshot(snapshot, for: endpoint)
             if endpoint.status != .disabled { endpoint.status = .online }
             if isActive {
                 handleSnapshot(snapshot)
