@@ -3953,7 +3953,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4465,6 +4465,181 @@ case_sidebar_footer_controls() {
     }
 }
 
+
+# Start a stub agent in a pane of one machine's daemon.
+#
+# The daemon identifies agents by foreground process name (`detect/mod.rs:245-247`)
+# and derives state by matching the screen against the bundled manifest, so a script
+# named `claude` that prints the manifest's blocker text reports `blocked` with no
+# real CLI involved. Two of these give the priority case two different statuses on two
+# different machines, which is the only way to tell cross-machine ordering from
+# per-machine concatenation.
+#
+# Arguments: <machine label> <state>
+plant_agent() {
+    local label="$1" state="$2"
+    local session real_home socket
+    session=$(roster_labels | awk -F'\t' -v want="$label" '$1 == want { print $2; exit }')
+    [ -n "$session" ] || { echo "no roster session for $label"; return 1; }
+    real_home=$(machine_home) || { echo "no machine home"; return 1; }
+    socket=$(machine_api_socket "$real_home" "$session") || {
+        echo "no api socket for $label"
+        return 1
+    }
+
+    local stub_dir="/tmp/kraal-fake-agent"
+    local stub="$stub_dir/claude"
+    # The stub is base64 so its `case`/`;;` cannot be parsed as shell syntax by this
+    # file's own parser. The first attempt embedded it as a heredoc and bash rejected
+    # the whole script at the stub's `;;` — `shellcheck` reported "clean" because it
+    # also stopped parsing there.
+    local script
+    script=$(printf '%s' 'IyEvYmluL2Jhc2gKIyBhcmd2WzBdIG11c3QgYmUgImNsYXVkZSIgZm9yIHRoZSBkYWVtb24gdG8gaWRlbnRpZnkgdGhlIGFnZW50OyB0aGUgc3RhdGUgY29tZXMgZnJvbQojIHdoYXQgdGhlIHNjcmVlbiBzaG93cyBhZ2FpbnN0IHRoZSBidW5kbGVkIG1hbmlmZXN0LgpwcmludGYgIlwwMzNbSFwwMzNbMkoiCmNhc2UgIiR7MTotaWRsZX0iIGluCmJsb2NrZWQpCiAgcHJpbnRmICJEbyB5b3Ugd2FudCB0byBwcm9jZWVkP1xuICAxLiBZZXNcbiAgMi4gTm9cbmVzYyB0byBjYW5jZWxcbmVudGVyIHRvIGNvbmZpcm1cbiIKICA7Owp3b3JraW5nKQogIHByaW50ZiAiXHhlMlx4YTBceDhiIFRoaW5raW5nXHhlMlx4ODBceGE2IChlc2MgdG8gaW50ZXJydXB0KVxuIgogIDs7CiopCiAgcHJpbnRmICJyZWFkeVxuIgogIDs7CmVzYWMKc2xlZXAgNjAwCg==' | base64 -d)
+
+    # The pane that will host the stub: the machine's first pane, or a new workspace.
+    local pane
+    pane=$(machine_first_pane "$label")
+    [ -n "$pane" ] || {
+        herdr_for_machine "$label" workspace create >/dev/null 2>&1
+        sleep 2
+        pane=$(machine_first_pane "$label")
+    }
+    [ -n "$pane" ] || { echo "no pane on $label"; return 1; }
+
+    # Write the stub inside the guest/host that hosts that daemon, then start it.
+    case "$BACKEND" in
+    local)
+        mkdir -p "$stub_dir"
+        printf '%s\n' "$script" >"$stub"
+        chmod +x "$stub"
+        ;;
+    vm)
+        printf '%s\n' "$script" | tart exec -i "$VM" /bin/bash -lc \
+            "mkdir -p $stub_dir && cat > $stub && chmod +x $stub" >/dev/null 2>&1 || return 1
+        ;;
+    esac
+    herdr_for_machine "$label" pane send-text "$pane" "$stub $state" >/dev/null 2>&1 || {
+        echo "cannot type into $pane on $label"
+        return 1
+    }
+    herdr_for_machine "$label" pane send-keys "$pane" Enter >/dev/null 2>&1 || return 1
+    sleep 4
+    return 0
+}
+
+# Run a `herdr` CLI command against one machine's daemon.
+herdr_for_machine() {
+    local label="$1"; shift
+    local session real_home socket
+    session=$(roster_labels | awk -F'\t' -v want="$label" '$1 == want { print $2; exit }')
+    [ -n "$session" ] || return 1
+    real_home=$(machine_home) || return 1
+    socket=$(machine_api_socket "$real_home" "$session") || return 1
+    case "$BACKEND" in
+    local) env HERDR_SOCKET_PATH="$socket" herdr "$@" ;;
+    vm) tart exec "$VM" /bin/bash -lc \
+        "HERDR_SOCKET_PATH=$socket $VM_ROOT/bin/herdr $*" ;;
+    esac
+}
+
+# The first pane id on one machine's daemon.
+machine_first_pane() {
+    local label="$1"
+    herdr_for_machine "$label" pane list 2>/dev/null | python3 -c '
+import json, sys
+try:
+    panes = json.load(sys.stdin)["result"]["panes"]
+except Exception:
+    raise SystemExit
+print(panes[0]["pane_id"] if panes else "")
+'
+}
+
+# Priority ordering interleaves machines by status, not by machine (issue #120).
+#
+# Upstream flattens every machine's agents and sorts the whole list
+# (`aggregate_navigation.rs:161-184`), so a `blocked` agent on the second machine
+# outranks a `working` one on the first. Sorting per machine and concatenating — the
+# shape this case exists to rule out — can only ever order rows within a group.
+#
+# The agents are **stubs**, not real CLIs. The daemon identifies an agent by its
+# foreground process name (`detect/mod.rs:245-247`) and derives its state by matching
+# the screen against the bundled manifest, so a script named `claude` that prints
+# `esc to cancel` / `enter to confirm` reports `blocked` without any real agent
+# running. That is what makes this case cheap: two stub processes, no accounts, no
+# downloads.
+# Two machines, so the agents pane has agents from more than one place to order.
+#
+# `machines_teardown` first: a roster left by another case would give this one a
+# different starting point, and the labels have to mean what the assertions assume.
+case_sidebar_priority_across_machines_app_setup() {
+    machines_teardown
+    machines_prereqs || { echo "loopback ssh unavailable"; return 1; }
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label alpha-a \
+        >/dev/null 2>&1 || { echo "machine add alpha-a failed"; return 1; }
+    roster_cmd machine add "$target" --remote-session fx-beta --label alpha-b \
+        >/dev/null 2>&1 || { echo "machine add alpha-b failed"; return 1; }
+    return 0
+}
+
+case_sidebar_priority_across_machines() {
+    requires() { echo ax; }
+    fixture() {
+        ensure_sidebar_expanded || return 1
+        # Two machines, each with one agent in a different state. `plant_agent` writes
+        # the stub and starts it in a pane of that machine's daemon.
+        # The blocked agent goes on the **second** machine on purpose. With it on the
+        # first, per-machine concatenation and cross-machine sorting both put it on top
+        # — measured: reverting the sort still passed. The bug is only visible when the
+        # higher-priority row has to leapfrog a whole machine.
+        plant_agent alpha-a idle || return 1
+        plant_agent alpha-b blocked || return 1
+        # The priority mode has to be selected for the ordering to mean anything; the
+        # label is also the control, so pressing it is the same action a user takes.
+        local label
+        label=$(python3 "$ROOT/Scripts/sidebar-sort-label.py" "$host_dir/sort-before.json" \
+            2>/dev/null) || label=""
+        if [ "$label" != "priority" ]; then
+            driver ax --json --depth 22 >"$host_dir/sort-before.json" 2>&1
+            driver press --id "sidebar.agents.sort" >/dev/null 2>&1 || return 1
+            sleep 1
+        fi
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+    }
+    assert() {
+        # The agent rows carry their machine label, so the machine a row belongs to is
+        # readable. The claim: the blocked row (alpha-a) is above the working one
+        # (alpha-b) even though alpha-a is the first machine.
+        python3 "$ROOT/Scripts/sidebar-agent-order.py" "$host_dir/ax.json" \
+            >"$host_dir/order.txt" 2>&1 || true
+        local order
+        order=$(cat "$host_dir/order.txt")
+        # alpha-a is `idle`, alpha-b is `blocked`. The claim: the blocked row (machine
+        # two) is *above* the idle one (machine one). `blocked` (4) vs `idle` (1) is the
+        # widest gap and needs no `working` spinner to match reliably — a text-only stub
+        # does not reproduce claude's animated spinner, and chasing it would make the
+        # case depend on manifest details unrelated to the ordering.
+        check "a blocked agent on the second machine outranks an idle one on the first" \
+            "$(printf '%s' "$order" | grep -qcE '^blocked@alpha-b idle@alpha-a$' \
+                && echo 0 || echo 1)" \
+            "$order"
+        # And the run really had two agents in two states: without this the ordering
+        # check would pass on a single row.
+        local count
+        count=$(printf '%s' "$order" | wc -w | tr -d ' ')
+        check "both stub agents are listed" \
+            "$([ "$count" -ge 2 ] && echo 0 || echo 1)" \
+            "rows: $order"
+    }
+}
 
 # ---------------------------------------------------------------- entrypoint
 
