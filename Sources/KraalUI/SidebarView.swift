@@ -14,6 +14,7 @@ import KraalTransport
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
+    @Environment(WindowActions.self) private var windowActions
     @State private var prompt: CommandPrompt?
 
     /// Fraction of the list area given to the spaces pane.
@@ -76,7 +77,11 @@ struct SidebarView: View {
                 }
             }
             Divider().opacity(0.4)
-            footer
+            SidebarFooterView(
+                store: store,
+                attention: footerAttention,
+                collapse: { setCollapsed(true) }
+            )
         }
         .frame(width: KraalTheme.sidebarWidth)
         // A real `NSVisualEffectView` sidebar, not SwiftUI's `.thinMaterial`: the
@@ -377,25 +382,53 @@ struct SidebarView: View {
             // when there is no room for it (`agent_sidebar.rs:100-120`). The
             // spaces pane has the same heading without a rule, because its rule is
             // the divider above it.
-            sectionHeading("agents")
-                // The sort control belongs on the heading the setting applies to,
-                // not in a settings window: it changes what this list looks like, and
-                // the two orderings are otherwise indistinguishable from the rows.
-                .contextMenu {
-                    ForEach(AgentPanelSort.allCases, id: \.self) { sort in
-                        Button {
-                            store.agentPanelSort = sort
-                        } label: {
-                            if sort == store.agentPanelSort {
-                                Label(sort.title, systemImage: "checkmark")
-                            } else {
-                                Text(sort.title)
-                            }
-                        }
-                    }
-                }
-                .help("Agents order: \(store.agentPanelSort.title)")
+            agentPanelHeader
             agentsBody
+        }
+    }
+
+    /// The agents pane's header: a rule, the title, and the sort label on the right.
+    ///
+    /// Upstream draws exactly this (`src/client/shell/agent_sidebar.rs:100-145`):
+    ///
+    ///     ──────────────────────────
+    ///      agents            grouped
+    ///
+    /// The label is not a menu — it is the *current* mode, printed, and clicking it
+    /// toggles between the two (`mouse.rs:2025-2032`). A right-click menu hides the
+    /// setting behind a gesture nobody would look for, and hides which mode is
+    /// active until the menu is open, so the two orderings are indistinguishable
+    /// from the rows themselves.
+    private var agentPanelHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // The rule above the title. `spaces` has none because its rule is the
+            // divider between the panes.
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(height: 1)
+                .padding(.horizontal, 6)
+            HStack(spacing: 0) {
+                Text("agents")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Button {
+                    store.agentPanelSort = store.agentPanelSort.toggled
+                } label: {
+                    Text(store.agentPanelSort.shortTitle)
+                        .font(.system(size: 9, weight: .semibold))
+                        // A filtered view is what upstream tints with the accent
+                        // colour (`agent_sidebar.rs:141-146`); it marks "this list is
+                        // not the plain one".
+                        .foregroundStyle(store.agentPanelSort == .priority
+                            ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Agents order: \(store.agentPanelSort.title) — click to switch")
+                .accessibilityIdentifier("sidebar.agents.sort")
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 2)
         }
     }
 
@@ -466,64 +499,6 @@ struct SidebarView: View {
                     .padding(.vertical, 4)
             }
         }
-    }
-
-    private var footer: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(store.phase.isLive ? sidebarColor("green") : sidebarColor("gray"))
-                .frame(width: 6, height: 6)
-            Text(statusText)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer()
-            if let config = store.sidebarConfigSource {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .help("Layout from \(config)")
-            }
-            // Collapse control. Upstream draws it as a `«` at the sidebar's bottom
-            // edge (`sidebar.rs:445-455`); a chevron button is the same affordance in
-            // a window that uses real controls.
-            Button {
-                setCollapsed(true)
-            } label: {
-                Image(systemName: "chevron.left.2")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Collapse the sidebar")
-            .accessibilityIdentifier("sidebar.collapse.toggle")
-
-            // Upstream puts its global-menu launcher here and marks it with a dot when
-            // something needs attention (`sidebar.rs:390-424`), where "attention" is
-            // `update_available || integration_updates_available`
-            // (`global_menu.rs:9-11`) — not an agent state.
-            //
-            // Kraal has no in-app global menu: the same actions live in the system
-            // menu bar (`MacMenuBar`) and in the Debug/settings sheets. So what is
-            // mirrored here is the *signal*, not the launcher: a dot when the daemon
-            // has something the user should know about, with the notice text as its
-            // tooltip. Adding a second menu would be a different, larger change —
-            // recorded in the issue.
-            if let attention = footerAttention {
-                Circle()
-                    .fill(sidebarColor("orange"))
-                    .frame(width: 5, height: 5)
-                    .help(attention)
-                    .accessibilityIdentifier("sidebar.footer.attention")
-                    // The dot itself is not readable from the AX tree beyond its
-                    // existence, so the *reason* goes to the log. Without that a GUI
-                    // case can only assert "a dot exists", which passes for the wrong
-                    // reason as soon as any other condition raises one.
-                    .onAppear { kraalLog("sidebar footer attention: \(attention)") }
-            }
-        }
-        .padding(.horizontal, KraalTheme.Space.base)
-        .padding(.vertical, KraalTheme.Space.tight)
     }
 
     /// What the footer dot is about, or `nil` when nothing needs the user.
