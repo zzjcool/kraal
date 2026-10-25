@@ -3923,7 +3923,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4077,6 +4077,51 @@ case_sidebar_divider_drag() {
             "$([ -n "$after_agents" ] && [ "$after_agents" != "missing" ] \
                 && [ "$after_agents" -gt "$before_agents" ] && echo 0 || echo 1)" \
             "before=[$before] after=[$after] (agents_y must grow)"
+    }
+}
+
+# The two sidebar panes scroll independently (issue #116).
+#
+# Upstream keeps a separate `workspace_scroll` and `agent_scroll`
+# (`src/client/shell/render.rs:239-240`, `state.rs:885-886`), so a long spaces list
+# must not drag the agents pane out of view.
+#
+# Measured as "the sidebar column contains two scrolling areas". A single shared
+# `ScrollView` can only ever produce one, so the count separates the two designs
+# without synthesising a wheel event — which this backend cannot do, because the app
+# runs as an accessory and synthetic scrolls need it frontmost.
+#
+# The rects are printed with the count so a *third* area (a stray list somewhere in
+# the sidebar) is visible rather than silently tolerated by a `>= 2` test.
+case_sidebar_independent_scroll() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+    }
+    assert() {
+        python3 "$ROOT/Scripts/sidebar-scroll-areas.py" "$host_dir/ax.json" \
+            >"$host_dir/areas.txt" 2>&1 || true
+        local line
+        line=$(cat "$host_dir/areas.txt")
+        check "the sidebar has one scrolling area per pane" \
+            "$(printf '%s' "$line" | grep -qcE '^areas=2 ' && echo 0 || echo 1)" \
+            "$line"
+        local stacked
+        if python3 "$ROOT/Scripts/sidebar-areas-stacked.py" "$host_dir/areas.txt" \
+            >"$host_dir/stacked.txt" 2>&1; then
+            stacked=0
+        else
+            stacked=1
+        fi
+        check "the two scrolling areas are stacked vertically" "$stacked" \
+            "$(cat "$host_dir/stacked.txt")"
     }
 }
 
