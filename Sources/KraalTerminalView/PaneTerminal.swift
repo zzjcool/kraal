@@ -152,6 +152,23 @@ public final class PaneTerminalModel {
         session.receive(painted)
     }
 
+    /// The grid this pane actually paints, which is **not** `surface.frame`.
+    ///
+    /// `paneFrame` crops the cells to `geometry.innerRect`, so the frame's size is the
+    /// pane's inside size. `apply` used to compare the previous frame (an `innerRect`
+    /// size) against `surface.frame`, which is a different quantity: a pane draws
+    /// inside its box, so the surface is a cell or two larger and the two never
+    /// agreed. Every apply then decided the grid had changed, erased the screen and
+    /// repainted it — the white flash while scrolling.
+    ///
+    /// Measured in the scroll fixture before the fix: `frame=118x36`,
+    /// `surface=119x36`, reset on every frame including the ones with no scroll at
+    /// all. After it, the resets all happen while the window is still settling and
+    /// none of them coincides with a scroll.
+    static func paneGrid(_ geometry: PaneSurfacePane) -> (width: Int, height: Int) {
+        (width: Int(geometry.innerRect.width), height: Int(geometry.innerRect.height))
+    }
+
     /// Reports the renderer's measured cell size, in device pixels.
     public var onCellMetrics: ((CGSize) -> Void)?
 
@@ -214,7 +231,8 @@ public final class PaneTerminalModel {
                 incomingRevision: geometry.contentRevision
             ),
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
-            currentGrid: (width: Int(surface.frame.width), height: Int(surface.frame.height))
+            // The pane's grid, not the surface's — see `paneGrid`.
+            currentGrid: Self.paneGrid(geometry)
         )
         if resetNeeded {
             screenResetCount += 1

@@ -91,6 +91,15 @@ public enum SurfaceGeometry {
     /// revisions independently — so a switch between them can arrive with every
     /// number unchanged while the pixels belong to the other machine. `bootId` is
     /// stamped at daemon boot and never shared, which is what separates them.
+    ///
+    /// A moved revision also counts: a daemon re-projects onto another tab without
+    /// rebooting, and that re-numbering is how the client hears about it.
+    ///
+    /// This does **not** make a scroll a projection change — measured on a real
+    /// scroll (`Scripts/gui.sh run scroll`): `projectionRevision` stayed at 5 across
+    /// the scroll while `surfaceRevision` and `contentRevision` advanced. The white
+    /// flash while scrolling came from somewhere else; see `PaneTerminal.apply`,
+    /// which compared a pane-sized frame against a surface-sized grid.
     public static func projectionChanged(
         previous: ProjectionIdentity?,
         current: ProjectionIdentity
