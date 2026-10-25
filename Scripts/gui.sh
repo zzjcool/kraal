@@ -3957,6 +3957,35 @@ all_cases() { echo "click-coordinates split-right menu-split split-down close-pa
 # pane titles, so their presence together *is* the claim. Under the old segmented
 # control only the selected pane's content was built at all, so one heading was
 # always missing.
+# Make sure the sidebar is expanded before a case that reads its two panes.
+#
+# The collapsed state is persisted (`SidebarPreferences.collapsedKey`), so any case
+# that collapses leaves the *next* case starting narrow — inside one `gui.sh run` the
+# cases share an app, so this is not hypothetical: `sidebar-collapse` runs after
+# `sidebar-split-geometry` in the list order and the geometry case then reported
+# "missing headings: ['agents']".
+#
+# Pressing until the sidebar is wide makes the precondition explicit rather than
+# assumed, and is idempotent when it is already expanded (the loop body never runs).
+ensure_sidebar_expanded() {
+    local width
+    width=$(python3 "$ROOT/Scripts/sidebar-width.py" "$host_dir/ax.json" 2>/dev/null) || {
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || return 1
+        width=$(python3 "$ROOT/Scripts/sidebar-width.py" "$host_dir/ax.json" 2>/dev/null) \
+            || return 1
+    }
+    local attempt=0
+    while [ "$width" -lt 100 ] && [ "$attempt" -lt 3 ]; do
+        driver press --id "sidebar.collapse.toggle" >/dev/null 2>&1 || return 1
+        sleep 1
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || return 1
+        width=$(python3 "$ROOT/Scripts/sidebar-width.py" "$host_dir/ax.json" 2>/dev/null) \
+            || return 1
+        attempt=$((attempt + 1))
+    done
+    [ "$width" -ge 100 ]
+}
+
 case_sidebar_sections() {
     requires() { echo ax; }
     fixture() {
@@ -3964,6 +3993,10 @@ case_sidebar_sections() {
         return 0
     }
     action() {
+        ensure_sidebar_expanded || {
+            echo "cannot expand the sidebar"
+            return 1
+        }
         driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
             echo "cannot read the AX tree"
             return 1
@@ -3997,37 +4030,31 @@ case_sidebar_split_geometry() {
         return 0
     }
     action() {
+        ensure_sidebar_expanded || {
+            echo "cannot expand the sidebar"
+            return 1
+        }
         driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
             echo "cannot read the AX tree"
             return 1
         }
     }
     assert() {
-        python3 - "$host_dir/ax.json" <<'PY' >"$host_dir/layout.txt" 2>&1
-import json, sys
-with open(sys.argv[1]) as handle:
-    tree = json.load(handle)
-tops = {}
-for node in tree["nodes"]:
-    if node.get("role") != "AXStaticText":
-        continue
-    value = (node.get("value") or "").strip().lower()
-    frame = node.get("frame") or {}
-    if "y" not in frame or frame.get("x", 999) > 260:
-        continue
-    if value in ("spaces", "agents") and value not in tops:
-        tops[value] = frame["y"]
-if len(tops) != 2:
-    print("missing headings: {}".format(sorted(tops)))
-    sys.exit(1)
-print("spaces_y={} agents_y={}".format(tops["spaces"], tops["agents"]))
-PY
+        # The shared script, not an inline one: the top pane's title is `" spaces"`
+        # with one machine and `" machines"` with several (`render.rs:271-310`), and an
+        # inline copy that only knows "spaces" failed as soon as the fixture had two
+        # machines. One reader for both titles is the reason this file exists.
+        python3 "$ROOT/Scripts/sidebar-heading-tops.py" "$host_dir/ax.json" \
+            >"$host_dir/layout.txt" 2>&1 || true
+        local line
         line=$(cat "$host_dir/layout.txt")
-        spaces_y=$(printf '%s' "$line" | sed -n 's/.*spaces_y=\([0-9]*\).*/\1/p')
-        agents_y=$(printf '%s' "$line" | sed -n 's/.*agents_y=\([0-9]*\).*/\1/p')
-        check "the agents pane is stacked below the spaces pane" \
-            "$([ -n "$spaces_y" ] && [ -n "$agents_y" ] && [ "$agents_y" -gt "$spaces_y" ] && echo 0 || echo 1)" \
-            "$line"
+        local top_y agents_y
+        top_y=$(printf '%s' "$line" | cut -d' ' -f1)
+        agents_y=$(printf '%s' "$line" | cut -d' ' -f2)
+        check "the agents pane is stacked below the top pane" \
+            "$([ -n "$top_y" ] && [ -n "$agents_y" ] && [ "$agents_y" -gt "$top_y" ] \
+                && echo 0 || echo 1)" \
+            "$line (top_y agents_y)"
     }
 }
 
@@ -4052,6 +4079,10 @@ case_sidebar_divider_drag() {
         return 0
     }
     action() {
+        ensure_sidebar_expanded || {
+            echo "cannot expand the sidebar"
+            return 1
+        }
         driver ax --json --depth 22 >"$host_dir/ax-before.json" 2>&1 || {
             echo "cannot read the AX tree"
             return 1

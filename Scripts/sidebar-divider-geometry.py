@@ -15,6 +15,9 @@ import json
 import sys
 
 DIVIDER_ID = "sidebar.section.divider"
+# The top pane's title depends on the machine count (`render.rs:271-310`):
+# `" spaces"` with one, `" machines"` with several.
+TOP_TITLES = ("spaces", "machines")
 
 
 def locate(path):
@@ -32,9 +35,16 @@ def locate(path):
             continue
         value = (node.get("value") or "").strip().lower()
         frame = node.get("frame") or {}
-        if "y" in frame and frame.get("x", 999) < 260 and value in ("spaces", "agents"):
+        if "y" not in frame or frame.get("x", 999) > 260:
+            continue
+        if value in ("agents", "machines"):
             heads.setdefault(value, frame["y"])
-    if divider is None or "y" not in divider or len(heads) != 2:
+        elif value == "spaces":
+            # "spaces" and "machines" are the same pane under different names; keep
+            # whichever arrived so the caller does not have to care which.
+            heads.setdefault("machines", frame["y"])
+    if divider is None or "y" not in divider or "machines" not in heads \
+            or "agents" not in heads:
         return None
     try:
         # The frames come from the AX dump, so a key can be missing or null when a
@@ -43,7 +53,7 @@ def locate(path):
         return {
             "cx": int(divider["x"] + divider["w"] / 2),
             "cy": int(divider["y"] + divider["h"] / 2),
-            "spaces_y": int(heads["spaces"]),
+            "spaces_y": int(heads["machines"]),
             "agents_y": int(heads["agents"]),
         }
     except (KeyError, TypeError, ValueError):
