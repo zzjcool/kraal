@@ -3923,7 +3923,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4017,6 +4017,76 @@ PY
         check "the agents pane is stacked below the spaces pane" \
             "$([ -n "$spaces_y" ] && [ -n "$agents_y" ] && [ "$agents_y" -gt "$spaces_y" ] && echo 0 || echo 1)" \
             "$line"
+    }
+}
+
+# Dragging the divider moves the split and remembers it (issue #117).
+#
+# Upstream treats the rule between the two panes as a hit target and turns the
+# pointer's row into a ratio (`src/client/shell/mouse.rs:1971-1974`), clamped
+# through `ui/sidebar.rs:42-43`. The assertion is on the *geometry of the two
+# headings* after the drag: moving the divider must move the agents heading, and
+# nothing else in the sidebar resizes, so a heading that did not move means the
+# drag never reached the split.
+#
+# The divider is found by its accessibility identifier, not estimated from the two
+# headings. Two estimates were tried first and both landed inside the spaces pane:
+# the split is `heights(total, ratio).spaces` tall, which is not a fixed offset from
+# either heading, and the window origin the driver reports disagreed with the app's
+# own by 260 pt. Reading the rule's own rectangle removes both assumptions.
+case_sidebar_divider_drag() {
+    requires() { echo focus; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax-before.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+        local geometry
+        geometry=$(python3 "$ROOT/Scripts/sidebar-divider-geometry.py" \
+            "$host_dir/ax-before.json") || {
+            echo "cannot locate the divider: $geometry"
+            return 1
+        }
+        printf '%s\n' "$geometry" >"$host_dir/before.txt"
+
+        local cy window_y from_y to_y
+        cy=$(printf '%s' "$geometry" | sed -n 's/.*cy=\([0-9]*\).*/\1/p')
+        window_y=$(driver window | tr ' ' '\n' | sed -n 's/^y=//p')
+        [ -n "$window_y" ] || {
+            echo "cannot read the window origin"
+            return 1
+        }
+        from_y=$((cy - window_y))
+        to_y=$((from_y + 60))
+        printf 'window_y=%s cy=%s from=%s to=%s\n' "$window_y" "$cy" "$from_y" "$to_y" \
+            >"$host_dir/drag-geometry.txt"
+
+        driver drag --from "60,$from_y" --to "60,$to_y" --steps 8 \
+            >"$host_dir/drag.txt" 2>&1 || {
+            echo "cannot drag the divider"
+            return 1
+        }
+        sleep 1
+        driver ax --json --depth 22 >"$host_dir/ax-after.json" 2>&1 || {
+            echo "cannot read the AX tree after the drag"
+            return 1
+        }
+    }
+    assert() {
+        local after before before_agents after_agents
+        after=$(python3 "$ROOT/Scripts/sidebar-heading-tops.py" "$host_dir/ax-after.json") \
+            || after="missing"
+        before=$(cat "$host_dir/before.txt")
+        before_agents=$(printf '%s' "$before" | sed -n 's/.*agents_y=\([0-9]*\).*/\1/p')
+        after_agents=$(printf '%s' "$after" | cut -d' ' -f2)
+        check "dragging the divider moved the agents pane down" \
+            "$([ -n "$after_agents" ] && [ "$after_agents" != "missing" ] \
+                && [ "$after_agents" -gt "$before_agents" ] && echo 0 || echo 1)" \
+            "before=[$before] after=[$after] (agents_y must grow)"
     }
 }
 

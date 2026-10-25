@@ -18,9 +18,13 @@ struct SidebarView: View {
 
     /// Fraction of the list area given to the spaces pane.
     ///
-    /// A stored value rather than a computed one because the divider drags (#117).
-    /// Until that lands it never changes, and the default matches upstream's.
-    @State private var sectionRatio = SidebarSections.defaultRatio
+    /// Starts from the stored value so the sidebar remembers how the user left it;
+    /// a drag overwrites both this and the store (`SidebarPreferences`).
+    @State private var sectionRatio = SidebarPreferences.initialSplit()
+
+    /// The split the pane heights were drawn at, so a drag can be turned back into a
+    /// ratio without re-measuring inside the gesture.
+    @State private var lastMeasuredHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -42,9 +46,13 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     sectionScroll { workspacesSection }
                         .frame(height: split.spaces, alignment: .top)
-                    sectionDivider
+                    sectionDivider(totalHeight: proxy.size.height)
                     sectionScroll { agentsSection }
                         .frame(height: split.agents, alignment: .top)
+                }
+                .onAppear { lastMeasuredHeight = proxy.size.height }
+                .onChange(of: proxy.size.height) { _, height in
+                    lastMeasuredHeight = height
                 }
             }
             Divider().opacity(0.4)
@@ -78,8 +86,51 @@ struct SidebarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private var sectionDivider: some View {
-        Divider().opacity(0.4)
+    /// The draggable rule between the two panes.
+    ///
+    /// Upstream treats this line as a hit target and turns the pointer's row into a
+    /// ratio (`src/client/shell/mouse.rs:1971-1974`), clamping through
+    /// `SidebarSections.ratio`. The gesture here does the same in points: the drag
+    /// offset is added to the height the spaces pane was drawn at, so the divider
+    /// follows the pointer instead of jumping to it.
+    ///
+    /// The 8 pt band is invisible padding around a 1 pt rule: a 1 pt target is
+    /// unhittable with a mouse, and drawing it thicker would read as a gap between
+    /// the panes rather than a divider.
+    private func sectionDivider(totalHeight: CGFloat) -> some View {
+        let drag = DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                guard totalHeight > 0 else { return }
+                let current = SidebarSections.heights(
+                    totalHeight: totalHeight,
+                    ratio: sectionRatio
+                ).spaces
+                let target = current + value.translation.height
+                let ratio = SidebarSections.ratio(draggedTo: target, totalHeight: totalHeight)
+                guard ratio != sectionRatio else { return }
+                sectionRatio = ratio
+                SidebarPreferences.storeSplit(ratio)
+            }
+        return ZStack {
+            Divider().opacity(0.4)
+            Color.clear
+                .frame(height: 8)
+                .contentShape(Rectangle())
+                // Named so the GUI case can find the rule's real rectangle instead
+                // of estimating it from the two headings. Estimating got the drag
+                // ~90 pt off and the gesture landed inside the spaces pane, where it
+                // selected text and changed nothing.
+                .accessibilityIdentifier("sidebar.section.divider")
+                .onHover { inside in
+                    if inside {
+                        NSCursor.resizeUpDown.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+        }
+        .frame(height: 8)
+        .gesture(drag)
     }
 
     // MARK: - Sections
