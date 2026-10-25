@@ -52,4 +52,12 @@ public enum AgentPanelSort: String, Sendable, CaseIterable {
     case priority
 
     public static let `default`: AgentPanelSort = .spaces
+
+    /// Label for the sort control.
+    public var title: String {
+        switch self {
+        case .spaces: "Daemon order"
+        case .priority: "Priority (blocked first)"
+        }
+    }
 }

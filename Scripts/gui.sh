@@ -80,6 +80,18 @@ else
 fi
 DRIVER="$ROOT/.build/out/Products/Debug/KraalGUIDriver"
 HOST_ARTIFACTS="$ROOT/artifacts"
+
+# Where the app under test keeps its `UserDefaults`.
+#
+# Per *case*, not one shared domain: the sidebar remembers its split and its agent
+# ordering, so a case that drags the divider would otherwise change what the next
+# case starts from — and, worse, the real `cool.zzj.kraal` domain, because the app
+# reads `.standard` unless told otherwise. `SidebarPreferences.defaults` honours this
+# variable; `run_case` assigns it before launching.
+#
+# Empty until a case runs: referring to `$SESSION` here would be an unbound variable
+# under `set -u`, because the session name is derived later in this file.
+PREFS_SUITE=""
 if [ "$BACKEND" = "vm" ]; then
     ARTIFACTS="$VM_ROOT/artifacts"
 else
@@ -608,6 +620,7 @@ launch_app() {
         KRAAL_HERDR_HOME="$ROSTER_HOME" \
         KRAAL_DEV_BACKGROUND="$background" \
         KRAAL_DEV_SESSION="$SESSION" \
+        KRAAL_PREFS_SUITE="$PREFS_SUITE" \
         nohup "$ROOT/build/Kraal.app/Contents/MacOS/KraalMac" \
             >"$SCRATCH/app.out" 2>&1 &
         ;;
@@ -620,6 +633,7 @@ launch_app() {
              cd $VM_ROOT
              KRAAL_HERDR_SOCKET=$CLIENT_SOCKET KRAAL_HERDR_HOME=$ROSTER_HOME \
              KRAAL_DEV_BACKGROUND=$background KRAAL_DEV_SESSION=$SESSION \
+             KRAAL_PREFS_SUITE=$PREFS_SUITE \
              nohup $VM_APP/Contents/MacOS/KraalMac > $VM_ROOT/app.out 2>&1 </dev/null &
              disown 2>/dev/null
              echo launched" \
@@ -3721,6 +3735,13 @@ run_case() {
     # assertion failed with "endpoints: 0 saved machine(s)" even though the roster
     # on disk had both. That is issue #69's reload gap seen from the harness side.
     app_setup() { "case_${name//-/_}_app_setup" 2>/dev/null || true; }
+
+    # A fresh defaults domain per case, so one case cannot hand the next a
+    # pre-dragged divider or a pre-set agent ordering. The stale domain from an
+    # earlier run of the same case is removed too: "the case passed last time" must
+    # not be part of its starting state.
+    PREFS_SUITE="kraal.gui.$name"
+    defaults delete "$PREFS_SUITE" >/dev/null 2>&1 || true
 
     local run_id
     run_id="$(date +%Y%m%d-%H%M%S)-$name"

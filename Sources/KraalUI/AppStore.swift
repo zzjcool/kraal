@@ -94,6 +94,12 @@ public final class AppStore {
     /// `AppStore+Endpoints.swift`). The terminal client keeps the same catalog so a
     /// machine's workspace list stays visible, dimmed, while it reconnects.
     public internal(set) var endpoints: [EndpointState] = []
+
+    /// Backing storage for `agentPanelSort` (see `AppStore+Sidebar.swift`).
+    /// `@ObservationIgnored` would defeat the point: the pane must redraw when it
+    /// changes.
+    public internal(set) var storedAgentPanelSort: AgentPanelSort =
+        SidebarPreferences.initialAgentSort()
     /// The entry `target` currently points at.
     public internal(set) var activeEndpointID: EndpointID?
     /// `worktree.key` values whose child rows are folded shut, per endpoint.

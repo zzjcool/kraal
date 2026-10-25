@@ -358,6 +358,23 @@ struct SidebarView: View {
             // spaces pane has the same heading without a rule, because its rule is
             // the divider above it.
             sectionHeading("agents")
+                // The sort control belongs on the heading the setting applies to,
+                // not in a settings window: it changes what this list looks like, and
+                // the two orderings are otherwise indistinguishable from the rows.
+                .contextMenu {
+                    ForEach(AgentPanelSort.allCases, id: \.self) { sort in
+                        Button {
+                            store.agentPanelSort = sort
+                        } label: {
+                            if sort == store.agentPanelSort {
+                                Label(sort.title, systemImage: "checkmark")
+                            } else {
+                                Text(sort.title)
+                            }
+                        }
+                    }
+                }
+                .help("Agents order: \(store.agentPanelSort.title)")
             agentsBody
         }
     }

@@ -23,6 +23,22 @@ public enum AgentStatus: String, Decodable, Sendable, CaseIterable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = AgentStatus(rawValue: raw) ?? .unknown
     }
+
+    /// How much this state deserves the top of the agent list.
+    ///
+    /// Upstream orders `priority` mode by this, descending
+    /// (`src/client/shell.rs:203-212`): `blocked 4 > done 3 > working 2 > idle 1 >
+    /// unknown 0`. An agent waiting on a human outranks one that is merely busy,
+    /// which is the opposite of "most recently active first".
+    public var priority: Int {
+        switch self {
+        case .blocked: 4
+        case .done: 3
+        case .working: 2
+        case .idle: 1
+        case .unknown: 0
+        }
+    }
 }
 
 public struct ClientShellSnapshot: Decodable, Equatable, Sendable {
