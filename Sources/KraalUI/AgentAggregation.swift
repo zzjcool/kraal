@@ -49,21 +49,66 @@ public enum AgentAggregation {
     public static func rows(
         _ sources: [AgentAggregationSource],
         activeEndpointID: String,
-        sort: AgentPanelSort = .default
+        sort: AgentPanelSort = .default,
+        recency: AgentRecency = AgentRecency()
     ) -> [AggregatedAgent] {
         var result: [AggregatedAgent] = []
         for source in sources {
             let isActive = source.endpointID == activeEndpointID
-            for agent in orderedAgents(in: source.snapshot, isActive: isActive, sort: sort) {
+            for agent in orderedAgents(in: source.snapshot, isActive: isActive) {
                 result.append(AggregatedAgent(
                     endpointID: source.endpointID,
                     machineLabel: source.label,
                     agent: agent,
-                    stale: !source.isConnected
+                    stale: !source.isConnected,
+                    recency: recency.stamp(
+                        endpointID: source.endpointID,
+                        paneId: agent.paneId
+                    )
                 ))
             }
         }
-        return result
+        return sorted(result, sort: sort, hasViewLabel: sources.contains {
+            $0.snapshot.agentViewLabel != nil
+        })
+    }
+
+    /// Orders the *whole* list, across machines.
+    ///
+    /// Upstream sorts after flattening every endpoint's agents
+    /// (`src/client/shell/aggregate_navigation.rs:161-184`), so a `blocked` agent on
+    /// machine B outranks a `working` one on machine A. Sorting inside each machine
+    /// and then concatenating — which this used to do — can only ever order rows
+    /// within a group, so the priority mode looked like it was working while the
+    /// groups themselves were in machine order.
+    ///
+    /// The key is upstream's own:
+    ///
+    /// - `stale` first: a disconnected machine's rows go last, because their status
+    ///   is the last known one rather than the current one *and* its rows are drawn
+    ///   dimmed, so they should not head the list.
+    /// - then higher priority (`blocked` before `done` before `working` ...).
+    /// - then more recent change, using the client-side stamp rather than
+    ///   `state_change_seq` — the latter is per-daemon and not comparable across
+    ///   machines (`endpoints.rs:594-604`).
+    ///
+    /// Upstream orders this way only for `Priority`; `Spaces` keeps the daemon's own
+    /// order, which is what `orderedAgents` already produced.
+    static func sorted(
+        _ rows: [AggregatedAgent],
+        sort: AgentPanelSort,
+        hasViewLabel: Bool
+    ) -> [AggregatedAgent] {
+        guard sort == .priority, !hasViewLabel else { return rows }
+        return rows.sorted { (left: AggregatedAgent, right: AggregatedAgent) -> Bool in
+            if left.stale != right.stale {
+                return !left.stale
+            }
+            if left.agent.agentStatus.priority != right.agent.agentStatus.priority {
+                return left.agent.agentStatus.priority > right.agent.agentStatus.priority
+            }
+            return left.recency > right.recency
+        }
     }
 
     /// Applies `sort` unless a view label is present.
@@ -71,31 +116,9 @@ public enum AgentAggregation {
     /// Upstream returns `agent_order` untouched when `agent_view_label` is set
     /// (`src/client/shell/agent_sidebar.rs:23-31`): the label means "this list is a
     /// filtered view", and re-sorting it would fight the order the filter implies.
-    static func sorted(
-        _ agents: [ClientShellAgent],
-        sort: AgentPanelSort,
-        hasViewLabel: Bool
-    ) -> [ClientShellAgent] {
-        guard sort == .priority, !hasViewLabel else { return agents }
-        // `stateChangeSeq` breaks ties the same way upstream does (`agent_sidebar.rs:
-        // 38-45`): within one status, the most recently changed agent comes first, so
-        // a row that just went `blocked` does not sit behind one that went `blocked`
-        // an hour ago.
-        //
-        // Sorting is stable in Swift, so equal `(priority, seq)` pairs keep the
-        // daemon's order rather than being shuffled.
-        return agents.sorted { (left: ClientShellAgent, right: ClientShellAgent) -> Bool in
-            if left.agentStatus.priority != right.agentStatus.priority {
-                return left.agentStatus.priority > right.agentStatus.priority
-            }
-            return left.stateChangeSeq > right.stateChangeSeq
-        }
-    }
-
     private static func orderedAgents(
         in snapshot: ClientShellSnapshot,
-        isActive: Bool,
-        sort: AgentPanelSort
+        isActive: Bool
     ) -> [ClientShellAgent] {
         let byPane = Dictionary(
             uniqueKeysWithValues: snapshot.agents.map { ($0.paneId, $0) }
@@ -103,7 +126,7 @@ public enum AgentAggregation {
         let daemonOrder = snapshot.agentOrder.isEmpty
             ? snapshot.agents
             : snapshot.agentOrder.compactMap { byPane[$0] }
-        let ordered = sorted(daemonOrder, sort: sort, hasViewLabel: snapshot.agentViewLabel != nil)
+        let ordered = daemonOrder
         guard !isActive else { return ordered }
         return ordered.map { agent in
             guard agent.focused else { return agent }

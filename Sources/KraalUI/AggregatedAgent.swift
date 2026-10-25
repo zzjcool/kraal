@@ -30,16 +30,24 @@ public struct AggregatedAgent: Identifiable, Equatable, Sendable {
     /// than making an agent disappear because the SSH link blinked.
     public let stale: Bool
 
+    /// When this agent last changed, on a scale shared by every machine.
+    ///
+    /// Not `agent.stateChangeSeq`: that counts each daemon's own changes from zero, so
+    /// two machines' numbers are unrelated. See `AgentRecency`.
+    public let recency: UInt64
+
     public init(
         endpointID: String,
         machineLabel: String,
         agent: ClientShellAgent,
-        stale: Bool
+        stale: Bool,
+        recency: UInt64 = 0
     ) {
         self.endpointID = endpointID
         self.machineLabel = machineLabel
         self.agent = agent
         self.stale = stale
+        self.recency = recency
     }
 }
 

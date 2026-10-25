@@ -4,12 +4,19 @@
 //  AgentPanelSortTests.swift
 //  KraalClientTests
 //
-//  The agents pane can order by `priority` instead of the daemon's own order.
+//  The agents pane orders by priority across *every* machine, not within each one.
 //
-//  Upstream's rule is `blocked > done > working > idle > unknown`, ties broken by
-//  `state_change_seq` descending (`src/client/shell/agent_sidebar.rs:38-45`,
-//  `src/client/shell.rs:203-212`). It also *skips* sorting entirely when
-//  `agent_view_label` is set, because a filtered view carries its own order.
+//  Upstream flattens all endpoints' agents and only then sorts
+//  (`src/client/shell/aggregate_navigation.rs:161-184`), with the key
+//
+//      (stale, Reverse(priority), Reverse(recency))
+//
+//  where `recency` is a client-side stamp on a scale shared by all machines
+//  (`endpoints.rs:594-604`) — not `state_change_seq`, which each daemon counts from
+//  zero and which is therefore not comparable between machines.
+//
+//  Sorting inside each machine and concatenating (what this used to do) looks right
+//  on one machine and is wrong on several, which is exactly the reported bug.
 //
 
 import Foundation
@@ -20,34 +27,49 @@ import Testing
 
 @Suite("Agent panel sorting")
 struct AgentPanelSortTests {
-    private func agent(
-        _ pane: String,
-        _ status: String,
+    private func agentJSON(
+        pane: String,
+        status: String,
         seq: UInt64 = 0
-    ) throws -> ClientShellAgent {
-        let json = """
+    ) -> String {
+        """
         {"pane_id": "\(pane)", "workspace_id": "w", "tab_id": "t",
          "agent_status": "\(status)", "state_change_seq": \(seq), "focused": false}
         """
-        return try JSONDecoder().decode(ClientShellAgent.self, from: Data(json.utf8))
     }
 
-    /// `blocked` first: an agent waiting on a human is the one that matters, which is
-    /// the opposite of "most recently active first".
-    @Test("priority puts blocked above everything")
-    func blockedOutranksAll() throws {
-        let agents = [
-            try agent("a", "idle", seq: 99),
-            try agent("b", "blocked", seq: 1),
-            try agent("c", "working", seq: 50),
-            try agent("d", "done", seq: 10),
-            try agent("e", "unknown"),
-        ]
-        let sorted = AgentAggregation.sorted(agents, sort: .priority, hasViewLabel: false)
-        #expect(sorted.map(\.agentStatus) == [.blocked, .done, .working, .idle, .unknown])
+    private func snapshot(
+        agents: [String],
+        order: [String] = [],
+        viewLabel: String? = nil
+    ) throws -> ClientShellSnapshot {
+        let agentList = agents.joined(separator: ",")
+        let orderList = order.map { "\"\($0)\"" }.joined(separator: ",")
+        let label = viewLabel.map { "\"agent_view_label\": \"\($0)\"," } ?? ""
+        let json = """
+        {"boot_id": "boot", "revision": 1, "workspaces": [], "tabs": [], "panes": [],
+         \(label)
+         "agents": [\(agentList)], "agent_order": [\(orderList)], "commands": []}
+        """
+        return try JSONDecoder().decode(ClientShellSnapshot.self, from: Data(json.utf8))
     }
 
-    /// The exact ranking, so a reordering of the enum cannot silently change it.
+    private func source(
+        id: String,
+        agents: [String],
+        order: [String] = [],
+        connected: Bool = true,
+        viewLabel: String? = nil
+    ) throws -> AgentAggregationSource {
+        AgentAggregationSource(
+            endpointID: id,
+            label: id,
+            isConnected: connected,
+            snapshot: try snapshot(agents: agents, order: order, viewLabel: viewLabel)
+        )
+    }
+
+    /// The ranking itself, so a reordering of the enum cannot silently change it.
     @Test("the ranking matches upstream")
     func ranking() {
         #expect(AgentStatus.blocked.priority == 4)
@@ -57,82 +79,132 @@ struct AgentPanelSortTests {
         #expect(AgentStatus.unknown.priority == 0)
     }
 
-    /// Within one status the most recent change comes first.
-    @Test("ties break on the most recent state change")
-    func tiesBreakOnRecentChange() throws {
-        let agents = [
-            try agent("old", "blocked", seq: 1),
-            try agent("new", "blocked", seq: 9),
-            try agent("mid", "blocked", seq: 5),
-        ]
-        let sorted = AgentAggregation.sorted(agents, sort: .priority, hasViewLabel: false)
-        #expect(sorted.map(\.paneId) == ["new", "mid", "old"])
-    }
-
-    /// A filtered view carries its own order, so sorting must be skipped.
-    @Test("a view label disables sorting")
-    func viewLabelDisablesSorting() throws {
-        let agents = [
-            try agent("a", "idle"),
-            try agent("b", "blocked"),
-        ]
-        let untouched = AgentAggregation.sorted(agents, sort: .priority, hasViewLabel: true)
-        #expect(untouched.map(\.paneId) == ["a", "b"], "a filtered view was re-sorted")
-    }
-
-    /// The header has to *say* which mode is active. Upstream prints
-    /// `"grouped"` / `"priority"` next to the heading (`agent_sidebar.rs:122-125`);
-    /// a mode with no visible label is indistinguishable from the other one until
-    /// the rows happen to differ.
     @Test("each mode has the label upstream prints")
     func shortTitlesMatchUpstream() {
         #expect(AgentPanelSort.spaces.shortTitle == "grouped")
         #expect(AgentPanelSort.priority.shortTitle == "priority")
     }
 
-    /// The header control toggles between exactly the two modes, so a click always
-    /// changes something — a three-way cycle with a hidden default would let a click
-    /// land back on the current mode.
     @Test("the header toggle alternates between the two modes")
     func toggleAlternates() {
         #expect(AgentPanelSort.spaces.toggled == .priority)
         #expect(AgentPanelSort.priority.toggled == .spaces)
     }
 
-    /// `spaces` is the default and must leave the daemon's order alone.
-    @Test("the spaces sort changes nothing")
-    func spacesLeavesOrderAlone() throws {
-        let agents = [
-            try agent("a", "idle", seq: 1),
-            try agent("b", "blocked", seq: 2),
-        ]
-        let untouched = AgentAggregation.sorted(agents, sort: .spaces, hasViewLabel: false)
-        #expect(untouched.map(\.paneId) == ["a", "b"])
+    /// The reported bug: a `blocked` agent on the second machine must outrank a
+    /// `working` one on the first. Per-machine sorting cannot do this — it emits all
+    /// of machine A, then all of machine B.
+    @Test("priority orders across machines, not within them")
+    func priorityCrossesMachines() throws {
+        let rows = AgentAggregation.rows(
+            [
+                try source(id: "alpha", agents: [
+                    agentJSON(pane: "a1", status: "working"),
+                    agentJSON(pane: "a2", status: "idle"),
+                ]),
+                try source(id: "beta", agents: [
+                    agentJSON(pane: "b1", status: "blocked"),
+                ]),
+            ],
+            activeEndpointID: "alpha",
+            sort: .priority
+        )
+        #expect(rows.map(\.agent.paneId) == ["b1", "a1", "a2"],
+                "a blocked agent on the other machine did not come first")
     }
 
-    /// Equal priorities and equal sequences keep the daemon's order — Swift's sort is
-    /// stable, and a shuffled list would look arbitrary.
-    @Test("fully tied agents keep their incoming order")
-    func fullTiesKeepOrder() throws {
-        let agents = [
-            try agent("a", "working", seq: 3),
-            try agent("b", "working", seq: 3),
-            try agent("c", "working", seq: 3),
-        ]
-        let sorted = AgentAggregation.sorted(agents, sort: .priority, hasViewLabel: false)
-        #expect(sorted.map(\.paneId) == ["a", "b", "c"])
+    /// `spaces` keeps each machine's own daemon order and only concatenates.
+    @Test("the spaces mode does not reorder across machines")
+    func spacesKeepsMachineOrder() throws {
+        let rows = AgentAggregation.rows(
+            [
+                try source(id: "alpha", agents: [
+                    agentJSON(pane: "a1", status: "idle"),
+                    agentJSON(pane: "a2", status: "blocked"),
+                ]),
+                try source(id: "beta", agents: [agentJSON(pane: "b1", status: "done")]),
+            ],
+            activeEndpointID: "alpha",
+            sort: .spaces
+        )
+        #expect(rows.map(\.agent.paneId) == ["a1", "a2", "b1"])
+    }
+
+    /// Within one priority, the more recent change comes first — using the shared
+    /// stamp, so two machines can be interleaved correctly.
+    @Test("ties break on the shared recency stamp")
+    func tiesBreakOnRecency() throws {
+        var recency = AgentRecency()
+        let older = try snapshot(agents: [agentJSON(pane: "a1", status: "blocked", seq: 1)])
+        recency.observe(endpointID: "alpha", snapshot: older, previous: nil)
+        let newer = try snapshot(agents: [agentJSON(pane: "b1", status: "blocked", seq: 1)])
+        recency.observe(endpointID: "beta", snapshot: newer, previous: nil)
+
+        let rows = AgentAggregation.rows(
+            [
+                try source(id: "alpha", agents: [agentJSON(pane: "a1", status: "blocked")]),
+                try source(id: "beta", agents: [agentJSON(pane: "b1", status: "blocked")]),
+            ],
+            activeEndpointID: "alpha",
+            sort: .priority,
+            recency: recency
+        )
+        #expect(rows.map(\.agent.paneId) == ["b1", "a1"],
+                "the later change should come first, across machines")
+    }
+
+    /// A disconnected machine's rows go last: their status is the last known one, and
+    /// they are drawn dimmed, so they should not head the list even when `blocked`.
+    @Test("stale rows sort behind live ones")
+    func staleRowsSortLast() throws {
+        let rows = AgentAggregation.rows(
+            [
+                try source(id: "alpha", agents: [agentJSON(pane: "a1", status: "idle")]),
+                try source(
+                    id: "beta",
+                    agents: [agentJSON(pane: "b1", status: "blocked")],
+                    connected: false
+                ),
+            ],
+            activeEndpointID: "alpha",
+            sort: .priority
+        )
+        #expect(rows.map(\.agent.paneId) == ["a1", "b1"],
+                "a stale blocked row outranked a live idle one")
+    }
+
+    /// A filtered view carries its own order, so sorting is skipped entirely.
+    @Test("a view label disables sorting")
+    func viewLabelDisablesSorting() throws {
+        let rows = AgentAggregation.rows(
+            [
+                try source(
+                    id: "alpha",
+                    agents: [agentJSON(pane: "a1", status: "idle"),
+                             agentJSON(pane: "a2", status: "blocked")],
+                    viewLabel: "mine"
+                ),
+            ],
+            activeEndpointID: "alpha",
+            sort: .priority
+        )
+        #expect(rows.map(\.agent.paneId) == ["a1", "a2"], "a filtered view was re-sorted")
     }
 
     /// An unknown status from a newer daemon decodes to `.unknown` and sorts last
     /// rather than crashing.
     @Test("an unrecognised status sorts last")
     func unknownStatusSortsLast() throws {
-        let agents = [
-            try agent("a", "something-new"),
-            try agent("b", "idle"),
-        ]
-        #expect(agents[0].agentStatus == .unknown)
-        let sorted = AgentAggregation.sorted(agents, sort: .priority, hasViewLabel: false)
-        #expect(sorted.map(\.paneId) == ["b", "a"])
+        let rows = AgentAggregation.rows(
+            [
+                try source(id: "alpha", agents: [
+                    agentJSON(pane: "a1", status: "something-new"),
+                    agentJSON(pane: "a2", status: "idle"),
+                ]),
+            ],
+            activeEndpointID: "alpha",
+            sort: .priority
+        )
+        #expect(rows.map(\.agent.paneId) == ["a2", "a1"])
     }
 }
