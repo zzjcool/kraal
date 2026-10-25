@@ -56,13 +56,20 @@ public struct TerminalEffects: Equatable, Sendable {
     public var bells: UInt16
     /// The most recent notification worth showing, if any.
     public var notification: SemanticNotification?
+    /// Which machine the notification is about, when more than one is known.
+    ///
+    /// Carried alongside rather than looked up at post time: the user can switch
+    /// machines between the effect being queued and the desktop draining it, and the
+    /// notice would then name the wrong one.
+    public var notificationMachine: String?
 
     public static let none = TerminalEffects(
         clipboard: nil,
         windowTitle: nil,
         reportedTitle: nil,
         bells: 0,
-        notification: nil
+        notification: nil,
+        notificationMachine: nil
     )
 
     /// Nothing to do.
@@ -75,13 +82,15 @@ public struct TerminalEffects: Equatable, Sendable {
         windowTitle: String?,
         reportedTitle: String?,
         bells: UInt16,
-        notification: SemanticNotification?
+        notification: SemanticNotification?,
+        notificationMachine: String? = nil
     ) {
         self.clipboard = clipboard
         self.windowTitle = windowTitle
         self.reportedTitle = reportedTitle
         self.bells = bells
         self.notification = notification
+        self.notificationMachine = notificationMachine
     }
 }
 

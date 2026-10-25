@@ -32,6 +32,16 @@ public final class TerminalEffectsApplier {
     private var lastClipboard: String?
     private var lastNotification: String?
 
+    /// Posts to Notification Centre; a no-op outside an app bundle.
+    private let notifier = SystemNotifier()
+
+    /// The machine a notification is about, for the notice's body.
+    ///
+    /// Set by the owner: `SemanticNotification` carries pane ids but no machine, and
+    /// ids are unique per daemon. Unset means "the only machine", so the body stays
+    /// uncluttered for the common single-machine case.
+    public var machineLabel: String?
+
     public init() {}
 
     public func attach(window: NSWindow) {
@@ -84,15 +94,26 @@ public final class TerminalEffectsApplier {
             let key = "\(notification.kind)|\(notification.title)|\(notification.body ?? "")"
             if key != lastNotification {
                 lastNotification = key
-                // A bell is the only channel this client has for
-                // `needsAttention`. Deliberately not a notification-centre
-                // post: that needs a bundle identifier and a user grant, and
-                // pretending to have posted one is worse than ringing.
-                if bellEnabled, notification.kind == .needsAttention || notification.sound != nil {
-                    NSSound.beep()
-                    done.append("bell(notification)")
+                // Notification Centre, with the bell kept as a fallback for the
+                // cases where the post cannot happen (no bundle identifier, or the
+                // user denied permission). Previously *only* the bell existed, on
+                // the grounds that a notification needs a bundle identifier and a
+                // grant — true, but this app has both (`cool.zzj.kraal`, ad-hoc
+                // signed), so the honest thing is to post and log what happened.
+                // The post is async because authorisation is: the outcome is not
+                // known synchronously, so it is logged when it resolves instead of
+                // being guessed here.
+                done.append("notification=\(notification.title) requested")
+                let notifier = self.notifier
+                let label = machineLabel
+                let wantsBell = notification.kind == .needsAttention || notification.sound != nil
+                Task { @MainActor in
+                    let outcome = await notifier.post(notification, machine: label)
+                    if outcome != .posted, bellEnabled, wantsBell {
+                        NSSound.beep()
+                        kraalLog("notification: bell fallback (\(outcome))")
+                    }
                 }
-                done.append("notification=\(notification.title)")
             }
         }
 

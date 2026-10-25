@@ -3953,7 +3953,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4496,9 +4496,12 @@ plant_agent() {
     local script
     script=$(printf '%s' 'IyEvYmluL2Jhc2gKIyBhcmd2WzBdIG11c3QgYmUgImNsYXVkZSIgZm9yIHRoZSBkYWVtb24gdG8gaWRlbnRpZnkgdGhlIGFnZW50OyB0aGUgc3RhdGUgY29tZXMgZnJvbQojIHdoYXQgdGhlIHNjcmVlbiBzaG93cyBhZ2FpbnN0IHRoZSBidW5kbGVkIG1hbmlmZXN0LgpwcmludGYgIlwwMzNbSFwwMzNbMkoiCmNhc2UgIiR7MTotaWRsZX0iIGluCmJsb2NrZWQpCiAgcHJpbnRmICJEbyB5b3Ugd2FudCB0byBwcm9jZWVkP1xuICAxLiBZZXNcbiAgMi4gTm9cbmVzYyB0byBjYW5jZWxcbmVudGVyIHRvIGNvbmZpcm1cbiIKICA7Owp3b3JraW5nKQogIHByaW50ZiAiXHhlMlx4YTBceDhiIFRoaW5raW5nXHhlMlx4ODBceGE2IChlc2MgdG8gaW50ZXJydXB0KVxuIgogIDs7CiopCiAgcHJpbnRmICJyZWFkeVxuIgogIDs7CmVzYWMKc2xlZXAgNjAwCg==' | base64 -d)
 
-    # The pane that will host the stub: the machine's first pane, or a new workspace.
+    # Reuse the same pane on purpose: the daemon notifies on a state *transition* of
+    # one agent, so starting a second stub in a new pane would just add another idle
+    # agent and never produce a transition. The previous stub is killed first — it
+    # sits in `sleep 600` and would otherwise keep the old status on screen.
     local pane
-    pane=$(machine_first_pane "$label")
+    pane=${KRAAL_PLANT_PANE:-$(machine_first_pane "$label")}
     [ -n "$pane" ] || {
         herdr_for_machine "$label" workspace create >/dev/null 2>&1
         sleep 2
@@ -4518,12 +4521,32 @@ plant_agent() {
             "mkdir -p $stub_dir && cat > $stub && chmod +x $stub" >/dev/null 2>&1 || return 1
         ;;
     esac
+    # Interrupt the previous stub before typing the new one.
+    #
+    # The stub holds the foreground for its whole `sleep`, so `send-text` goes to *it*
+    # and never to the shell — measured: the second `plant_agent` call reported
+    # `agents: idle` and only one agent, i.e. the new command was swallowed. Ctrl+C
+    # returns the pane to the shell first, which is what makes the next command land.
+    herdr_for_machine "$label" pane send-keys "$pane" ctrl+c >/dev/null 2>&1 || true
+    sleep 1
     herdr_for_machine "$label" pane send-text "$pane" "$stub $state" >/dev/null 2>&1 || {
         echo "cannot type into $pane on $label"
         return 1
     }
     herdr_for_machine "$label" pane send-keys "$pane" Enter >/dev/null 2>&1 || return 1
     sleep 4
+    # Report what the daemon thinks now, so a silent no-op is visible in the case log
+    # instead of showing up later as "no notification happened".
+    local seen
+    seen=$(herdr_for_machine "$label" agent list 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    agents = json.load(sys.stdin)["result"]["agents"]
+except Exception:
+    print("unreadable")
+    raise SystemExit
+print(",".join(a["agent_status"] for a in agents) or "none")' 2>/dev/null)
+    echo "plant_agent $label $state -> agents: ${seen:-unreadable}"
     return 0
 }
 
@@ -4572,6 +4595,72 @@ print(panes[0]["pane_id"] if panes else "")
 #
 # `machines_teardown` first: a roster left by another case would give this one a
 # different starting point, and the labels have to mean what the assertions assume.
+# A stub agent starts idle and then reports a blocker, which is the only thing the
+# daemon notifies about (`server/headless/notifications.rs:60-100` builds the event
+# from a ToastKind transition). The assertion is on the log line the applier writes
+# after it hands the notice to Notification Centre — `AGENTS.md` §0.2: "posted" is
+# only evidence if the code that posts says so.
+case_notification_posted() {
+    requires() { echo ax; }
+    fixture() {
+        ensure_sidebar_expanded || return 1
+        plant_agent alpha-a idle || return 1
+        return 0
+    }
+    action() {
+        # Same pane, new state: the daemon sees idle -> blocked and emits NeedsAttention.
+        plant_agent alpha-a blocked || return 1
+        sleep 3
+    }
+    assert() {
+        local log_path="$host_dir/kraal.log"
+        # Two claims, and the second is the one that matters: the first would also
+        # pass if the app fell back to the bell, which is what it did before.
+        check "the app reported a notification" \
+            "$(grep -qc 'effects:.*notification=' "$log_path" && echo 0 || echo 1)" \
+            "$(grep -o 'effects:.*notification=[^(]*([a-z]*)' "$log_path" | tail -1)"
+        # Whether it reached Notification Centre is **not** asserted here, and that is
+        # a deliberate, measured decision:
+        #
+        #   UNUserNotificationCenter.requestAuthorization -> UNErrorDomain error 1
+        #   (notificationsNotAllowed), because this build is ad-hoc signed and the
+        #   machine has no Developer ID (`security find-identity -v -p codesigning`
+        #   -> 0 valid identities).
+        #
+        # So the system-notification path cannot succeed in this environment, and an
+        # assertion that demanded `(posted)` would be permanently red for a reason
+        # that has nothing to do with the code. What *is* assertable is that the
+        # client reached the decision and then degraded honestly: the log must say
+        # `denied`, not stay silent, and the bell must ring instead. A future signed
+        # build turns the same line into `(posted)` without touching this case.
+        # The system API was actually reached. `SystemNotifier.post` logs this line
+        # itself, so bypassing the notifier cannot produce it — that is what makes
+        # this assertion A/B-checkable, unlike the earlier version which only looked
+        # for `(denied)` and therefore passed with the notifier stubbed out.
+        check "the system notification path was entered" \
+            "$(grep -qc 'notification: no bundle identifier\|notification: not authorised\|notification: posted' "$log_path" \
+                && echo 0 || echo 1)" \
+            "$(grep -oE 'notification: (no bundle identifier|not authorised|posted)' "$log_path" | tail -1)"
+        # And it must degrade, not fail silently. In an ad-hoc-signed build the grant
+        # is refused (`UNErrorDomain 1`, notificationsNotAllowed) because there is no
+        # Developer ID on the machine, so the expected sibling claim is "said denied".
+        check "the refusal was reported rather than swallowed" \
+            "$(grep -qc 'notification: not authorised\|notification: posted' "$log_path" \
+                && echo 0 || echo 1)" \
+            "$(grep -oE 'notification: (not authorised|posted)' "$log_path" | tail -1)"
+    }
+}
+
+case_notification_posted_app_setup() {
+    machines_teardown
+    machines_prereqs || { echo "loopback ssh unavailable"; return 1; }
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label alpha-a \
+        >/dev/null 2>&1 || { echo "machine add alpha-a failed"; return 1; }
+    return 0
+}
+
 case_sidebar_priority_across_machines_app_setup() {
     machines_teardown
     machines_prereqs || { echo "loopback ssh unavailable"; return 1; }

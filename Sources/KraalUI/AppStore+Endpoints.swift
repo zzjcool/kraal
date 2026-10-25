@@ -501,7 +501,7 @@ public extension AppStore {
             endpoint.connectionTask = nil
             scheduleEndpointRetry(endpoint, report: isActive)
         default:
-            handleEffectEvent(event, isActive: isActive)
+            handleEffectEvent(event, from: endpoint, isActive: isActive)
         }
     }
 
@@ -512,52 +512,6 @@ public extension AppStore {
     /// switch past swiftlint's complexity limit. Keeping it separate also puts
     /// the "background machines are silent" rule in one readable place instead
     /// of in four `guard isActive else { return }` lines.
-    private func handleEffectEvent(_ event: ConnectionEvent, isActive: Bool) {
-        guard isActive else { return }
-        switch event {
-        case .clipboard, .windowTitle, .bell, .notification:
-            applyEffects(event)
-        default:
-            break
-        }
-    }
-
-    /// Records the daemon's `ClientShellKeyboardReportAll` for one machine.
-    ///
-    /// Connection level, matching the daemon: the message carries no pane id — it
-    /// reports the mode of whichever program is focused now
-    /// (`server/headless/render.rs:211-214`). Kept per machine so switching
-    /// machines restores each side's answer instead of leaking one machine's
-    /// keyboard mode into the other's panes.
-    ///
-    /// Split out of `applyEndpointEvent` rather than inlined: that switch is one
-    /// branch per event and adding two pushed it past the complexity limit.
-    private func applyKeyboardReportAll(
-        _ enabled: Bool,
-        from endpoint: EndpointState,
-        isActive: Bool
-    ) {
-        endpoint.keyboardReportAll = enabled
-        kraalLog("endpoint \(endpoint.label): keyboard report-all \(enabled)")
-        if isActive { keyboardReportAll = enabled }
-    }
-
-    /// Folds one effect-carrying event into `pendingEffects` and lets the
-    /// desktop act on the result.
-    ///
-    /// Only the foreground machine's events reach here. A background machine
-    /// keeps its snapshot and status up to date, but its bells must not ring in
-    /// this window and its clipboard must not overwrite yours: selection is what
-    /// decides whose terminal you are looking at.
-    private func applyEffects(_ event: ConnectionEvent) {
-        pendingEffects = TerminalEffectsReducer.reduce(
-            pendingEffects,
-            event: event,
-            fallbackTitle: activeEndpoint?.label ?? "Kraal",
-            sessionSuffix: DevSession.windowTitleSuffix(name: DevSession.name)
-        )
-        drainEffects()
-    }
 
     /// Retries one machine's connection, with the same backoff the store used for
     /// its single connection.
