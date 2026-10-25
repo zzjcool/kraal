@@ -16,7 +16,6 @@ import SwiftUI
 
 struct SidebarCollapsedView: View {
     let store: AppStore
-    let isCollapsed: Bool
     /// Non-nil when something needs the user, which tints the chevron.
     let attention: String?
     let toggle: () -> Void
@@ -25,9 +24,15 @@ struct SidebarCollapsedView: View {
         GeometryReader { proxy in
             // Rows, not points: the two lists divide however many rows fit, so the
             // height that actually exists is what they split.
+            // Minus the toggle row, which shares the strip's height with the two
+            // lists.
             let rows = max(0, Int(proxy.size.height / SidebarCollapsed.rowHeight) - 1)
             let counts = SidebarCollapsed.counts(rows: rows)
             VStack(alignment: .leading, spacing: 0) {
+                // The expand control is at the *top*, matching the collapse control's
+                // place in the expanded header. At the bottom it sat below the last
+                // agent row, where it read as part of the list.
+                collapsedToggle
                 ForEach(Array(store.workspaces.prefix(counts.workspaces).enumerated()),
                         id: \.element.workspaceId) { entry in
                     collapsedRow(
@@ -52,8 +57,6 @@ struct SidebarCollapsedView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                // Where upstream puts it (`sidebar.rs:172-193`, `area.bottom() - 1`).
-                collapsedToggle
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -90,14 +93,16 @@ struct SidebarCollapsedView: View {
     /// collapsing.
     private var collapsedToggle: some View {
         Button(action: toggle) {
-            Text(isCollapsed ? "\u{00BB}" : "\u{00AB}")
+            // Always the expand chevron: this view only renders while collapsed, so
+            // the condition that used to be here could only ever be true.
+            Text("\u{00BB}")
                 .font(.system(size: 10))
                 .foregroundStyle(attention == nil ? Color.secondary : Color.orange)
                 .frame(maxWidth: .infinity)
                 .frame(height: SidebarCollapsed.rowHeight)
         }
         .buttonStyle(.plain)
-        .help(isCollapsed ? "Expand the sidebar" : "Collapse the sidebar")
+        .help("Expand the sidebar")
         .accessibilityIdentifier("sidebar.collapse.toggle")
     }
 }
