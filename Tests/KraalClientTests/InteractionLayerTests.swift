@@ -32,26 +32,38 @@ struct RightClickRoutingTests {
     /// at mouse reporting, so this exact case opened the menu.
     @Test("an explicit passthrough setting wins over the mouse-reporting default")
     func passthroughBeatsDefault() {
-        #expect(!PaneContextRouting.shouldShowPaneMenu(
-            programReportsMouse: false,
-            rightClickPassthrough: true
-        ))
-        #expect(PaneContextRouting.ownsRightClick(
-            programReportsMouse: false,
-            rightClickPassthrough: true
-        ))
+        #expect(!PaneContextRouting.shouldShowPaneMenu(rightClickPassthrough: true))
+        #expect(PaneContextRouting.ownsRightClick(rightClickPassthrough: true))
     }
 
-    /// Either signal is enough to hand the button to the program.
-    @Test("mouse reporting and passthrough are independent reasons to skip the menu")
-    func twoIndependentReasons() {
-        #expect(!PaneContextRouting.shouldShowPaneMenu(programReportsMouse: true))
-        #expect(!PaneContextRouting.shouldShowPaneMenu(
-            programReportsMouse: false,
-            rightClickPassthrough: true
-        ))
-        // Neither: the menu is the only thing that can happen, so it must open.
-        #expect(PaneContextRouting.shouldShowPaneMenu(programReportsMouse: false))
+    /// A program reporting the mouse does **not** own the right button.
+    ///
+    /// This used to be an OR of both signals, and the effect was that every TUI
+    /// pane had no reachable pane menu: right-clicking in one logged no menu line
+    /// at all, while a plain shell in the same session opened it. Reporting the
+    /// mouse is how a TUI asks for the *pointer* (clicks, drags, wheel), which it
+    /// needs to be usable; the right button is a separate question. Upstream agrees
+    /// (`src/client/shell/mouse.rs:1805-1807`): it hands the button over only when
+    /// `mouse_reporting && (pane_owns_right_click || configured_modifiers.is_some())`.
+    @Test("a program reporting the mouse still gets the pane menu")
+    func mouseReportingDoesNotOwnTheRightButton() {
+        #expect(PaneContextRouting.shouldShowPaneMenu())
+    }
+
+    /// Passthrough alone is enough — and it is the only thing that is.
+    @Test("only an explicit passthrough setting hands the button over")
+    func onlyPassthroughHandsTheButtonOver() {
+        #expect(!PaneContextRouting.shouldShowPaneMenu(rightClickPassthrough: true))
+        #expect(PaneContextRouting.shouldShowPaneMenu())
+        // The measured case: a TUI with no explicit setting.
+        #expect(PaneContextRouting.shouldShowPaneMenu(rightClickPassthrough: false))
+    }
+
+    /// And a TUI whose pane is explicitly set to passthrough still honours it, so
+    /// the setting works in both directions rather than being unreachable in TUIs.
+    @Test("a TUI pane can still opt into passthrough")
+    func tuiPaneCanOptIntoPassthrough() {
+        #expect(!PaneContextRouting.shouldShowPaneMenu(rightClickPassthrough: true))
     }
 
     /// The wire spelling is what the daemon parses. Getting it backwards would

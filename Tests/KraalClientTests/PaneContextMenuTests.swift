@@ -29,36 +29,37 @@ struct PaneContextMenuRoutingTests {
     /// using the right button and the pane menu must appear.
     @Test("a shell that ignores the mouse gets the pane menu")
     func shellGetsMenu() {
-        #expect(PaneContextRouting.shouldShowPaneMenu(programReportsMouse: false))
+        #expect(PaneContextRouting.shouldShowPaneMenu())
     }
 
     /// The case the bug was reported against: no menu at all. If this ever
     /// regresses the pane is back to a dead right-click.
     @Test("no mouse reporting means the click is not forwarded to the program")
     func noMouseReportingDoesNotOwnClick() {
-        #expect(!PaneContextRouting.ownsRightClick(programReportsMouse: false))
+        #expect(!PaneContextRouting.ownsRightClick())
     }
 
-    /// A TUI that enabled mouse reporting is using the button itself; a menu on
-    /// top would swallow a click the program is waiting for.
-    @Test("a program reporting the mouse keeps the right button")
-    func tuiKeepsRightButton() {
-        #expect(PaneContextRouting.ownsRightClick(programReportsMouse: true))
-    }
-
-    /// And symmetrically: no menu in that case.
-    @Test("a program reporting the mouse suppresses the pane menu")
-    func tuiSuppressesMenu() {
-        #expect(!PaneContextRouting.shouldShowPaneMenu(programReportsMouse: true))
+    /// A TUI that enabled mouse reporting does **not** get to keep the right
+    /// button. Reporting the mouse is how it asks for the pointer (clicks, drags,
+    /// wheel); the right button is decided by the per-pane `right_click` setting.
+    ///
+    /// This suite used to assert the opposite, and that is exactly what made the
+    /// pane menu unreachable in every TUI: users reported "right-click does nothing
+    /// in the TUI pane but works in a plain shell". Upstream separates the two
+    /// (`src/client/shell/mouse.rs:1805-1807`).
+    @Test("a program reporting the mouse still gets the menu")
+    func tuiGetsMenu() {
+        #expect(!PaneContextRouting.ownsRightClick())
+        #expect(PaneContextRouting.shouldShowPaneMenu())
     }
 
     /// The two entry points must stay exact complements, or a click could both
     /// raise a menu and be forwarded.
     @Test("menu and program ownership are mutually exclusive")
     func mutuallyExclusive() {
-        for reportsMouse in [true, false] {
-            let owns = PaneContextRouting.ownsRightClick(programReportsMouse: reportsMouse)
-            let shows = PaneContextRouting.shouldShowPaneMenu(programReportsMouse: reportsMouse)
+        for passthrough in [true, false] {
+            let owns = PaneContextRouting.ownsRightClick(rightClickPassthrough: passthrough)
+            let shows = PaneContextRouting.shouldShowPaneMenu(rightClickPassthrough: passthrough)
             #expect(owns != shows, "exactly one side must claim the click")
         }
     }
@@ -84,15 +85,13 @@ struct PaneContextMenuRoutingTests {
         #expect(!PaneContextRouting.consumesRightUp(menuRaisedForPane: nil))
     }
 
-    /// The two rules are independent inputs to one click: a TUI both keeps the
-    /// press (no menu) and keeps the release (nothing to consume). If the release
-    /// rule keyed off mouse reporting instead of "did we raise a menu", the TUI
-    /// would lose half of every right-click pair.
-    @Test("a TUI keeps both halves of the click")
-    func tuiKeepsBothHalves() {
-        let reportsMouse = true
-        let showsMenu = PaneContextRouting.shouldShowPaneMenu(programReportsMouse: reportsMouse)
-        // No menu was raised, so there is nothing to claim.
+    /// A pane explicitly set to passthrough gets both halves of the click and no
+    /// menu: the press is forwarded and there is no release for the menu to claim.
+    /// If the release rule keyed off the menu decision's *inputs* rather than "did we
+    /// raise a menu", such a pane would lose half of every right-click pair.
+    @Test("a passthrough pane gets both halves of the click")
+    func passthroughPaneGetsBothHalves() {
+        let showsMenu = PaneContextRouting.shouldShowPaneMenu(rightClickPassthrough: true)
         let menuRaised: String? = showsMenu ? "w1:p7" : nil
         #expect(menuRaised == nil)
         #expect(!PaneContextRouting.consumesRightUp(menuRaisedForPane: menuRaised))

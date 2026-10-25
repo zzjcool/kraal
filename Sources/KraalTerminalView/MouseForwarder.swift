@@ -326,8 +326,10 @@ public final class MouseForwarder {
     /// stream reports. Before this was passed in, the setting had no effect and
     /// a pane with `right_click = "pane"` still opened Kraal's menu.
     private func paneShowsMenu(_ paneId: String) -> Bool {
+        // Mouse reporting is deliberately not consulted: it is how a TUI asks for
+        // the pointer, not a claim on the right button. Only an explicit per-pane
+        // `right_click = "pane"` hands the button over (see `ownsRightClick`).
         KraalUI.PaneContextRouting.shouldShowPaneMenu(
-            programReportsMouse: store.paneGeometry(for: paneId)?.mouseReporting == true,
             rightClickPassthrough: store.rightClickPassthrough(paneId: paneId)
         )
     }
