@@ -320,6 +320,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         let theme = ThemeStore()
         themeStore = theme
         theme.followSystemAppearance()
+        store.themeStore = theme
         kraalLog("theme: \(theme.themeName) (config name=\(theme.config.name ?? "-"))")
         return theme
     }

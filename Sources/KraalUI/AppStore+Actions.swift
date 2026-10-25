@@ -183,10 +183,4 @@ extension AppStore {
             paneId: paneId, lines: lines, current: current, maxOffset: maxOffset
         )
     }
-
-    /// Re-reads config.toml on the daemon side (theme, keybindings, sidebar).
-    public func reloadServerConfig() {
-        Task { await call("server.reload_config", [:]) }
-    }
-
 }

@@ -229,3 +229,91 @@ struct ThemeTests {
         #expect(sidebarColor("red") == sidebarColor("red", palette: nil))
     }
 }
+
+// MARK: - Reload
+
+/// Reloading `config.toml` re-resolves the palette without a relaunch.
+///
+/// This is covered here rather than by a GUI case because the two ways a user reaches
+/// "Reload Config" — the footer menu and the app menu — are both unusable from the
+/// harness: the footer menu is an `AXMenuButton` whose items are not in the AX tree
+/// until it opens, and the app menu item presses without running its selector because
+/// the gate launches the app as an accessory (no key menu bar to track). The *reload*
+/// is what needs covering, and it is pure logic once the file is on disk.
+@Suite("Theme reload")
+@MainActor
+struct ThemeReloadTests {
+    private func scratch() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kraal-theme-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func write(_ body: String, to dir: URL) throws {
+        try body.write(
+            to: dir.appendingPathComponent("config.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    @Test("a reload picks up a changed theme name")
+    func reloadPicksUpChange() throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let env = ["HERDR_CONFIG_DIR": dir.path]
+
+        try write("[theme]\nname = \"nord\"\n", to: dir)
+        let store = ThemeStore(config: nil, appearance: .dark, environment: env)
+        #expect(store.themeName == "nord")
+
+        try write("[theme]\nname = \"dracula\"\n", to: dir)
+        store.reloadFromDisk(environment: env)
+        #expect(store.themeName == "dracula")
+        #expect(store.palette == Palette.named("dracula"))
+    }
+
+    @Test("a reload that removes the theme falls back to the default")
+    func reloadWithoutThemeFallsBack() throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let env = ["HERDR_CONFIG_DIR": dir.path]
+
+        try write("[theme]\nname = \"vesper\"\n", to: dir)
+        let store = ThemeStore(config: nil, appearance: .dark, environment: env)
+        #expect(store.themeName == "vesper")
+
+        try write("[ui]\naccent = \"red\"\n", to: dir)
+        store.reloadFromDisk(environment: env)
+        #expect(store.themeName == "catppuccin")
+    }
+
+    /// The store must read the file itself when no config is passed. The first version
+    /// defaulted to `.default` and every caller used the default, so the file was never
+    /// read — the client silently drew Catppuccin while `theme.name = "nord"` sat there.
+    @Test("a store built without a config reads the file")
+    func defaultInitReadsFile() throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try write("[theme]\nname = \"gruvbox\"\n", to: dir)
+        let store = ThemeStore(
+            config: nil,
+            appearance: .dark,
+            environment: ["HERDR_CONFIG_DIR": dir.path]
+        )
+        #expect(store.themeName == "gruvbox")
+    }
+
+    @Test("a reload without auto_switch keeps the manual theme")
+    func reloadKeepsManualTheme() throws {
+        let dir = try scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let env = ["HERDR_CONFIG_DIR": dir.path]
+        try write("[theme]\nname = \"nord\"\n", to: dir)
+        let store = ThemeStore(config: nil, appearance: .light, environment: env)
+        store.reloadFromDisk(environment: env)
+        // The new appearance did not change, so the manual name still wins.
+        #expect(store.themeName == "nord")
+    }
+}

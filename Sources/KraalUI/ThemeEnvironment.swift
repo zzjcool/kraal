@@ -106,9 +106,16 @@ public final class ThemeStore {
     }
 
     /// Re-reads `config.toml` from disk.
+    ///
+    /// Called after the daemon's own `server.reload_config`, which is what the user
+    /// triggers when they edit the file: the daemon re-reads its side, and this re-reads
+    /// the client's. Without it the palette needed a relaunch while everything else
+    /// updated, which reads as "the theme is broken".
     public func reloadFromDisk(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
-        apply(configuration: ThemeConfig.load(environment: environment))
+        kraalLog("theme: reload requested")
+        let loaded = ThemeConfig.load(environment: environment)
+        apply(configuration: loaded)
     }
 }
