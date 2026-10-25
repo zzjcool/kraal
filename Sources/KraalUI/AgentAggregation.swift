@@ -134,7 +134,7 @@ public enum AgentAggregation {
         if !ordered.isEmpty {
             let summary = ordered.map {
                 "\($0.machineLabel)/\($0.agent.paneId)"
-                    + ":\($0.agent.agentStatus)(p\($0.agent.agentStatus.priority))"
+                    + ":\($0.agent.agentStatus)(p\($0.agent.agentStatus.priority),r\($0.recency))"
             }.joined(separator: " ")
             kraalLog("agents: priority order \(summary)")
         }

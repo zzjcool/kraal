@@ -249,4 +249,58 @@ struct AgentPanelSortTests {
         #expect(order.first?.hasSuffix(":done") == true,
                 "done should lead the list: \(order)")
     }
+
+    /// The sequence upstream's own test asserts (`endpoints.rs:1915-1975`), replayed.
+    ///
+    /// Upstream checks three frames in a row:
+    ///
+    /// 1. both idle, Local changed later → **Local first**
+    /// 2. remote becomes working → **remote first**
+    /// 3. remote returns to idle with a newer seq → **remote still first**
+    ///
+    /// Step 3 is the one that matters: returning to `idle` is itself a change, so the
+    /// row keeps its recency lead. An implementation that only stamped *status
+    /// transitions between different states* would drop the row back and look like
+    /// "Local is stuck at the bottom" — which is the report this test exists to answer.
+    @Test("upstream's three-frame priority sequence replays identically")
+    func upstreamSequenceReplays() throws {
+        var recency = AgentRecency()
+
+        // Frame 1: Local idle seq 1, remote idle seq 1.
+        var local = try snapshot(agents: [agentJSON(pane: "l1", status: "idle", seq: 1)])
+        recency.observe(endpointID: "local", snapshot: local, previous: nil)
+        var remote = try snapshot(agents: [agentJSON(pane: "r1", status: "idle", seq: 1)])
+        recency.observe(endpointID: "remote", snapshot: remote, previous: nil)
+
+        // Local changes to seq 2. `previous` is the *old* snapshot, which is what
+        // `AppStore.adoptSnapshot` passes — passing the new one made every agent look
+        // unchanged, because its seq then equalled itself.
+        let previousLocal = local
+        local = try snapshot(agents: [agentJSON(pane: "l1", status: "idle", seq: 2)])
+        recency.observe(endpointID: "local", snapshot: local, previous: previousLocal)
+
+        func order() throws -> [String] {
+            AgentAggregation.rows(
+                [try source(id: "local", agents: [agentJSON(pane: "l1", status: "idle", seq: 2)]),
+                 try source(id: "remote", agents: [agentJSON(pane: "r1", status: "idle", seq: 1)])],
+                activeEndpointID: "local",
+                sort: .priority,
+                recency: recency
+            ).map(\.agent.paneId)
+        }
+        // 1. Local changed later, so it leads.
+        #expect(try order() == ["l1", "r1"], "step 1: Local should lead")
+
+        // 2. Remote becomes working: status outranks recency.
+        let previousRemote = remote
+        remote = try snapshot(agents: [agentJSON(pane: "r1", status: "working", seq: 2)])
+        recency.observe(endpointID: "remote", snapshot: remote, previous: previousRemote)
+        #expect(try order() == ["r1", "l1"], "step 2: working should lead")
+
+        // 3. Remote returns to idle with a newer seq: still the later change.
+        let previousRemoteIdle = remote
+        remote = try snapshot(agents: [agentJSON(pane: "r1", status: "idle", seq: 3)])
+        recency.observe(endpointID: "remote", snapshot: remote, previous: previousRemoteIdle)
+        #expect(try order() == ["r1", "l1"], "step 3: returning to idle is itself a change")
+    }
 }
