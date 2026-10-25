@@ -58,7 +58,27 @@ public enum KraalTheme {
 }
 
 /// Resolves a `config.toml` color name or hex literal.
-public func sidebarColor(_ name: String, fallback: Color = .primary) -> Color {
+///
+/// Two vocabularies meet here, and both have to keep working:
+///
+/// - The sidebar's own token resolver emits **names** (`"green"`, `"gray"`) because
+///   that is what upstream's renderer emits (`sidebar.rs:246-267`). Those names are
+///   part of the wire-facing model, so they cannot simply be replaced by enum cases
+///   without touching the resolver and every test that pins its output.
+/// - The theme is a **palette**, whose whole point is that `green` is a different
+///   colour in `nord` than in `gruvbox`.
+///
+/// So the name is looked up in the palette first and only then in the fixed table.
+/// Without the palette step, a themed client would still draw the same hard-coded
+/// green, which is exactly the bug this work exists to fix.
+public func sidebarColor(
+    _ name: String,
+    palette: Palette? = nil,
+    fallback: Color = .primary
+) -> Color {
+    if let palette, let themed = palette.nameColor(name) {
+        return themed
+    }
     switch name.lowercased() {
     case "black": return Color(red: 0.12, green: 0.12, blue: 0.14)
     case "red": return Color(red: 0.90, green: 0.35, blue: 0.36)
@@ -99,15 +119,17 @@ struct StyledText: View {
     let style: TokenStyle
     var monospaced = false
 
+    @Environment(\.palette) private var palette
+
     var body: some View {
         var view = Text(text)
         if style.bold == true { view = view.bold() }
         if style.italic == true { view = view.italic() }
         if let foreground = style.foreground {
-            view = view.foregroundStyle(sidebarColor(foreground, fallback: .primary))
+            view = view.foregroundStyle(sidebarColor(foreground, palette: palette, fallback: .primary))
         }
         if style.dim == true {
-            view = view.foregroundStyle(sidebarColor("gray", fallback: .secondary))
+            view = view.foregroundStyle(sidebarColor("gray", palette: palette, fallback: .secondary))
         }
         if monospaced {
             view = view.monospaced()
@@ -121,6 +143,8 @@ struct StatusDot: View {
     let status: AgentStatus
     var size: CGFloat = 8
 
+    @Environment(\.palette) private var palette
+
     var body: some View {
         Circle()
             .fill(color)
@@ -130,11 +154,11 @@ struct StatusDot: View {
 
     private var color: Color {
         switch status {
-        case .idle: sidebarColor("gray")
-        case .working: sidebarColor("yellow")
-        case .blocked: sidebarColor("red")
-        case .done: sidebarColor("green")
-        case .unknown: sidebarColor("gray").opacity(0.5)
+        case .idle: sidebarColor("gray", palette: palette)
+        case .working: sidebarColor("yellow", palette: palette)
+        case .blocked: sidebarColor("red", palette: palette)
+        case .done: sidebarColor("green", palette: palette)
+        case .unknown: sidebarColor("gray", palette: palette).opacity(0.5)
         }
     }
 }

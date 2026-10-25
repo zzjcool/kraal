@@ -510,7 +510,7 @@ start_daemon() {
     guard_scratch
     mkdir -p "$SCRATCH"
     if [ "$BACKEND" = "vm" ]; then
-        tart exec "$VM" /bin/bash -lc "mkdir -p $VM_ROOT $HERDR_HOME" >/dev/null 2>&1
+        tart exec "$VM" /bin/bash -lc "mkdir -p $VM_ROOT $HERDR_HOME $VM_ROOT/config" >/dev/null 2>&1
     else
         mkdir -p "$HERDR_HOME"
     fi
@@ -606,6 +606,37 @@ stop_daemon() {
     esac
 }
 
+# Writes the scratch `config.toml` the app reads through `HERDR_CONFIG_DIR`.
+#
+# Only the `[theme]` table is written; the rest of the file is the harness's business,
+# not this case's. The path is inside the guest, because the app runs there.
+theme_write_config() {
+    local name="$1" extra="${2:-}"
+    local body
+    body=$(printf '[theme]\nname = "%s"\n%s\n' "$name" "$extra")
+    case "$BACKEND" in
+    local)
+        mkdir -p "$SCRATCH/config"
+        printf '%s' "$body" >"$SCRATCH/config/config.toml"
+        ;;
+    vm)
+        printf '%s' "$body" | tart exec -i "$VM" /bin/bash -lc \
+            "mkdir -p $VM_ROOT/config && cat > $VM_ROOT/config/config.toml" >/dev/null 2>&1
+        ;;
+    esac
+}
+
+# Restarts the app so it re-reads the config.
+#
+# The theme is resolved once at launch, so a config written after the window is up has
+# no effect until then. Reloading on file change is a separate feature (and not one
+# this case is about), so the case restarts rather than pretending a live reload works.
+restart_app() {
+    stop_app >/dev/null 2>&1
+    launch_app >/dev/null 2>&1 || return 1
+    return 0
+}
+
 launch_app() {
     say "launching Kraal (backend=$BACKEND) against $CLIENT_SOCKET"
     # KRAAL_DEV_BACKGROUND=1 keeps it out of the Dock and off the pointer. AX
@@ -633,7 +664,7 @@ launch_app() {
              cd $VM_ROOT
              KRAAL_HERDR_SOCKET=$CLIENT_SOCKET KRAAL_HERDR_HOME=$ROSTER_HOME \
              KRAAL_DEV_BACKGROUND=$background KRAAL_DEV_SESSION=$SESSION \
-             KRAAL_PREFS_SUITE=$PREFS_SUITE \
+             KRAAL_PREFS_SUITE=$PREFS_SUITE HERDR_CONFIG_DIR=$VM_ROOT/config \
              nohup $VM_APP/Contents/MacOS/KraalMac > $VM_ROOT/app.out 2>&1 </dev/null &
              disown 2>/dev/null
              echo launched" \
@@ -3953,7 +3984,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4648,6 +4679,73 @@ case_notification_posted() {
             "$(grep -qc 'notification: not authorised\|notification: posted' "$log_path" \
                 && echo 0 || echo 1)" \
             "$(grep -oE 'notification: (not authorised|posted)' "$log_path" | tail -1)"
+    }
+}
+
+# The theme named in `config.toml` is the one the client draws with.
+#
+# The `[theme]` table never crosses the wire: the daemon's `ClientShellSnapshot` has no
+# colour fields, so the client resolves the palette itself from the same file upstream's
+# own client reads (`src/client/shell/config.rs:137`). That makes this a configuration
+# path with no daemon involvement, and the only direct evidence is the line the app
+# logs when it applies a palette.
+#
+# The config lives under `$VM_ROOT/config` via `HERDR_CONFIG_DIR`, so the developer's
+# real theme cannot influence the answer — without that, a machine already set to `nord`
+# would pass this case no matter what it wrote.
+case_theme_applied() {
+    requires() { echo ax; }
+    fixture() {
+        ensure_sidebar_expanded || return 1
+        return 0
+    }
+    action() {
+        # `terminal` is the theme with a distinguishing property that is cheap to
+        # assert: it leaves the sidebar background unset (`Color::Reset` upstream), so
+        # it shows the window material rather than a flat colour.
+        theme_write_config "nord"
+        restart_app || return 1
+        sleep 2
+    }
+    assert() {
+        local log_path="$host_dir/kraal.log"
+        check "the theme named in config.toml was resolved" \
+            "$(grep -qc 'theme: applied nord' "$log_path" && echo 0 || echo 1)" \
+            "$(grep -o 'theme: [a-z].*' "$log_path" | tail -1)"
+        check "the client read the config rather than defaulting" \
+            "$(grep -qc 'theme: .*config name=nord' "$log_path" && echo 0 || echo 1)" \
+            "$(grep -o 'theme: .*config name=[a-z-]*' "$log_path" | tail -1)"
+    }
+}
+
+# Light/dark following, with `auto_switch` on.
+#
+# Upstream switches between two *named* themes when the host appearance changes
+# (`src/app/mod.rs:320-342`). What is assertable headlessly is the resolution, not the
+# redraw: flipping the guest's appearance would need System Settings automation, and
+# `NSApp.effectiveAppearance` is readable but not settable.
+case_theme_auto_switch() {
+    requires() { echo ax; }
+    fixture() {
+        ensure_sidebar_expanded || return 1
+        return 0
+    }
+    action() {
+        theme_write_config "gruvbox" "auto_switch = true"
+        restart_app || return 1
+        sleep 2
+    }
+    assert() {
+        local log_path="$host_dir/kraal.log"
+        # `gruvbox` and `gruvbox-light` are a sibling pair, so whichever appearance the
+        # guest reports, exactly one of them must have been chosen — and it must be one
+        # of the pair, never Catppuccin.
+        local applied
+        applied=$(grep -o 'theme: applied [a-z-]*' "$log_path" | tail -1)
+        check "auto_switch picked one of the theme's own pair" \
+            "$(printf '%s' "$applied" | grep -qE 'theme: applied gruvbox(-light)?$' \
+                && echo 0 || echo 1)" \
+            "$applied"
     }
 }
 

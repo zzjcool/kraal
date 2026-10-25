@@ -15,6 +15,7 @@ import KraalSidebar
 import KraalTransport
 
 struct TabBarView: View {
+    @Environment(\.palette) private var palette
     @Environment(AppStore.self) private var store
     @State private var prompt: CommandPrompt?
 
@@ -85,6 +86,7 @@ struct TabBarView: View {
 }
 
 struct StatusBarView: View {
+    @Environment(\.palette) private var palette
     @Environment(AppStore.self) private var store
     var onShowCommands: () -> Void
     /// The copy-mode bar, when this window has one.
@@ -118,7 +120,7 @@ struct StatusBarView: View {
             if let error = store.lastError {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 9))
-                    .foregroundStyle(sidebarColor("yellow"))
+                    .foregroundStyle(sidebarColor("yellow", palette: palette))
                     .help(error)
             }
 
@@ -139,7 +141,7 @@ struct StatusBarView: View {
                 .font(.system(size: 10))
                 .labelStyle(.titleAndIcon)
                 .foregroundStyle(notice.kind.isIssue
-                    ? sidebarColor("yellow")
+                    ? sidebarColor("yellow", palette: palette)
                     : Color.secondary)
                 .help(notice.detail ?? notice.summary)
             }
@@ -158,7 +160,7 @@ struct StatusBarView: View {
                         Text(segment.text)
                             .foregroundStyle(
                                 segment.accent
-                                    ? sidebarColor("yellow")
+                                    ? sidebarColor("yellow", palette: palette)
                                     : Color.secondary
                             )
                     }
@@ -185,6 +187,7 @@ struct StatusBarView: View {
 /// the environment and would otherwise not be rebuilt when the mode's cursor moves
 /// (the store does not change for a local cursor move).
 struct CopyModeBannerView: View {
+    @Environment(\.palette) private var palette
     @ObservedObject var banner: CopyModeBanner
 
     var body: some View {
