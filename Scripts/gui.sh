@@ -3944,7 +3944,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4144,6 +4144,61 @@ case_sidebar_independent_scroll() {
         check "the two scrolling areas are stacked vertically" "$stacked" \
             "$(cat "$host_dir/stacked.txt")"
     }
+}
+
+# A config the daemon cannot parse lights the footer dot (issue #121).
+#
+# Upstream marks its footer launcher when `update_available ||
+# integration_updates_available` (`global_menu.rs:9-11`); a config diagnostic is this
+# client's addition, because the daemon silently ignoring its own config is not
+# visible anywhere in the sidebar otherwise.
+#
+# Driven by a real bad `config.toml`, not a stubbed snapshot: the diagnostic has to
+# come from the daemon for this to be a product statement rather than a
+# self-fulfilling one.
+case_sidebar_footer_attention() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        # A parse error, written before the daemon starts (see `daemon_config`).
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+    }
+    assert() {
+        # Two claims, each of which can fail alone:
+        #
+        # 1. the dot is in the AX tree,
+        # 2. the dot's *reason* is the config diagnostic. Without this a dot raised by
+        #    an update would satisfy the case for the wrong reason — which is exactly
+        #    what happened on the first run: the dot was there, the fixture's bad TOML
+        #    was not the cause, and only the reason line told them apart.
+        local dot
+        dot=$(grep -ac "sidebar.footer.attention" "$host_dir/ax.json" 2>/dev/null || echo 0)
+        check "the footer drew the attention dot" \
+            "$([ "$dot" -gt 0 ] && echo 0 || echo 1)" \
+            "attention identifier occurrences: $dot"
+
+        local reason
+        reason=$(grep -a "sidebar footer attention: " "$host_dir/kraal.log" 2>/dev/null \
+            | tail -1)
+        check "the dot is about the config diagnostic" \
+            "$(printf '%s' "$reason" | grep -qc "sidebar footer attention: config: " \
+                && echo 0 || echo 1)" \
+            "${reason:-no reason logged}"
+    }
+}
+
+# A config the daemon rejects, so `config_diagnostic` is set.
+case_sidebar_footer_attention_config() {
+    write_config <<'TOML'
+[ui
+this is not valid toml at all = =
+TOML
 }
 
 # ---------------------------------------------------------------- entrypoint

@@ -464,9 +464,40 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .help("Layout from \(config)")
             }
+            // Upstream puts its global-menu launcher here and marks it with a dot when
+            // something needs attention (`sidebar.rs:390-424`), where "attention" is
+            // `update_available || integration_updates_available`
+            // (`global_menu.rs:9-11`) — not an agent state.
+            //
+            // Kraal has no in-app global menu: the same actions live in the system
+            // menu bar (`MacMenuBar`) and in the Debug/settings sheets. So what is
+            // mirrored here is the *signal*, not the launcher: a dot when the daemon
+            // has something the user should know about, with the notice text as its
+            // tooltip. Adding a second menu would be a different, larger change —
+            // recorded in the issue.
+            if let attention = footerAttention {
+                Circle()
+                    .fill(sidebarColor("orange"))
+                    .frame(width: 5, height: 5)
+                    .help(attention)
+                    .accessibilityIdentifier("sidebar.footer.attention")
+                    // The dot itself is not readable from the AX tree beyond its
+                    // existence, so the *reason* goes to the log. Without that a GUI
+                    // case can only assert "a dot exists", which passes for the wrong
+                    // reason as soon as any other condition raises one.
+                    .onAppear { kraalLog("sidebar footer attention: \(attention)") }
+            }
         }
         .padding(.horizontal, KraalTheme.Space.base)
         .padding(.vertical, KraalTheme.Space.tight)
+    }
+
+    /// What the footer dot is about, or `nil` when nothing needs the user.
+    ///
+    /// The conditions live in `FooterAttention` so they can be tested without a
+    /// window; this only forwards the current snapshot.
+    private var footerAttention: String? {
+        FooterAttention.reason(for: store.snapshot)
     }
 
     private var statusText: String {
