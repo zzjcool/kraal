@@ -10,6 +10,7 @@ import SwiftUI
 import KraalSidebar
 
 struct ConnectionSheet: View {
+    @Environment(\.palette) private var palette
     /// Held directly, not through the environment.
     ///
     /// It arrives as an init parameter, and a sheet presented from `RootView` does
@@ -92,7 +93,7 @@ struct ConnectionSheet: View {
             if case let .failed(reason) = store.phase {
                 Text(reason)
                     .font(.caption)
-                    .foregroundStyle(sidebarColor("red"))
+                    .foregroundStyle(sidebarColor("red", palette: palette))
                     .fixedSize(horizontal: false, vertical: true)
             }
 

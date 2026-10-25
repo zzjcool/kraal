@@ -32,6 +32,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// Retained so the closure installed on the store does not have to capture
     /// it strongly — see `onEffectsChanged` in `applicationDidFinishLaunching`.
     private var terminalEffects: TerminalEffectsApplier?
+    /// Owns the resolved palette; every view reads it through `\.palette`.
+    private var themeStore: ThemeStore?
 
     /// Whether this launch is allowed to take the desktop.
     ///
@@ -96,6 +98,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
         let copyController = makeCopyModeController(store: store)
 
+        let theme = makeThemeStore()
+
         let root = RootView(
             store: store,
             windowActions: windowActions,
@@ -127,23 +131,14 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         } popupPaneContent: { store, popup, _ in
             self.popupView(store: store, popup: popup, pool: pool)
         }
+        // Injected on the view rather than on the hosting view, so sheets and
+        // popovers inherit it too.
+        .environment(\.palette, theme.palette)
 
         let window = makeWindow(root: root)
         self.window = window
 
-        // Terminal events (OSC 52 clipboard, pane title, bell, notification) are
-        // reduced to a value by the store and applied here, which is the only
-        // code that touches AppKit for them. Assigned before `connect()` so no
-        // event from the first frame is missed.
-        let effects = TerminalEffectsApplier()
-        effects.attach(window: window)
-        terminalEffects = effects
-        store.onEffectsChanged = { [weak effects] pending in
-            guard let effects else { return }
-            let applied = effects.apply(pending)
-            guard !applied.isEmpty else { return }
-            kraalLog("effects: \(applied.joined(separator: " "))")
-        }
+        wireTerminalEffects(store: store, window: window)
 
         // Keep the pool in sync with the store: drop terminals for closed panes
         // so their Ghostty surfaces are released.
@@ -298,7 +293,38 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// Split out of `applicationDidFinishLaunching` for length. The window has no
     /// nib and no SwiftUI scene, so every attribute — frame restoration, on-screen
     /// clamping, titlebar style — is set by hand here.
-    private func makeWindow(root: RootView) -> NSWindow {
+    /// Terminal events (OSC 52 clipboard, pane title, bell, notification) are reduced
+    /// to a value by the store and applied here, which is the only code that touches
+    /// AppKit for them. Wired before `connect()` so no event from the first frame is
+    /// missed.
+    private func wireTerminalEffects(store: AppStore, window: NSWindow) {
+        let effects = TerminalEffectsApplier()
+        effects.attach(window: window)
+        terminalEffects = effects
+        store.onEffectsChanged = { [weak effects] pending in
+            guard let effects else { return }
+            let applied = effects.apply(pending)
+            guard !applied.isEmpty else { return }
+            kraalLog("effects: \(applied.joined(separator: " "))")
+        }
+    }
+
+    /// Resolves the theme once and keeps it following the system appearance.
+    ///
+    /// Split out of `applicationDidFinishLaunching`, which is at swiftlint's body
+    /// limit: the launch path already carries activation policy, log rotation, the
+    /// connection and the effect wiring.
+    private func makeThemeStore() -> ThemeStore {
+        // Read once, here. Doing it in a view body would mean file I/O per frame, and
+        // doing it in several places would give "which theme am I on" several answers.
+        let theme = ThemeStore()
+        themeStore = theme
+        theme.followSystemAppearance()
+        kraalLog("theme: \(theme.themeName) (config name=\(theme.config.name ?? "-"))")
+        return theme
+    }
+
+    private func makeWindow(root: some View) -> NSWindow {
         let hosting = NSHostingView(rootView: root)
         hosting.frame = NSRect(x: 0, y: 0, width: 1180, height: 760)
 

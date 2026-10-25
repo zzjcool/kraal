@@ -15,6 +15,7 @@ import KraalTransport
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
     @Environment(WindowActions.self) private var windowActions
+    @Environment(\.palette) private var palette
     @State private var prompt: CommandPrompt?
 
     /// Fraction of the list area given to the spaces pane.
@@ -562,6 +563,7 @@ struct SidebarView: View {
 // MARK: - Rows
 
 private struct WorkspaceRowView: View {
+    @Environment(\.palette) private var palette
     let workspace: ClientShellWorkspace
     let layout: SidebarLayout
     /// The machine this workspace lives on. Rows describe one connection, so the
@@ -643,7 +645,7 @@ private struct WorkspaceRowView: View {
                     Text(segment.text)
                         .font(.system(size: 10))
                         .foregroundStyle(segment.tint == .ahead
-                            ? sidebarColor("green")
+                            ? sidebarColor("green", palette: palette)
                             : segment.tint == .behind ? Color.red : Color.secondary)
                 }
             }
