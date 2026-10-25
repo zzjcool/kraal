@@ -3923,7 +3923,102 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry"; }
+
+# Both sidebar panes are visible at once (issue #115).
+#
+# The sidebar used to be a segmented control: spaces *or* agents, one at a time.
+# Upstream puts spaces above agents in one column (`src/ui/sidebar.rs:30-66`), and
+# the difference is observable in the AX tree — the two headings are separate
+# AXStaticText nodes, and both must be present without any interaction.
+#
+# Asserting on the headings rather than on pixels: "spaces" and "agents" are the
+# pane titles, so their presence together *is* the claim. Under the old segmented
+# control only the selected pane's content was built at all, so one heading was
+# always missing.
+case_sidebar_sections() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+    }
+    assert() {
+        python3 - "$host_dir/ax.json" <<'PY' >"$host_dir/headings.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as handle:
+    tree = json.load(handle)
+found = {"spaces": False, "agents": False}
+for node in tree["nodes"]:
+    if node.get("role") != "AXStaticText":
+        continue
+    value = (node.get("value") or "").strip().lower()
+    frame = node.get("frame") or {}
+    # The sidebar is the leading 220 pt; anything wider is the terminal.
+    if "x" not in frame or frame["x"] > 260:
+        continue
+    if value in found:
+        found[value] = True
+print("spaces={} agents={}".format(int(found["spaces"]), int(found["agents"])))
+PY
+        read -r spaces agents <<<"$(sed 's/spaces=//; s/agents=//' "$host_dir/headings.txt")"
+        check "the sidebar shows both pane headings" \
+            "$([ "$spaces" = "1" ] && [ "$agents" = "1" ] && echo 0 || echo 1)" \
+            "$(cat "$host_dir/headings.txt")"
+    }
+}
+
+# The two panes divide the sidebar height and leave room for both (issue #115).
+#
+# Upstream clamps the split so neither pane can be squeezed away
+# (`src/ui/sidebar.rs:42-43`). Measured through the AX frames of the two headings:
+# the agents heading must sit *below* the spaces heading, which is only true if
+# they are two stacked panes rather than one swapped view.
+case_sidebar_split_geometry() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+    }
+    assert() {
+        python3 - "$host_dir/ax.json" <<'PY' >"$host_dir/layout.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as handle:
+    tree = json.load(handle)
+tops = {}
+for node in tree["nodes"]:
+    if node.get("role") != "AXStaticText":
+        continue
+    value = (node.get("value") or "").strip().lower()
+    frame = node.get("frame") or {}
+    if "y" not in frame or frame.get("x", 999) > 260:
+        continue
+    if value in ("spaces", "agents") and value not in tops:
+        tops[value] = frame["y"]
+if len(tops) != 2:
+    print("missing headings: {}".format(sorted(tops)))
+    sys.exit(1)
+print("spaces_y={} agents_y={}".format(tops["spaces"], tops["agents"]))
+PY
+        line=$(cat "$host_dir/layout.txt")
+        spaces_y=$(printf '%s' "$line" | sed -n 's/.*spaces_y=\([0-9]*\).*/\1/p')
+        agents_y=$(printf '%s' "$line" | sed -n 's/.*agents_y=\([0-9]*\).*/\1/p')
+        check "the agents pane is stacked below the spaces pane" \
+            "$([ -n "$spaces_y" ] && [ -n "$agents_y" ] && [ "$agents_y" -gt "$spaces_y" ] && echo 0 || echo 1)" \
+            "$line"
+    }
+}
 
 # ---------------------------------------------------------------- entrypoint
 

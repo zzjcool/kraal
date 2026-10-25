@@ -14,33 +14,39 @@ import KraalTransport
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
-    // Spaces is the default: it is the unit you navigate by, and it stays
-    // meaningful with plain shells. Agents only fills in once the daemon
-    // detects a coding agent, so opening there shows a fallback pane list
-    // instead — with one workspace, every row repeats the same name.
-    @State private var selection: Selection = .workspaces
     @State private var prompt: CommandPrompt?
 
-    enum Selection: Hashable {
-        case workspaces
-        case agents
-    }
+    /// Fraction of the list area given to the spaces pane.
+    ///
+    /// A stored value rather than a computed one because the divider drags (#117).
+    /// Until that lands it never changes, and the default matches upstream's.
+    @State private var sectionRatio = SidebarSections.defaultRatio
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    switch selection {
-                    case .workspaces: workspacesSection
-                    case .agents: agentsSection
-                    }
+            // Spaces above, agents below, both visible at once — upstream draws the
+            // same thing (`src/ui/sidebar.rs:30-66`). They used to be two tabs of a
+            // segmented control, which meant you could not answer "which space has
+            // an agent" without leaving the list you were reading it from.
+            //
+            // The split is measured rather than given fixed heights: the sidebar's
+            // available height depends on the window, and a heading plus no rows
+            // reads as a bug.
+            GeometryReader { proxy in
+                let split = SidebarSections.heights(
+                    totalHeight: proxy.size.height,
+                    ratio: sectionRatio
+                )
+                VStack(alignment: .leading, spacing: 0) {
+                    sectionScroll { workspacesSection }
+                        .frame(height: split.spaces, alignment: .top)
+                    sectionDivider
+                    sectionScroll { agentsSection }
+                        .frame(height: split.agents, alignment: .top)
                 }
-                .padding(.horizontal, KraalTheme.Space.base)
-                .padding(.vertical, KraalTheme.Space.snug)
             }
-            Spacer(minLength: 0)
             Divider().opacity(0.4)
             footer
         }
@@ -51,6 +57,29 @@ struct SidebarView: View {
         // desktop and follows window-active state and Reduce Transparency.
         .glassChrome(.sidebar, rim: false)
         .renamePrompt($prompt)
+    }
+
+    /// One pane of the sidebar: a heading stays put, the rows scroll under it.
+    ///
+    /// Scrolling per pane, not for the whole sidebar, is what makes the two halves
+    /// independent (#116): a long spaces list must not push the agents pane out of
+    /// view, and the agents pane keeps its position while spaces scrolls.
+    private func sectionScroll<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                content()
+            }
+            .padding(.horizontal, KraalTheme.Space.base)
+            .padding(.vertical, KraalTheme.Space.snug)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var sectionDivider: some View {
+        Divider().opacity(0.4)
     }
 
     // MARK: - Sections
@@ -67,16 +96,17 @@ struct SidebarView: View {
         MachineRoster.sidebarMachineName(settings: store.target)
     }
 
+    /// The sidebar's top bar: the machine name and the new-workspace button.
+    ///
+    /// The segmented control that used to live here is gone with the tabs it
+    /// switched (#115). Both panes are on screen now, so there is nothing to switch.
     private var header: some View {
         HStack(spacing: 6) {
-            Picker("", selection: $selection) {
-                Text("Agents").tag(Selection.agents)
-                Text("Spaces").tag(Selection.workspaces)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-
+            Text(machineName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
             Button {
                 store.createWorkspace()
             } label: {
@@ -100,7 +130,12 @@ struct SidebarView: View {
     @ViewBuilder
     private var workspacesSection: some View {
         let multi = store.endpoints.count > 1
-        sectionHeading(multi ? "machines" : "spaces")
+        // Always "spaces", even with several machines. Upstream's expanded sidebar
+        // titles this pane " spaces" unconditionally (`client/shell/sidebar.rs:218-226`);
+        // the per-machine listing lives *inside* the pane as group headers, which is
+        // what `machineRow` draws. "machines" as a title belongs to the collapsed
+        // narrow sidebar (`endpoint_sidebar.rs:15`), which is a different mode (#119).
+        sectionHeading("spaces")
         if multi {
             ForEach(store.endpoints, id: \.id) { endpoint in
                 machineRow(endpoint)
@@ -262,6 +297,17 @@ struct SidebarView: View {
     }
 
     private var agentsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Upstream draws a rule and then the heading, and skips the heading
+            // when there is no room for it (`agent_sidebar.rs:100-120`). The
+            // spaces pane has the same heading without a rule, because its rule is
+            // the divider above it.
+            sectionHeading("agents")
+            agentsBody
+        }
+    }
+
+    private var agentsBody: some View {
         Group {
             if !store.agentsOrdered.isEmpty {
                 ForEach(store.agentsOrdered) { agent in
