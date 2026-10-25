@@ -3944,7 +3944,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4200,6 +4200,73 @@ case_sidebar_footer_attention_config() {
 this is not valid toml at all = =
 TOML
 }
+
+# The sidebar collapses to a narrow indexed strip, and expands again (issue #119).
+#
+# Upstream's collapsed sidebar is 4 columns of `"<n> <glyph>"` rows with the
+# workspaces above the agents (`config.rs:403-408`, `sidebar.rs:47-175`). The claim
+# that has to hold in a window, rather than in the arithmetic, is that the sidebar's
+# width changes and both lists are still represented.
+#
+# Width is the assertion because everything else follows from it: the strip only
+# exists at a narrow width, so a collapse that changes nothing visible fails here.
+case_sidebar_collapse() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax-before.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+        local width
+        width=$(python3 "$ROOT/Scripts/sidebar-width.py" "$host_dir/ax-before.json") || {
+            echo "cannot measure the sidebar"
+            return 1
+        }
+        # The collapsed state is persisted, so a previous run of this case leaves the
+        # app starting collapsed and the press would *expand* it. Press until the
+        # sidebar is wide, which makes the starting state explicit instead of assumed.
+        while [ "$width" -lt 100 ]; do
+            driver press --id "sidebar.collapse.toggle" >/dev/null 2>&1 || break
+            sleep 1
+            driver ax --json --depth 22 >"$host_dir/ax-before.json" 2>&1 || break
+            width=$(python3 "$ROOT/Scripts/sidebar-width.py" "$host_dir/ax-before.json") \
+                || break
+        done
+        printf '%s\n' "$width" >"$host_dir/before.txt"
+
+        # The collapse control is a button with an identifier, so it is pressed rather
+        # than clicked at a guessed coordinate — `AXPress` also works while the app
+        # is an accessory, which clicking would not.
+        driver press --id "sidebar.collapse.toggle" >"$host_dir/press.txt" 2>&1 || {
+            echo "cannot press the collapse control"
+            return 1
+        }
+        sleep 1
+        driver ax --json --depth 22 >"$host_dir/ax-after.json" 2>&1 || {
+            echo "cannot read the AX tree after collapsing"
+            return 1
+        }
+    }
+    assert() {
+        local before after
+        before=$(cat "$host_dir/before.txt")
+        after=$(python3 "$ROOT/Scripts/sidebar-width.py" "$host_dir/ax-after.json") \
+            || after="missing"
+        check "collapsing narrowed the sidebar" \
+            "$([ "$after" != "missing" ] && [ "$after" -lt "$before" ] && echo 0 || echo 1)" \
+            "before=${before}pt after=${after}pt"
+
+        # And the strip is the width the layout code claims, not merely narrower.
+        check "the collapsed sidebar is one narrow strip" \
+            "$([ "$after" != "missing" ] && [ "$after" -le 60 ] && echo 0 || echo 1)" \
+            "after=${after}pt (upstream's compact mode is 4 columns)"
+    }
+}
+
 
 # ---------------------------------------------------------------- entrypoint
 

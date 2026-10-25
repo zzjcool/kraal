@@ -26,7 +26,27 @@ struct SidebarView: View {
     /// ratio without re-measuring inside the gesture.
     @State private var lastMeasuredHeight: CGFloat = 0
 
+    /// Whether the sidebar is a narrow strip.
+    ///
+    /// Persisted (`SidebarPreferences.collapsedKey`) so it survives a relaunch, which
+    /// is what upstream does with `sidebar_collapsed`
+    /// (`src/client/shell/state.rs:1002-1003`).
+    @State private var isCollapsed = SidebarPreferences.initialCollapsed()
+
     var body: some View {
+        if isCollapsed {
+            SidebarCollapsedView(
+                store: store,
+                isCollapsed: isCollapsed,
+                attention: footerAttention,
+                toggle: { setCollapsed(!isCollapsed) }
+            )
+        } else {
+            expandedBody
+        }
+    }
+
+    private var expandedBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
@@ -464,6 +484,20 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .help("Layout from \(config)")
             }
+            // Collapse control. Upstream draws it as a `«` at the sidebar's bottom
+            // edge (`sidebar.rs:445-455`); a chevron button is the same affordance in
+            // a window that uses real controls.
+            Button {
+                setCollapsed(true)
+            } label: {
+                Image(systemName: "chevron.left.2")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Collapse the sidebar")
+            .accessibilityIdentifier("sidebar.collapse.toggle")
+
             // Upstream puts its global-menu launcher here and marks it with a dot when
             // something needs attention (`sidebar.rs:390-424`), where "attention" is
             // `update_available || integration_updates_available`
@@ -498,6 +532,12 @@ struct SidebarView: View {
     /// window; this only forwards the current snapshot.
     private var footerAttention: String? {
         FooterAttention.reason(for: store.snapshot)
+    }
+
+    /// Collapse or expand, remembering the choice.
+    private func setCollapsed(_ collapsed: Bool) {
+        isCollapsed = collapsed
+        SidebarPreferences.storeCollapsed(collapsed)
     }
 
     private var statusText: String {
