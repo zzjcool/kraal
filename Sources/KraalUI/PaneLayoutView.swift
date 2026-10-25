@@ -604,6 +604,18 @@ public enum PaneFrameMath {
     ///
     /// The fix is to convert the container to top-down first, then add the pane's
     /// own top-down offset. Both operands are then measured from the same edge.
+    /// Whether a reported rectangle is usable for hit testing.
+    ///
+    /// A pane view reports its own frame, and SwiftUI reports `0x0` while it is
+    /// tearing a view down or before it has been laid out. Storing that would replace
+    /// a good rectangle with an empty one, and `CGRect.contains` never matches an
+    /// empty rect — so every click in that pane would afterwards be handed to Ghostty
+    /// instead of raising the pane menu (issue: right-click on an SSH pane produced
+    /// the system Copy/AutoFill menu).
+    public static func isUsableForHitTesting(_ rect: CGRect) -> Bool {
+        rect.width > 0 && rect.height > 0
+    }
+
     public static func rect(container: CGRect, pane: CGRect, contentHeight: CGFloat) -> CGRect {
         let containerTop = contentHeight - (container.minY + container.height)
         return CGRect(
@@ -749,6 +761,21 @@ private struct PaneFrameReporter: NSViewRepresentable {
             guard let paneId, let store, let window, let contentView = window.contentView else {
                 return
             }
+            // A zero-size report is not a pane at nowhere — it is SwiftUI tearing
+            // the view down, or measuring before layout. Writing it through would
+            // replace a good rectangle with an empty one, and since the monitor
+            // matches with `rect.contains(point)`, an empty rect matches nothing:
+            // every later click and right-click in that pane would be handed to
+            // Ghostty instead of this app. Measured on a live session
+            // (`~/Library/Logs/Kraal-live.log`): one pane reported
+            // `1020x740` → `986x2423` → `0x0`, and after the `0x0` the pane never
+            // raised the pane menu again — the right-click produced the system
+            // Copy/AutoFill menu, which is Ghostty's own.
+            //
+            // Keep the last real rectangle instead. It goes stale only in the sense
+            // that the next `layout()` pass overwrites it, which is exactly what
+            // should happen.
+            guard PaneFrameMath.isUsableForHitTesting(bounds) else { return }
             // SwiftUI hosts this view in a container that is not moved by
             // `.frame`/`.position`, so the host's own rect is always the pane
             // container. The container's rect plus the pane's offset inside it is

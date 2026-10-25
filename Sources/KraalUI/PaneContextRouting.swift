@@ -35,34 +35,51 @@ public enum PaneContextRouting {
     ///
     /// Two independent things can hand the button to the program:
     ///
-    /// - `programReportsMouse`: the program enabled mouse reporting, so it is
-    ///   handling buttons itself. TUIs (editors, pagers, tmux) do exactly this
-    ///   and use the right button for their own menus; a Kraal menu on top of
-    ///   that would be unreachable and would eat the click. This was the only
-    ///   input, and it is why the per-pane `right_click` setting had no effect.
     /// - `rightClickPassthrough`: the user explicitly set this pane's
     ///   `right_click = "pane"` (`pane.input.set`, persisted by the daemon and
-    ///   reported back as `right_click_passthrough` in the snapshot). It applies
-    ///   even to a program that does *not* report the mouse: that is the whole
-    ///   point of the setting — a plain shell whose program ignores the button
-    ///   still wants the click sent to it (e.g. an app that reads the raw
-    ///   sequence), and without it the click would open a menu instead.
-    public static func ownsRightClick(
-        programReportsMouse: Bool,
-        rightClickPassthrough: Bool = false
-    ) -> Bool {
-        programReportsMouse || rightClickPassthrough
+    ///   reported back as `right_click_passthrough` in the snapshot). This is the
+    ///   **only** thing that hands the button to the program. It works whether or
+    ///   not the program reports the mouse: a plain shell that ignores the button
+    ///   may still want the sequence, and a TUI that wants its own menu says so
+    ///   here.
+    /// - `programReportsMouse`: **not** a reason on its own. Enabling mouse
+    ///   reporting means the program wants the *pointer* — clicks, drags, wheel —
+    ///   which is what makes a TUI usable at all. Upstream treats the right button
+    ///   separately, and the pane menu stays reachable by default
+    ///   (`src/client/shell/mouse.rs:1805-1807`):
+    ///
+    ///   ```rust
+    ///   if hit.mouse_reporting
+    ///       && (pane_owns_right_click || configured_modifiers.is_some())
+    ///   ```
+    ///
+    ///   Treating "reports the mouse" as "owns the right button" made every TUI
+    ///   pane unreachable: the menu never opened there, and there was no way for
+    ///   the user to get it back either, because the same flag also raised the
+    ///   bar for `right_click = "herdr"`. Measured: right-click in a TUI pane
+    ///   logged no menu line at all, while a plain shell in the same session did.
+    ///
+    /// - Note: upstream gates this on `hit.mouse_reporting` too
+    ///   (`mouse.rs:1806`), so a pane whose program ignores the mouse but whose
+    ///   `right_click` is `"pane"` gets the *menu* there and the *click* here. That
+    ///   difference is deliberate: the setting says "send this pane's right button
+    ///   to the program", and honouring it for a program that does read the raw
+    ///   sequence is the only way the setting can do what it says. Upstream's own
+    ///   docs describe `right_click = "pane"` as handing the click over
+    ///   unconditionally. Not verified against a real TUI that reads raw sequences
+    ///   with reporting off — no such program was available.
+    ///
+    /// - Note: upstream also requires `mouse.modifiers.is_empty()` and supports a
+    ///   `right_click_passthrough_modifier` config. Neither is implemented here;
+    ///   Kraal has no equivalent setting, so a right-click that carries a modifier
+    ///   is treated like any other. Recorded as a known gap rather than guessed at.
+    public static func ownsRightClick(rightClickPassthrough: Bool = false) -> Bool {
+        rightClickPassthrough
     }
 
     /// True when a right-click should raise the pane menu.
-    public static func shouldShowPaneMenu(
-        programReportsMouse: Bool,
-        rightClickPassthrough: Bool = false
-    ) -> Bool {
-        !ownsRightClick(
-            programReportsMouse: programReportsMouse,
-            rightClickPassthrough: rightClickPassthrough
-        )
+    public static func shouldShowPaneMenu(rightClickPassthrough: Bool = false) -> Bool {
+        !ownsRightClick(rightClickPassthrough: rightClickPassthrough)
     }
 
     /// The `right_click` value that would produce `passthrough`.
