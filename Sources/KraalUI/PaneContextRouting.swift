@@ -58,6 +58,21 @@ public enum PaneContextRouting {
     ///   the user to get it back either, because the same flag also raised the
     ///   bar for `right_click = "herdr"`. Measured: right-click in a TUI pane
     ///   logged no menu line at all, while a plain shell in the same session did.
+    ///
+    /// - Note: upstream gates this on `hit.mouse_reporting` too
+    ///   (`mouse.rs:1806`), so a pane whose program ignores the mouse but whose
+    ///   `right_click` is `"pane"` gets the *menu* there and the *click* here. That
+    ///   difference is deliberate: the setting says "send this pane's right button
+    ///   to the program", and honouring it for a program that does read the raw
+    ///   sequence is the only way the setting can do what it says. Upstream's own
+    ///   docs describe `right_click = "pane"` as handing the click over
+    ///   unconditionally. Not verified against a real TUI that reads raw sequences
+    ///   with reporting off — no such program was available.
+    ///
+    /// - Note: upstream also requires `mouse.modifiers.is_empty()` and supports a
+    ///   `right_click_passthrough_modifier` config. Neither is implemented here;
+    ///   Kraal has no equivalent setting, so a right-click that carries a modifier
+    ///   is treated like any other. Recorded as a known gap rather than guessed at.
     public static func ownsRightClick(rightClickPassthrough: Bool = false) -> Bool {
         rightClickPassthrough
     }
