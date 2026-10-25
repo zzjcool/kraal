@@ -64,7 +64,25 @@ public enum AgentAggregation {
                     recency: recency.stamp(
                         endpointID: source.endpointID,
                         paneId: agent.paneId
-                    )
+                    ),
+                    // Resolved against *this* source's snapshot: the row's workspace
+                    // lives on the machine the agent runs on, and the store's lists only
+                    // describe the selected machine.
+                    workspace: source.snapshot.workspaces.first {
+                        $0.workspaceId == agent.workspaceId
+                    },
+                    // Only when it distinguishes anything. Upstream shows the tab
+                    // label when the workspace has several tabs or this one was
+                    // renamed (`agent_sidebar.rs:262-265`); otherwise it is the default
+                    // `1` and every row would carry a meaningless number.
+                    tab: {
+                        let tabs = source.snapshot.tabs.filter {
+                            $0.workspaceId == agent.workspaceId
+                        }
+                        guard let tab = tabs.first(where: { $0.tabId == agent.tabId })
+                        else { return nil }
+                        return tabs.count > 1 || tab.customLabel ? tab : nil
+                    }()
                 ))
             }
         }

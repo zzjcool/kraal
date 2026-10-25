@@ -468,10 +468,12 @@ struct SidebarView: View {
                     let agent = row.agent
                     AgentRowView(
                         agent: agent,
-                        workspace: store.workspaces.first {
-                            $0.workspaceId == agent.workspaceId
-                        },
-                        tab: store.tabs.first { $0.tabId == agent.tabId },
+                        // From the row, i.e. from the agent's own machine. Looking
+                        // these up in `store.workspaces` / `store.tabs` only ever found
+                        // the *selected* machine's, so every other machine's rows lost
+                        // their workspace and showed a bare machine name.
+                        workspace: row.workspace,
+                        tab: row.tab,
                         layout: store.sidebarLayout,
                         // Each row names its *own* machine, not the active one: the
                         // pane lists every machine, so `machineName` (which describes
@@ -562,6 +564,19 @@ struct SidebarView: View {
 
 // MARK: - Rows
 
+/// The text between two tokens in one row.
+///
+/// Upstream's rule (`tokens.rs:184-191`): a space follows the state icon, because it is
+/// a glyph rather than a word, and every other pair gets ` · `. Rendering every token at
+/// one `HStack` spacing made `machine workspace tab` read as three unrelated words while
+/// the terminal client shows `machine · workspace`.
+func sidebarTokenSeparator(before previous: ResolvedToken, current: ResolvedToken) -> String {
+    if previous.kind == .stateIcon || current.kind == .gitStatus {
+        return " "
+    }
+    return " · "
+}
+
 private struct WorkspaceRowView: View {
     @Environment(\.palette) private var palette
     let workspace: ClientShellWorkspace
@@ -596,8 +611,16 @@ private struct WorkspaceRowView: View {
                 ForEach(Array(layout.spacesRows.enumerated()), id: \.offset) { _, row in
                     let resolved = SidebarTokenResolver.resolve(row: row, context: context)
                     if !resolved.tokens.isEmpty {
-                        HStack(spacing: 5) {
-                            ForEach(Array(resolved.tokens.enumerated()), id: \.offset) { _, token in
+                        HStack(spacing: 0) {
+                            ForEach(Array(resolved.tokens.enumerated()), id: \.offset) { index, token in
+                                if index > 0 {
+                                    Text(sidebarTokenSeparator(
+                                        before: resolved.tokens[index - 1],
+                                        current: token
+                                    ))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                }
                                 tokenView(token)
                             }
                         }
@@ -677,15 +700,28 @@ private struct AgentRowView: View {
                     pair.count == 2 ? (pair[0], pair[1]) : nil
                 }
             ),
-            showsMachineName: multiMachine
+            // Always. Upstream passes `Some(&endpoint.label)` for every endpoint,
+            // including Local (`endpoint_agents.rs:163-166`), because the agents pane
+            // mixes machines and "which machine" is part of the row's identity. The
+            // `multiMachine` flag is what the *spaces* pane uses, where rows belong to
+            // one machine.
+            showsMachineName: true
         )
         let rows = layout.rows(for: agent.agent)
         VStack(alignment: .leading, spacing: CGFloat(layout.agentsRowGap)) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 let resolved = SidebarTokenResolver.resolve(row: row, context: context)
                 if !resolved.tokens.isEmpty {
-                    HStack(spacing: 5) {
-                        ForEach(Array(resolved.tokens.enumerated()), id: \.offset) { _, token in
+                    HStack(spacing: 0) {
+                        ForEach(Array(resolved.tokens.enumerated()), id: \.offset) { index, token in
+                            if index > 0 {
+                                Text(sidebarTokenSeparator(
+                                    before: resolved.tokens[index - 1],
+                                    current: token
+                                ))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            }
                             tokenView(token)
                         }
                     }
