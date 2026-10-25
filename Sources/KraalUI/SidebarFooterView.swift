@@ -16,7 +16,8 @@ import SwiftUI
 struct SidebarFooterView: View {
     let store: AppStore
     let attention: String?
-    let collapse: () -> Void
+    /// Where the row layout came from, surfaced in the menu's tooltip.
+    let layoutSource: String?
 
     @Environment(WindowActions.self) private var windowActions
 
@@ -36,24 +37,10 @@ struct SidebarFooterView: View {
 
             Spacer(minLength: 4)
 
-            if let config = store.sidebarConfigSource {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .help("Layout from \(config)")
-            }
-
-            // Upstream draws the collapse control as a `«` at the sidebar's bottom
-            // edge (`sidebar.rs:445-455`).
-            Button(action: collapse) {
-                Image(systemName: "chevron.left.2")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Collapse the sidebar")
-            .accessibilityIdentifier("sidebar.collapse.toggle")
-
+            // No settings/collapse icons here any more. `menu` already opens
+            // settings, and the collapse control moved to the header — `footer` is
+            // `" new"` and `"menu"` upstream (`sidebar.rs:379-431`) and nothing more.
+            // `sidebarConfigSource` still surfaces through the menu's tooltip.
             menu
         }
         .padding(.horizontal, KraalTheme.Space.base)
@@ -108,7 +95,8 @@ struct SidebarFooterView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(attention ?? "Settings, shortcuts, reload")
+        .help(attention ?? layoutSource.map { "Layout from \($0)" }
+            ?? "Settings, shortcuts, reload")
         .accessibilityIdentifier("sidebar.footer.menu")
     }
 }

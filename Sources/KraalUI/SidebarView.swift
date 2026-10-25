@@ -35,16 +35,24 @@ struct SidebarView: View {
     @State private var isCollapsed = SidebarPreferences.initialCollapsed()
 
     var body: some View {
-        if isCollapsed {
-            SidebarCollapsedView(
-                store: store,
-                isCollapsed: isCollapsed,
-                attention: footerAttention,
-                toggle: { setCollapsed(!isCollapsed) }
-            )
-        } else {
-            expandedBody
+        // The chrome is applied *outside* the branch, so collapsing cannot lose it.
+        // It used to live only on `expandedBody`, and the collapsed strip rendered as
+        // a transparent column over the desktop — the rows were visible but the
+        // sidebar was not, which read as a rendering bug rather than a narrow mode.
+        Group {
+            if isCollapsed {
+                SidebarCollapsedView(
+                    store: store,
+                    attention: footerAttention,
+                    toggle: { setCollapsed(false) }
+                )
+            } else {
+                expandedBody
+            }
         }
+        .frame(width: isCollapsed ? SidebarCollapsed.width : KraalTheme.sidebarWidth)
+        .glassChrome(.sidebar, rim: false)
+        .renamePrompt($prompt)
     }
 
     private var expandedBody: some View {
@@ -78,7 +86,7 @@ struct SidebarView: View {
                         SidebarFooterView(
                             store: store,
                             attention: footerAttention,
-                            collapse: { setCollapsed(true) }
+                            layoutSource: store.sidebarConfigSource
                         )
                     }
                     .frame(height: split.spaces, alignment: .top)
@@ -92,13 +100,12 @@ struct SidebarView: View {
                 }
             }
         }
-        .frame(width: KraalTheme.sidebarWidth)
         // A real `NSVisualEffectView` sidebar, not SwiftUI's `.thinMaterial`: the
         // latter samples sibling views, so inside this opaque window it rendered a
         // flat grey (measured 0.125 before the change). This one reaches the
         // desktop and follows window-active state and Reduce Transparency.
-        .glassChrome(.sidebar, rim: false)
-        .renamePrompt($prompt)
+        //
+        // The frame and the chrome live in `body`, around both states.
     }
 
     /// One pane of the sidebar: a heading stays put, the rows scroll under it.
@@ -199,6 +206,18 @@ struct SidebarView: View {
             }
             .buttonStyle(.borderless)
             .help("New workspace")
+            // The collapse control belongs in the header, next to the other
+            // window-level control: the herdr UI puts it on the `WORKSPACES` title
+            // row. At the bottom of the footer it competed with `new` and `menu`,
+            // which act on the space list rather than on the sidebar itself.
+            Button {
+                setCollapsed(true)
+            } label: {
+                Image(systemName: "sidebar.leading")
+            }
+            .buttonStyle(.borderless)
+            .help("Collapse the sidebar")
+            .accessibilityIdentifier("sidebar.collapse.toggle")
         }
         .padding(.horizontal, KraalTheme.Space.base)
         .padding(.vertical, KraalTheme.Space.snug)

@@ -3741,7 +3741,16 @@ run_case() {
     # earlier run of the same case is removed too: "the case passed last time" must
     # not be part of its starting state.
     PREFS_SUITE="kraal.gui.$name"
+    # Clear it in both places. Under the vm backend the app runs inside the guest, and
+    # `defaults` here only reaches the host — so a domain left behind by an earlier run
+    # in the guest survived every subsequent run. That is how
+    # `sidebar-divider-drag` started failing with `ratio=0.9`: the previous drag had
+    # persisted its split inside the guest and every later run started from it.
     defaults delete "$PREFS_SUITE" >/dev/null 2>&1 || true
+    if [ "$BACKEND" = "vm" ]; then
+        tart exec "$VM" /bin/bash -lc "defaults delete $PREFS_SUITE" \
+            >/dev/null 2>&1 || true
+    fi
 
     local run_id
     run_id="$(date +%Y%m%d-%H%M%S)-$name"
@@ -4300,6 +4309,21 @@ case_sidebar_collapse() {
         check "the collapsed sidebar is one narrow strip" \
             "$([ "$after" != "missing" ] && [ "$after" -le 60 ] && echo 0 || echo 1)" \
             "after=${after}pt (upstream's compact mode is 4 columns)"
+
+        # The strip's background is *not* asserted by pixels. Two attempts:
+        #
+        #   with chrome:    dark pixels in the strip = 27
+        #   without chrome: dark pixels in the strip = 2295
+        #
+        # The direction is inverted — chrome samples the (bright) desktop behind the
+        # window, while no chrome shows the window's own dark fill. So "dark pixels
+        # present" says nothing about whether the sidebar has a background, and a
+        # predicate that points the wrong way is worse than no assertion.
+        #
+        # The fix is structural: `glassChrome` and `frame` live in `body` around both
+        # branches, so collapsing cannot drop them. That is visible in
+        # `SidebarView.body` and does not need a pixel probe that reads the wrong
+        # surface.
     }
 }
 
@@ -4425,6 +4449,19 @@ case_sidebar_footer_controls() {
         fi
         check "the footer sits inside the spaces pane, above the divider" "$placed" \
             "$(cat "$host_dir/footer-place.txt")"
+
+        # And the collapse control is not in that row: it belongs in the header, next
+        # to the other window-level control, the way the herdr UI puts it on the
+        # `WORKSPACES` title row.
+        local collapse_placed
+        if python3 "$ROOT/Scripts/sidebar-collapse-above-new.py" \
+            "$host_dir/ax-before.json" >"$host_dir/collapse-place.txt" 2>&1; then
+            collapse_placed=0
+        else
+            collapse_placed=1
+        fi
+        check "the collapse control sits in the header, above new/menu" \
+            "$collapse_placed" "$(cat "$host_dir/collapse-place.txt")"
     }
 }
 
