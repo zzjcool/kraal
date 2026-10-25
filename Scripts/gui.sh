@@ -3944,7 +3944,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4208,11 +4208,16 @@ case_sidebar_footer_attention() {
         #    an update would satisfy the case for the wrong reason — which is exactly
         #    what happened on the first run: the dot was there, the fixture's bad TOML
         #    was not the cause, and only the reason line told them apart.
-        local dot
-        dot=$(grep -ac "sidebar.footer.attention" "$host_dir/ax.json" 2>/dev/null || echo 0)
-        check "the footer drew the attention dot" \
-            "$([ "$dot" -gt 0 ] && echo 0 || echo 1)" \
-            "attention identifier occurrences: $dot"
+        # The dot lives inside the `menu` Menu, and SwiftUI does not expose a Menu's
+        # label subviews as separate AX elements — the container's identifier wins and
+        # the `Circle` inside is invisible to AX. So the dot's *existence* is read from
+        # the reason it logs (below), and this only checks the launcher it sits in.
+        local launcher
+        launcher=$(python3 "$ROOT/Scripts/sidebar-footer-controls.py" \
+            "$host_dir/ax.json" 2>/dev/null) || launcher="missing"
+        check "the footer has the menu launcher the dot sits in" \
+            "$(printf '%s' "$launcher" | grep -qc 'menu=1' && echo 0 || echo 1)" \
+            "$launcher"
 
         local reason
         reason=$(grep -a "sidebar footer attention: " "$host_dir/kraal.log" 2>/dev/null \
@@ -4295,6 +4300,116 @@ case_sidebar_collapse() {
         check "the collapsed sidebar is one narrow strip" \
             "$([ "$after" != "missing" ] && [ "$after" -le 60 ] && echo 0 || echo 1)" \
             "after=${after}pt (upstream's compact mode is 4 columns)"
+    }
+}
+
+
+# The agents header prints the current ordering, and clicking it switches (issue #120).
+#
+# Upstream prints `"grouped"` / `"priority"` on the heading's right edge and treats
+# that text as the toggle (`agent_sidebar.rs:100-145`, `mouse.rs:2025-2032`). The
+# mode therefore has to be *readable* — a control that only opens a menu leaves the
+# active ordering invisible until you open it.
+#
+# Two claims: the label says which mode is on, and pressing it changes that.
+case_sidebar_agent_sort() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        ensure_sidebar_expanded || {
+            echo "cannot expand the sidebar"
+            return 1
+        }
+        driver ax --json --depth 22 >"$host_dir/ax-before.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+        driver press --id "sidebar.agents.sort" >"$host_dir/press.txt" 2>&1 || {
+            echo "cannot press the sort label"
+            return 1
+        }
+        sleep 1
+        driver ax --json --depth 22 >"$host_dir/ax-after.json" 2>&1 || {
+            echo "cannot read the AX tree after pressing"
+            return 1
+        }
+    }
+    assert() {
+        local before after
+        before=$(python3 "$ROOT/Scripts/sidebar-sort-label.py" "$host_dir/ax-before.json") \
+            || before="missing"
+        after=$(python3 "$ROOT/Scripts/sidebar-sort-label.py" "$host_dir/ax-after.json") \
+            || after="missing"
+
+        # Both modes are named, not just "not the other one": a label that is blank
+        # in one state leaves the user guessing which ordering they are looking at.
+        check "the header names one of the two orderings" \
+            "$(printf '%s' "$before" | grep -qcE '^(grouped|priority)$' && echo 0 || echo 1)" \
+            "before=[$before]"
+        check "pressing the label switches the ordering" \
+            "$([ "$before" != "$after" ] && printf '%s' "$after" \
+                | grep -qcE '^(grouped|priority)$' && echo 0 || echo 1)" \
+            "before=[$before] after=[$after]"
+        # And the switch is the two-way one upstream has, not a third state.
+        check "the two orderings alternate" \
+            "$( { [ "$before" = "grouped" ] && [ "$after" = "priority" ]; } \
+                || { [ "$before" = "priority" ] && [ "$after" = "grouped" ]; } \
+                && echo 0 || echo 1)" \
+            "before=[$before] after=[$after]"
+    }
+}
+
+
+# The footer has `+ new` and `● menu`, both visible (issue #121).
+#
+# Upstream's footer is exactly two controls (`sidebar.rs:379-431`): `" new"` for a
+# new workspace, and a `"menu"` launcher that gains a leading dot when something
+# needs attention. Both are words on screen, not icons behind a right-click — the
+# footer is the one row that is always present.
+#
+# `new` is verified by its *effect* (a workspace appears), because "a button exists"
+# is satisfied by a button that does nothing.
+case_sidebar_footer_controls() {
+    requires() { echo ax; }
+    fixture() {
+        ensure_sidebar_expanded || return 1
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1 || return 1
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax-before.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+        herdr workspace list >"$host_dir/ws-before.json" 2>/dev/null || true
+        driver press --id "sidebar.footer.new" >"$host_dir/press.txt" 2>&1 || {
+            echo "cannot press the new-workspace control"
+            return 1
+        }
+        sleep 2
+        herdr workspace list >"$host_dir/ws-after.json" 2>/dev/null || true
+    }
+    assert() {
+        local before after
+        before=$(python3 "$ROOT/Scripts/sidebar-footer-controls.py" \
+            "$host_dir/ax-before.json" 2>/dev/null) || before="missing"
+        check "the footer has both new and menu" \
+            "$(printf '%s' "$before" | grep -qc 'new=1 menu=1' && echo 0 || echo 1)" \
+            "$before"
+
+        # `new` must actually create a workspace: the identifier being present only
+        # proves the button was built.
+        local count_before count_after
+        count_before=$(python3 "$ROOT/Scripts/herdr-workspace-count.py" \
+            "$host_dir/ws-before.json" 2>/dev/null) || count_before=0
+        count_after=$(python3 "$ROOT/Scripts/herdr-workspace-count.py" \
+            "$host_dir/ws-after.json" 2>/dev/null) || count_after=0
+        check "new created a workspace" \
+            "$([ "$count_after" -gt "$count_before" ] && echo 0 || echo 1)" \
+            "workspaces ${count_before} -> ${count_after}"
     }
 }
 

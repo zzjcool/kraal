@@ -80,6 +80,25 @@ struct AgentPanelSortTests {
         #expect(untouched.map(\.paneId) == ["a", "b"], "a filtered view was re-sorted")
     }
 
+    /// The header has to *say* which mode is active. Upstream prints
+    /// `"grouped"` / `"priority"` next to the heading (`agent_sidebar.rs:122-125`);
+    /// a mode with no visible label is indistinguishable from the other one until
+    /// the rows happen to differ.
+    @Test("each mode has the label upstream prints")
+    func shortTitlesMatchUpstream() {
+        #expect(AgentPanelSort.spaces.shortTitle == "grouped")
+        #expect(AgentPanelSort.priority.shortTitle == "priority")
+    }
+
+    /// The header control toggles between exactly the two modes, so a click always
+    /// changes something — a three-way cycle with a hidden default would let a click
+    /// land back on the current mode.
+    @Test("the header toggle alternates between the two modes")
+    func toggleAlternates() {
+        #expect(AgentPanelSort.spaces.toggled == .priority)
+        #expect(AgentPanelSort.priority.toggled == .spaces)
+    }
+
     /// `spaces` is the default and must leave the daemon's order alone.
     @Test("the spaces sort changes nothing")
     func spacesLeavesOrderAlone() throws {

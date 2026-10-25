@@ -60,6 +60,10 @@ public struct RootView: View {
             if sidebarVisible {
                 SidebarView()
                     .environment(store)
+                    // The sidebar's footer `menu` needs the same actions the system
+                    // menu bar has, so it reads the same object instead of growing a
+                    // second copy of "open settings" plumbing.
+                    .environment(windowActions)
                 Divider()
             }
 

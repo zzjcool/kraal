@@ -53,10 +53,33 @@ public enum AgentPanelSort: String, Sendable, CaseIterable {
 
     public static let `default`: AgentPanelSort = .spaces
 
-    /// Label for the sort control.
+    /// The label shown on the agents header — and, unlike a menu, it states which
+    /// mode is active.
+    ///
+    /// Upstream's words are `"grouped"` and `"priority"` (`agent_sidebar.rs:122-125`);
+    /// they are matched here so a screenshot of either client reads the same.
+    public var shortTitle: String {
+        switch self {
+        case .spaces: "grouped"
+        case .priority: "priority"
+        }
+    }
+
+    /// The mode a click on the header label selects.
+    ///
+    /// A two-way toggle, matching upstream (`mouse.rs:2025-2032`): there is no third
+    /// mode to cycle through, so a click always changes what the list looks like.
+    public var toggled: AgentPanelSort {
+        switch self {
+        case .spaces: .priority
+        case .priority: .spaces
+        }
+    }
+
+    /// Longer description for the tooltip.
     public var title: String {
         switch self {
-        case .spaces: "Daemon order"
+        case .spaces: "Grouped by space"
         case .priority: "Priority (blocked first)"
         }
     }
