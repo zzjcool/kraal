@@ -36,18 +36,33 @@ public struct AggregatedAgent: Identifiable, Equatable, Sendable {
     /// two machines' numbers are unrelated. See `AgentRecency`.
     public let recency: UInt64
 
+    /// This agent's workspace, from **its own** machine's snapshot.
+    ///
+    /// Looked up here rather than by the view, because only the snapshot knows: the
+    /// store's `workspaces` / `tabs` describe the *selected* machine, so a view that
+    /// looked them up there found nothing for every other machine and drew a row with
+    /// only a machine name — measured against a screenshot of the upstream client,
+    /// which shows `machine · workspace` for rows on every machine.
+    public let workspace: ClientShellWorkspace?
+    /// This agent's tab, from its own machine's snapshot. See `workspace`.
+    public let tab: ClientShellTab?
+
     public init(
         endpointID: String,
         machineLabel: String,
         agent: ClientShellAgent,
         stale: Bool,
-        recency: UInt64 = 0
+        recency: UInt64 = 0,
+        workspace: ClientShellWorkspace? = nil,
+        tab: ClientShellTab? = nil
     ) {
         self.endpointID = endpointID
         self.machineLabel = machineLabel
         self.agent = agent
         self.stale = stale
         self.recency = recency
+        self.workspace = workspace
+        self.tab = tab
     }
 }
 

@@ -22,6 +22,7 @@ import Foundation
 import Testing
 
 @testable import KraalProtocol
+@testable import KraalSidebar
 @testable import KraalUI
 
 @Suite("Agents from every machine")
@@ -179,5 +180,125 @@ struct AggregatedAgentTests {
     @Test("no sources means no rows")
     func noSourcesNoRows() {
         #expect(rows(active: "local", []).isEmpty)
+    }
+}
+
+/// The agent row's leading line: `state · machine · workspace`.
+///
+/// Both halves were wrong when compared against a screenshot of the upstream client,
+/// which showed `hw-laptop · anotify` where this client showed a bare `hw-laptop`:
+///
+/// 1. the workspace was looked up in the *selected* machine's list, so every other
+///    machine's rows had none;
+/// 2. the tokens were drawn at one `HStack` spacing, so even a complete row read as
+///    `machine workspace tab` instead of `machine · workspace`.
+@Suite("Agent row composition")
+struct AgentRowCompositionTests {
+    /// A snapshot with one workspace, optional tabs, and one agent in it.
+    private struct TabSpec {
+        var id: String
+        var number: Int
+        var label: String
+    }
+
+    private func snapshot(
+        workspaceLabel: String,
+        tabs: [TabSpec] = []
+    ) throws -> ClientShellSnapshot {
+        let tabList = tabs
+            .map { "{\"tab_id\": \"\($0.id)\", \"workspace_id\": \"w1\", "
+                + "\"number\": \($0.number), \"label\": \"\($0.label)\"}" }
+            .joined(separator: ",")
+        let json = """
+        {"boot_id": "boot", "revision": 1,
+         "workspaces": [{"workspace_id": "w1", "active_tab_id": "w1:t1",
+                         "new_workspace_cwd": "/tmp", "number": 1,
+                         "label": "\(workspaceLabel)", "custom_label": false,
+                         "focused": false, "tokens": []}],
+         "tabs": [\(tabList)], "panes": [],
+         "agents": [{"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
+                     "agent_status": "idle", "state_change_seq": 1, "focused": false}],
+         "agent_order": [], "commands": []}
+        """
+        return try JSONDecoder().decode(ClientShellSnapshot.self, from: Data(json.utf8))
+    }
+
+    @Test("an aggregated row resolves its workspace from its own machine")
+    func rowCarriesItsOwnWorkspace() throws {
+        let rows = AgentAggregation.rows(
+            [
+                AgentAggregationSource(
+                    endpointID: "a", label: "hw-laptop",
+                    isConnected: true,
+                    snapshot: try snapshot(workspaceLabel: "anotify")
+                ),
+                AgentAggregationSource(
+                    endpointID: "b", label: "host-workspace",
+                    isConnected: true,
+                    snapshot: try snapshot(workspaceLabel: "homer-cli")
+                ),
+            ],
+            activeEndpointID: "a"
+        )
+        #expect(rows.count == 2)
+        #expect(rows.first { $0.endpointID == "a" }?.workspace?.label == "anotify")
+        #expect(rows.first { $0.endpointID == "b" }?.workspace?.label == "homer-cli",
+                "the second machine's row lost its workspace")
+    }
+
+    /// Upstream shows the tab only when the workspace has several tabs or this one was
+    /// renamed (`agent_sidebar.rs:262-265`). Showing the default `1` everywhere was the
+    /// `homer-cli 1` in the screenshot.
+    @Test("a default single tab is not shown")
+    func defaultSingleTabHidden() throws {
+        let rows = AgentAggregation.rows(
+            [AgentAggregationSource(
+                endpointID: "a", label: "m",
+                isConnected: true,
+                snapshot: try snapshot(workspaceLabel: "w", tabs: [TabSpec(id: "w1:t1", number: 1, label: "1")])
+            )],
+            activeEndpointID: "a"
+        )
+        #expect(rows.first?.tab == nil)
+    }
+
+    @Test("a second tab is shown")
+    func secondTabShown() throws {
+        let rows = AgentAggregation.rows(
+            [AgentAggregationSource(
+                endpointID: "a", label: "m",
+                isConnected: true,
+                snapshot: try snapshot(workspaceLabel: "w", tabs: [
+                    TabSpec(id: "w1:t1", number: 1, label: "1"),
+                    TabSpec(id: "w1:t2", number: 2, label: "2"),
+                ])
+            )],
+            activeEndpointID: "a"
+        )
+        #expect(rows.first?.tab != nil)
+    }
+
+    // MARK: - Separators
+
+    private func token(_ kind: SidebarTokenKind) -> ResolvedToken {
+        ResolvedToken(text: "x", style: TokenStyle(), kind: kind)
+    }
+
+    /// A space after the state icon, ` · ` between words (`tokens.rs:184-191`).
+    @Test("a space follows the state icon")
+    func spaceAfterStateIcon() {
+        #expect(sidebarTokenSeparator(
+            before: token(.stateIcon), current: token(.machine)
+        ) == " ")
+    }
+
+    @Test("words are separated by a middle dot")
+    func dotBetweenWords() {
+        #expect(sidebarTokenSeparator(
+            before: token(.machine), current: token(.workspace)
+        ) == " · ")
+        #expect(sidebarTokenSeparator(
+            before: token(.workspace), current: token(.agent)
+        ) == " · ")
     }
 }
