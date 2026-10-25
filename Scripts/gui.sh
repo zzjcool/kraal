@@ -3949,27 +3949,17 @@ case_sidebar_sections() {
         }
     }
     assert() {
-        python3 - "$host_dir/ax.json" <<'PY' >"$host_dir/headings.txt" 2>&1
-import json, sys
-with open(sys.argv[1]) as handle:
-    tree = json.load(handle)
-found = {"spaces": False, "agents": False}
-for node in tree["nodes"]:
-    if node.get("role") != "AXStaticText":
-        continue
-    value = (node.get("value") or "").strip().lower()
-    frame = node.get("frame") or {}
-    # The sidebar is the leading 220 pt; anything wider is the terminal.
-    if "x" not in frame or frame["x"] > 260:
-        continue
-    if value in found:
-        found[value] = True
-print("spaces={} agents={}".format(int(found["spaces"]), int(found["agents"])))
-PY
-        read -r spaces agents <<<"$(sed 's/spaces=//; s/agents=//' "$host_dir/headings.txt")"
-        check "the sidebar shows both pane headings" \
-            "$([ "$spaces" = "1" ] && [ "$agents" = "1" ] && echo 0 || echo 1)" \
-            "$(cat "$host_dir/headings.txt")"
+        python3 "$ROOT/Scripts/sidebar-pane-headings.py" "$host_dir/ax.json" \
+            >"$host_dir/headings.txt" 2>&1 || true
+        local line
+        line=$(cat "$host_dir/headings.txt")
+        # Exactly one of the two top titles, and the agents pane beside it. "Both"
+        # would mean two panes claim the top slot; "neither" means the pane is not
+        # drawn at all.
+        check "the sidebar shows a top pane heading and the agents heading" \
+            "$(printf '%s' "$line" | grep -qcE '^top=(spaces|machines) agents=1$' \
+                && echo 0 || echo 1)" \
+            "$line"
     }
 }
 

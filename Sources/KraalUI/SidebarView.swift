@@ -181,12 +181,16 @@ struct SidebarView: View {
     @ViewBuilder
     private var workspacesSection: some View {
         let multi = store.endpoints.count > 1
-        // Always "spaces", even with several machines. Upstream's expanded sidebar
-        // titles this pane " spaces" unconditionally (`client/shell/sidebar.rs:218-226`);
-        // the per-machine listing lives *inside* the pane as group headers, which is
-        // what `machineRow` draws. "machines" as a title belongs to the collapsed
-        // narrow sidebar (`endpoint_sidebar.rs:15`), which is a different mode (#119).
-        sectionHeading("spaces")
+        // Upstream picks the title by machine count, and the two cases are
+        // different renderers, not one function with a conditional label
+        // (`render.rs:271-310`):
+        //
+        //   1 machine  -> `sidebar.rs:render_sidebar`          -> " spaces"
+        //   >1 machines -> `endpoint_sidebar.rs:render_expanded` -> " machines"
+        //
+        // A single machine has no machine row at all, so "machines" there would
+        // title a list that does not group anything.
+        sectionHeading(multi ? "machines" : "spaces")
         if multi {
             ForEach(store.endpoints, id: \.id) { endpoint in
                 machineRow(endpoint)
