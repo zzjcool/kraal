@@ -65,8 +65,23 @@ struct SidebarView: View {
                     ratio: sectionRatio
                 )
                 VStack(alignment: .leading, spacing: 0) {
-                    sectionScroll { workspacesSection }
-                        .frame(height: split.spaces, alignment: .top)
+                    // The footer belongs to the *spaces* pane, not to the sidebar:
+                    // upstream draws it at `workspace_area.bottom() - 1`
+                    // (`src/client/shell/sidebar.rs:379-381`), which is the bottom of
+                    // the top half. Putting it under both panes put `new` and `menu`
+                    // somewhere upstream never has them, and made them look like
+                    // sidebar-wide controls when they act on workspaces and the
+                    // client's own menu.
+                    VStack(alignment: .leading, spacing: 0) {
+                        sectionScroll { workspacesSection }
+                        Divider().opacity(0.4)
+                        SidebarFooterView(
+                            store: store,
+                            attention: footerAttention,
+                            collapse: { setCollapsed(true) }
+                        )
+                    }
+                    .frame(height: split.spaces, alignment: .top)
                     sectionDivider(totalHeight: proxy.size.height)
                     sectionScroll { agentsSection }
                         .frame(height: split.agents, alignment: .top)
@@ -76,12 +91,6 @@ struct SidebarView: View {
                     lastMeasuredHeight = height
                 }
             }
-            Divider().opacity(0.4)
-            SidebarFooterView(
-                store: store,
-                attention: footerAttention,
-                collapse: { setCollapsed(true) }
-            )
         }
         .frame(width: KraalTheme.sidebarWidth)
         // A real `NSVisualEffectView` sidebar, not SwiftUI's `.thinMaterial`: the

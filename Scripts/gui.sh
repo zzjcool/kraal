@@ -4385,10 +4385,11 @@ case_sidebar_footer_controls() {
             return 1
         }
         herdr workspace list >"$host_dir/ws-before.json" 2>/dev/null || true
-        driver press --id "sidebar.footer.new" >"$host_dir/press.txt" 2>&1 || {
-            echo "cannot press the new-workspace control"
-            return 1
-        }
+        # A press failure is recorded rather than aborting: when the footer is
+        # misplaced the control can end up outside the window, and aborting would
+        # report "cannot press" while hiding the geometric evidence the case exists
+        # to produce.
+        driver press --id "sidebar.footer.new" >"$host_dir/press.txt" 2>&1 || true
         sleep 2
         herdr workspace list >"$host_dir/ws-after.json" 2>/dev/null || true
     }
@@ -4410,6 +4411,20 @@ case_sidebar_footer_controls() {
         check "new created a workspace" \
             "$([ "$count_after" -gt "$count_before" ] && echo 0 || echo 1)" \
             "workspaces ${count_before} -> ${count_after}"
+
+        # The controls belong to the spaces pane, not to the sidebar's bottom edge:
+        # upstream puts them at `workspace_area.bottom() - 1`
+        # (`sidebar.rs:379-381`). Measured against the divider, because both
+        # placements look reasonable until you see which side of it the row is on.
+        local placed
+        if python3 "$ROOT/Scripts/sidebar-footer-above-divider.py" \
+            "$host_dir/ax-before.json" >"$host_dir/footer-place.txt" 2>&1; then
+            placed=0
+        else
+            placed=1
+        fi
+        check "the footer sits inside the spaces pane, above the divider" "$placed" \
+            "$(cat "$host_dir/footer-place.txt")"
     }
 }
 
