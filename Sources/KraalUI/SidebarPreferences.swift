@@ -69,6 +69,38 @@ public enum SidebarPreferences {
         storedSplit(in: defaults) ?? SidebarSections.defaultRatio
     }
 
+    // MARK: - Collapsed sidebar
+
+    /// Whether the sidebar is collapsed to a narrow strip.
+    ///
+    /// Upstream keeps `sidebar_collapsed` plus `sidebar_collapsed_manual`
+    /// (`src/client/shell/state.rs:872-873`); the `_manual` flag records that the
+    /// user chose this, so an automatic width rule cannot override them. Only the
+    /// user-facing flag is stored here: this client has no automatic collapse.
+    public static let collapsedKey = "kraal.sidebar.collapsed"
+
+    /// Whether the user has ever toggled it. `nil` means no preference, which is
+    /// different from "collapsed" — the same distinction `storedSplit` makes.
+    public static func storedCollapsed(
+        in defaults: UserDefaults = SidebarPreferences.defaults
+    ) -> Bool? {
+        guard defaults.object(forKey: collapsedKey) != nil else { return nil }
+        return defaults.bool(forKey: collapsedKey)
+    }
+
+    public static func storeCollapsed(
+        _ collapsed: Bool,
+        in defaults: UserDefaults = SidebarPreferences.defaults
+    ) {
+        defaults.set(collapsed, forKey: collapsedKey)
+    }
+
+    public static func initialCollapsed(
+        in defaults: UserDefaults = SidebarPreferences.defaults
+    ) -> Bool {
+        storedCollapsed(in: defaults) ?? false
+    }
+
     // MARK: - Agents pane ordering
 
     /// Mirror of upstream's `ClientChromePreferences.agent_panel_sort`
