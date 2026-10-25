@@ -71,6 +71,29 @@ extension AppStore {
         move(tabId: tabs[current].tabId, toIndex: target)
     }
 
+    /// Every machine's agents, in the pane's display order.
+    ///
+    /// Upstream lists all endpoints here, not just the active one, and carries the
+    /// machine label on each row (`src/client/shell/endpoint_agents.rs:132-174`).
+    /// The rules live in `AgentAggregation` so they can be tested without a live
+    /// connection.
+    public var aggregatedAgents: [AggregatedAgent] {
+        AgentAggregation.rows(
+            endpoints.compactMap { endpoint in
+                guard let snapshot = endpoint.snapshot else { return nil }
+                return AgentAggregationSource(
+                    endpointID: endpoint.id.storageKey,
+                    label: endpoint.label,
+                    isConnected: endpoint.isConnected,
+                    snapshot: snapshot
+                )
+            },
+            // `nil` when no machine is selected yet: then none of them is active, so
+            // every row's `focused` is cleared, which is the truthful answer.
+            activeEndpointID: activeEndpointID?.storageKey ?? ""
+        )
+    }
+
     public var agentsOrdered: [ClientShellAgent] {
         guard let snapshot else { return [] }
         let byPane = Dictionary(

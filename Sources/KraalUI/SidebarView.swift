@@ -360,8 +360,9 @@ struct SidebarView: View {
 
     private var agentsBody: some View {
         Group {
-            if !store.agentsOrdered.isEmpty {
-                ForEach(store.agentsOrdered) { agent in
+            if !store.aggregatedAgents.isEmpty {
+                ForEach(store.aggregatedAgents) { row in
+                    let agent = row.agent
                     AgentRowView(
                         agent: agent,
                         workspace: store.workspaces.first {
@@ -369,11 +370,29 @@ struct SidebarView: View {
                         },
                         tab: store.tabs.first { $0.tabId == agent.tabId },
                         layout: store.sidebarLayout,
-                        machineName: machineName,
+                        // Each row names its *own* machine, not the active one: the
+                        // pane lists every machine, so `machineName` (which describes
+                        // the connection) would label every row with whatever
+                        // machine happens to be selected.
+                        machineName: row.machineLabel,
                         multiMachine: store.endpoints.count > 1
                     )
+                    .opacity(row.stale ? 0.5 : 1)
                     .contentShape(Rectangle())
-                    .onTapGesture { store.focus(paneId: agent.paneId) }
+                    .onTapGesture {
+                        // A row on another machine has to switch first: `focus` acts
+                        // on the selected machine's pane ids, and those are not
+                        // unique across machines — the other daemon also has a
+                        // `w1:p1`. Same two-step as a workspace row on another
+                        // machine.
+                        if let target = store.endpoints.first(where: {
+                            $0.id.storageKey == row.endpointID
+                        }), target.id != store.activeEndpointID {
+                            store.selectEndpoint(target)
+                        } else {
+                            store.focus(paneId: agent.paneId)
+                        }
+                    }
                     .contextMenu {
                         PaneContextMenu(prompt: $prompt, paneId: agent.paneId)
                     }
