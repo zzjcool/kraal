@@ -43,6 +43,14 @@ public struct SurfaceANSIRenderer {
 
     public init() {}
 
+    /// `ED3` too: see `render(_:clearingFirst:)`.
+    ///
+    /// Internal rather than private so the callers that own a terminal's reset
+    /// decision share one spelling with the renderer that emits it — a second
+    /// literal in `PaneTerminal` is how the erase ended up outside the
+    /// synchronized block in the first place.
+    static let eraseEverythingSequence = "\u{1B}[2J\u{1B}[3J\u{1B}[H"
+
     /// Resets so the next `render` emits a full repaint **and clears the screen**.
     ///
     /// Both are right after a dropped or rejected frame: the terminal may be
@@ -63,8 +71,26 @@ public struct SurfaceANSIRenderer {
     /// Returns the ANSI bytes that bring a terminal from the previous frame to
     /// `frame`, or a full repaint when there is no previous frame.
     public mutating func render(_ frame: FrameData) -> Data {
-        var output = Data()
-        // Three separate questions, deliberately kept separate. Collapsing them
+        render(frame, clearingFirst: false)
+    }
+
+    /// The same render, optionally preceded by an erase **inside the same
+    /// synchronized-output block**.
+    ///
+    /// `clearingFirst` is for the caller that already knows the terminal's grid
+    /// cannot be trusted (a resize, a re-projection, a restarted delta stream).
+    /// Such a caller used to write the erase with its own `session.receive(...)`
+    /// and then render — two flushes, and the erase sat *outside* the `?2026h`
+    /// pair below. Ghostty applies a flush when it arrives, so the surface was
+    /// composited empty between the two: dragging a split divider (one erase per
+    /// cell the grid crosses) painted a blank flash on every cell.
+    ///
+    /// Erasing here keeps the whole thing atomic: the terminal sees erase + full
+    /// repaint as one synchronized update and never shows the empty intermediate
+    /// state. It also removes the possibility of a caller erasing and then not
+    /// painting at all.
+    public mutating func render(_ frame: FrameData, clearingFirst: Bool) -> Data {
+        var output = Data()        // Three separate questions, deliberately kept separate. Collapsing them
         // into one flag is what made a resize clear the scrollback.
         //
         //   repaintAll — is the diff trustworthy? A different grid size means no
@@ -78,7 +104,12 @@ public struct SurfaceANSIRenderer {
         let repaintAll = firstFrame
             || previous?.width != frame.width
             || previous?.height != frame.height
-        let clear = firstFrame
+        // A caller asking for an erase has already thrown the baseline away, so
+        // this frame is a full repaint whatever `previous` says. Cheap to state
+        // and it removes an ordering footgun: `clearingFirst` with a stale
+        // `previous` would otherwise diff against cells that are about to go.
+        let repaintEverything = repaintAll || clearingFirst
+        let clear = firstFrame || clearingFirst
 
         // Synchronized output keeps the terminal from painting a half-built
         // screen. Every frame gets it, not just full ones: a diff writes several
@@ -93,12 +124,23 @@ public struct SurfaceANSIRenderer {
         // and a diff that touches three rows has the same three intermediate
         // positions a full repaint does.
         output.appendUTF8("\u{1B}[?25l")
-        if clear {
+        if clearingFirst {
+            // Erase the whole screen **and** the scrollback, then home the cursor.
+            //
+            // Different from the `clear` below on purpose: `clear` is "this pane
+            // has never painted, so stale bytes must go" and keeps the
+            // scrollback, while `clearingFirst` is "the rows on screen were
+            // written at a width or in a stream that no longer exists". Those rows
+            // are in the scrollback too, and an incremental repaint only revisits
+            // rows that changed, so leaving them behind is a permanently skewed
+            // history.
+            output.appendUTF8(SurfaceANSIRenderer.eraseEverythingSequence)
+        } else if clear {
             output.appendUTF8("\u{1B}[2J")
         }
 
         var stream = RowStream()
-        let rows = repaintAll ? Array(0 ..< Int(frame.height)) : changedRows(frame)
+        let rows = repaintEverything ? Array(0 ..< Int(frame.height)) : changedRows(frame)
         for row in rows {
             appendRow(row, frame: frame, stream: &stream, output: &output)
         }

@@ -89,11 +89,27 @@ public final class PaneTerminalModel {
     /// alone cannot say whether the reset ran.
     private(set) var screenResetCount = 0
 
-    /// Clears the visible screen and the scrollback, then homes the cursor.
+    /// How many times the terminal has been handed bytes.
     ///
-    /// Both are needed: a repaint at the wrong width leaves rows in scrollback
-    /// that a later incremental render never revisits.
-    private let clearScreenSequence = "\u{1B}[2J\u{1B}[3J\u{1B}[H"
+    /// One write per visible change is what makes a divider drag smooth: the erase
+    /// and the repaint travel together inside one synchronized-output block, so
+    /// the terminal has no turn in which the screen is empty. Two writes per reset
+    /// (the old shape) was exactly the blank frame between them.
+    ///
+    /// Counted here rather than inferred by a test: `swift test` has no Ghostty
+    /// surface, and the GUI case can only read what the app logs.
+    private(set) var paintCount = 0
+    /// Writes that carried an erase together with their repaint.
+    ///
+    /// Not the same count as `screenResetCount`, and the difference is the point:
+    /// a model can decide a reset is needed, fail to paint at a trustworthy grid
+    /// (`grid mismatch`) and park the frame instead. That path calls
+    /// `resetSurfaces()` *without* writing an erase — erasing there would blank a
+    /// pane that has nothing to paint yet, which is the same flash with no repaint
+    /// after it. So the invariant is per **write**: every write either erases and
+    /// repaints together, or does neither.
+    private(set) var eraseWrites = 0
+
     /// Set when a frame was rejected because the terminal's grid did not match
     /// it. The stale rows are still in the terminal's scrollback, and an
     /// incremental repaint only touches rows that changed — so the skew survives
@@ -146,10 +162,9 @@ public final class PaneTerminalModel {
             return
         }
         pendingFrame = nil
-        session.receive(Data(clearScreenSequence.utf8))
-        let painted = renderer.render(frame)
+        let painted = renderer.render(frame, clearingFirst: true)
         logPopupFrame(frame: frame, revision: revision, painted: painted, scene: scene)
-        session.receive(painted)
+        deliver(painted)
     }
 
     /// The grid this pane actually paints, which is **not** `surface.frame`.
@@ -234,8 +249,18 @@ public final class PaneTerminalModel {
             // The pane's grid, not the surface's — see `paneGrid`.
             currentGrid: Self.paneGrid(geometry)
         )
-        if resetNeeded {
+        // A clean repaint was requested by an earlier frame that could not be
+        // painted at a trustworthy grid. It is a reset for the same reason a
+        // changed grid is: the rows on screen were written at the wrong width.
+        let cleanRepaint = needsCleanRepaint
+        let eraseBeforePaint = resetNeeded || cleanRepaint
+        if eraseBeforePaint {
             screenResetCount += 1
+            // Runs **before** `paneFrame` below for every path that erases, not
+            // just the `resetNeeded` one. `GraphicsEncoder` is stateful: encoding
+            // against a cache that still believes the image is on screen yields
+            // zero bytes, and the erase that follows then takes the picture with
+            // nothing to put it back. That is #101 review's "gone permanently".
             resetSurfaces()
         }
         let frame = paneFrame(from: surface, geometry: geometry)
@@ -281,26 +306,17 @@ public final class PaneTerminalModel {
                 + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
                 + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
         }
-        if resetNeeded {
-            // Revisions going backwards means this pane's delta stream restarted:
-            // the daemon began a fresh projection (a tab switch, a reconnect, a
-            // new boot) and renumbered from scratch. The renderer still holds the
-            // old stream's state, so a delta would paint onto a baseline that no
-            // longer exists. Wipe and take this frame whole.
+        if eraseBeforePaint {
+            // The erase is **not** written here. It travels inside
+            // `renderer.render(_:clearingFirst:)`'s synchronized-output block so
+            // the terminal never composites the space between erase and repaint.
             //
-            // A changed *grid* lands here too, and only a changed grid. This used
-            // to be `frameGrid != frame`, a whole-frame comparison that also
-            // included the cursor: dropping the cursor one row made the frames
-            // unequal, so pressing Return erased the screen and scrollback and
-            // repainted every row — the visible flicker. Comparing sizes keeps
-            // the reset for the case that actually needs it (the old rows are the
-            // wrong width, so incremental repainting would leave them behind) and
-            // lets a cursor move or fresh text go out as a delta.
-            //
-            // `resetSurfaces()` already ran above, *before* the encode, so this
-            // frame's graphics were computed against an empty cache and therefore
-            // re-send the image the `2J` is about to erase.
-            session.receive(Data(clearScreenSequence.utf8))
+            // Written here instead — one `session.receive` for the clear, a second
+            // for the repaint — the surface was shown empty in between, and a split
+            // divider changes the grid on nearly every drag event, so the flash
+            // repeated all the way across. Returns above this point (a parked
+            // frame, a grid mismatch) used to erase and then return without
+            // painting at all, which is the same flash with no repaint to follow.
             needsCleanRepaint = false
         }
         lastRevision = geometry.contentRevision
@@ -358,18 +374,52 @@ public final class PaneTerminalModel {
         }
 
         if needsCleanRepaint {
-            // The grid is trustworthy again: wipe the screen and scrollback so
-            // the rows written at the wrong width cannot reappear, then paint the
-            // whole frame instead of a delta.
+            // Reached only when the grid became trustworthy *between* the reset
+            // decision at the top of this call and here, which cannot happen: the
+            // flag is folded into `eraseBeforePaint` above. Kept as an explicit
+            // clear so a future edit cannot leave the flag stuck on.
             needsCleanRepaint = false
-            resetSurfaces()
-            session.receive(Data(clearScreenSequence.utf8))
         }
 
-        let painted = renderer.render(frame)
+        let painted = renderer.render(frame, clearingFirst: eraseBeforePaint)
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: surface.graphics.assets.count,
                     placements: surface.graphics.placements.count)
+        deliver(painted)
+    }
+
+    /// Hands one painted frame to the terminal, and records that it was one write.
+    ///
+    /// Split out of `apply(surface:)` only to keep that function within
+    /// swiftlint's body limit; the accounting and the log line belong together.
+    ///
+    /// The one place a painted buffer reaches the terminal.
+    ///
+    /// Every classification the GUI case reads is derived from **the bytes actually
+    /// written**, not from a caller-supplied flag. That is deliberate: it is what
+    /// makes the assertion able to catch the defect it was written for. An earlier
+    /// version took `erasing:` from the caller, so a regression that wrote the erase
+    /// as its own `session.receive` — the exact shape of the flash — still logged
+    /// `erase=0, eraseWrites>0, paints>eraseWrites`, and a "no erase escaped its
+    /// repaint" check passed on it. Verified by injection: routing the erase back
+    /// outside gives `erases=0` here and the case goes red.
+    private func deliver(_ painted: Data) {
+        paintCount += 1
+        // The clear pair this app erases with: `ED2` + `ED3` + cursor home.
+        let carriesErase = painted.range(of: Data("\u{1B}[2J".utf8)) != nil
+        // "Cells" means *row writes*: a cursor-position sequence `CSI <row>;1H`.
+        // Matching a bare `H` was wrong and it mattered — the erase sequence itself
+        // ends in `H` (`ESC[H` homes the cursor), so an 11-byte "erase and nothing
+        // else" write was classified as carrying cells, and the case passed on the
+        // exact defect it was written for. Verified by injection.
+        let carriesCells = painted.range(of: Data(";1H".utf8)) != nil
+        if carriesErase { eraseWrites += 1 }
+        // Logged for every write, so `grep -c paint:` *is* the write count and the
+        // GUI case can compare it against the erase count.
+        kraalLog("paint: pane=\(paneId) erase=\(carriesErase ? 1 : 0) "
+            + "cells=\(carriesCells ? 1 : 0) "
+            + "eraseWrites=\(eraseWrites) resets=\(screenResetCount) "
+            + "paints=\(paintCount) bytes=\(painted.count)")
         session.receive(painted)
     }
 
@@ -414,13 +464,13 @@ public final class PaneTerminalModel {
         lastRevision = 0
         frameGrid = nil
         resetSurfaces()
-        let clear = Data(clearScreenSequence.utf8)
-        let painted = renderer.render(frame)
+        // One flush, erase inside the synchronized block — the same reasoning as
+        // `apply(surface:)`. A parked frame is routinely the one that carries a new
+        // grid (that is why it was parked), so this is the resize path too.
+        let painted = renderer.render(frame, clearingFirst: true)
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: 0, placements: 0)
-
-        session.receive(clear)
-        session.receive(painted)
+        deliver(painted)
         lastRevision = 0
         frameGrid = frame
 

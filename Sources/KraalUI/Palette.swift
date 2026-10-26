@@ -203,6 +203,54 @@ public extension Palette {
     var surface0Color: Color { color(surface0, fallback: .clear) }
     var surface1Color: Color { color(surface1, fallback: .clear) }
     var separatorColor: Color { color(surfaceDim, fallback: Color(nsColor: .separatorColor)) }
+
+    /// The fill of the whole band a split divider sits in — the seam between two panes.
+    ///
+    /// `surface_dim` is the theme's "very dim surface, for separators" role, which is
+    /// exactly this. A theme that leaves it unset may still name its surfaces, so
+    /// `panel_background` is the next best answer: the gap belongs to the chrome, not
+    /// to the terminal.
+    ///
+    /// The last fallback is `.clear`, **not** a platform colour, and that is the whole
+    /// reason this accessor exists. `Color(nsColor: .separatorColor)` and
+    /// `Color.secondary` describe the *system* appearance; the panes do not follow it.
+    /// A light-mode Mac running a dark theme got a `(223,223,223)` band between two
+    /// `(17,20,25)` panes — that is `.secondary` at 0.25 over a white
+    /// `textBackgroundColor` — so the one piece of chrome that touches terminal content
+    /// was the one piece the theme could not reach. `.clear` says "the theme has no
+    /// opinion", which leaves the container's own background showing and matches what
+    /// every other `nil` token in this type means.
+    var paneGapColor: Color {
+        color(surfaceDim, fallback: color(panelBackground, fallback: .clear))
+    }
+
+    /// The 1pt line down the middle of a split divider.
+    ///
+    /// `surface0` is the theme's "subtle surface" step, one notch up from the band it
+    /// is drawn on, which is what makes the seam readable without a platform colour.
+    ///
+    /// `.clear` when the theme names no surface, for the same reason as
+    /// ``paneGapColor``: the platform's separator is drawn for the system appearance,
+    /// and a dark-theme terminal on a light Mac then gets a bright hairline running
+    /// through its own colours. "No opinion" means the band alone is the seam.
+    var paneGapLineColor: Color { color(surface0, fallback: .clear) }
+
+    /// The fill of a pane's border cell — the ring the daemon reserves outside
+    /// `innerRect`.
+    ///
+    /// It must match what the pane's *content* is drawn on, because the border is
+    /// continuous with it: a different colour there reads as a one-row blank band
+    /// above and below every pane. That is the defect this token exists for, and it
+    /// became visible only once the container got a themed tint — before that the
+    /// border and the container happened to be the same platform colour.
+    ///
+    /// `panel_background` first: it is the theme's own chrome surface and the closest
+    /// thing to "the surface a pane sits on". `.clear` last, which leaves the
+    /// container behind it, i.e. `paneGapColor` — the seam's colour, which is what a
+    /// caller with no better information would pick anyway.
+    var paneSurfaceColor: Color {
+        color(panelBackground, fallback: color(surfaceDim, fallback: .clear))
+    }
     var mutedColor: Color { color(overlay0, fallback: .secondary) }
     var mutedStrongColor: Color { color(overlay1, fallback: .secondary) }
     var textColor: Color { color(text, fallback: .primary) }

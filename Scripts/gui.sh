@@ -1177,6 +1177,13 @@ print(splits[0]["direction"])
 }
 
 # Split Down: proves the direction is honoured rather than hard-coded.
+# Pins the theme, like `case_drag_divider_app_setup`: the divider assertion below
+# compares against `paneGapColor`, which only means something if the theme is known.
+case_split_down_app_setup() {
+    theme_write_config "gruvbox"
+    return 0
+}
+
 case_split_down() {
     requires() { echo ax; }
     fixture() {
@@ -1212,7 +1219,190 @@ if problems:
 print(f"direction=down heights={heights}")
 ')
         check "split-down stacks two equal rows" "$?" "$geometry"
+        # The user's report was a **horizontal** band between two stacked panes, which
+        # is this case's geometry (`direction: down` -> a `.vertical` divider line).
+        # The colour fix is one `.fill` and therefore direction-agnostic, but "no pane
+        # has a bright bar across it" is the claim that was actually made, and it is
+        # cheap to assert on the shape it was reported in.
+        check_horizontal_divider_colour
+        check_border_rows || return 1
     }
+}
+
+# The rows the daemon reserves as a pane border must not show the container behind them.
+#
+# The defect: `pane.rect` includes a border cell, `pane.innerRect` is the content, and
+# only the latter had a view. So the border cells fell through to the container's own
+# background. That was invisible while the container was the system's
+# `textBackgroundColor` and the panes' chrome matched it; it became a visible one-row
+# band above and below every pane once the container got a themed tint.
+#
+# Measured on a live split (`grid=119x36`):
+#   panes = p1 116x16@1,1 and p2 116x16@1,19   divider hit = 119x2@0,17
+#   -> rows 1..16 and 19..34 are panes, 17..18 are the divider, and rows 0 and 35
+#      belong to nobody. One full cell each at 18pt.
+#
+# The assertion is "no full-width row of the container's gap colour remains": after the
+# fix every row of the grid is painted by either a pane, the divider, or a pane border.
+check_border_rows() {
+    local shot="$VM_ROOT/border-rows.png" out verdict
+    if ! driver shot -o "$shot" >"$host_dir/shot-border.txt" 2>&1; then
+        check "no unpainted border row above or below the panes" 1 \
+            "screenshot failed: $(cat "$host_dir/shot-border.txt")"
+        return 1
+    fi
+    local container_w container_h window_w sidebar_w band_w
+    read -r container_w container_h <<EOF
+$(container_size)
+EOF
+    [ -n "${container_h:-}" ] || {
+        check "no unpainted border row above or below the panes" 1 "cannot read the container size"
+        return 1
+    }
+    window_w=$(driver window | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+    sidebar_w=$((window_w - container_w))
+    band_w=$((container_w - 120))
+    # Sweep every row of the container and collect the rows that are entirely the
+    # container's gap colour. Before the fix that set is exactly {row 0, row 35}; after
+    # it, empty.
+    # The container's own rows, in the screenshot's coordinates. `driver shot` captures
+    # the *window*, and the app reports where the container starts inside it
+    # (`containerOrigin=X,Y` in the `layout:` line), so the sweep has to start there —
+    # otherwise the tab bar above it is measured too, and the tab bar legitimately *is*
+    # the gap colour. That off-by-a-region made the first run report 92 rows.
+    local layout container_oy
+    layout=$(grep -o 'layout: container=.*' "$host_dir/kraal.log" 2>/dev/null | tail -1)
+    container_oy=$(printf '%s' "$layout" | sed -n 's/.*containerOrigin=-*[0-9]*,\(-*[0-9]*\).*/\1/p')
+    [ -n "$container_oy" ] || {
+        check "no unpainted border row above or below the panes" 1 "cannot read the container origin"
+        return 1
+    }
+    # Sweep the container's rows and record which ones are *entirely* the gap
+    # colour. Before the fix the answer is "every strip outside the grid": the top
+    # and bottom edges (the centred grid leaves ~8pt each) plus each pane's border
+    # cell. After it, the only such rows are the divider's own band.
+    local gap_rows="" y
+    for ((y = container_oy + 2; y < container_oy + container_h - 2; y++)); do
+        out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $y $band_w 1" \
+            --match "$DIVIDER_MATCH" 2>&1)
+        local n
+        n=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+        [ -z "$n" ] && continue
+        [ "$n" -ge "$((band_w * 19 / 20))" ] && gap_rows="$gap_rows $y"
+    done
+    local verdict
+    verdict=$(python3 - "$gap_rows" "$container_h" <<'PY_BORDER'
+import sys
+rows = [int(v) for v in sys.argv[1].split()]
+# The divider is a band with a 1pt hairline down its middle, so the band itself
+# arrives as two runs separated by that line. Treat gaps of up to 2 rows as the
+# same band rather than as an unpainted strip.
+RIDGE = 2
+# The divider's band is the one run of gap-coloured rows that is allowed to exist,
+# and it is a single contiguous run. Anything else is an unpainted strip: the
+# container's own background showing through where neither a pane nor the divider
+# has a view.
+runs, start, prev = [], None, None
+for r in rows:
+    if start is None:
+        start = prev = r
+    elif r - prev <= 1 + RIDGE:
+        prev = r
+    else:
+        runs.append((start, prev))
+        start = prev = r
+if start is not None:
+    runs.append((start, prev))
+longest = max((b - a + 1 for a, b in runs), default=0)
+stray = [r for a, b in runs if b - a + 1 != longest for r in (a, b)]
+if len(runs) > 1 or longest < 2:
+    print(
+        f"{len(runs)} gap-coloured band(s) {[(a, b) for a, b in runs]}; "
+        "only the divider's own band may be unpainted"
+    )
+    raise SystemExit(1)
+print(f"one gap-coloured band at rows {runs[0][0]}..{runs[0][1]} (the divider)")
+PY_BORDER
+)
+    check "no unpainted border row above or below the panes" "$?" "$verdict"
+}
+
+# The divider of a stacked split, as pixels.
+#
+# The user's report was a **horizontal** band between two stacked panes, which is this
+# case's geometry. The colour fix is a single `.fill` and therefore direction-agnostic,
+# but "no pane has a bright bar across it" is the claim that was actually made and it is
+# cheap to assert in the shape it was reported in.
+#
+# The band's position comes from the app's own `layout:` line, not from arithmetic on
+# `pos`: that line already carries `containerOrigin` (in window points) and each pane's
+# rendered rectangle in points. Deriving it instead is the 25pt mistake issue #103
+# records — `window_h - container_h` also counts the status bar and the bottom gap.
+check_horizontal_divider_colour() {
+    local shot="$VM_ROOT/divider-down.png" out count
+    if ! driver shot -o "$shot" >"$host_dir/shot-divider-down.txt" 2>&1; then
+        check "the stacked divider is themed" 1 \
+            "screenshot failed: $(cat "$host_dir/shot-divider-down.txt")"
+        return 1
+    fi
+    # The band is **found**, not computed.
+    #
+    # Every coordinate-based attempt here was wrong by a different amount: the app's
+    # `containerOrigin` is in window points, `driver shot` produces a window image, and
+    # the status bar plus title bar move the two apart by ~26pt — the class of error
+    # issue #103 recorded (`window_h - container_h` was off by 25pt). Deriving the
+    # divider's row from `pos`, cells and the container height reintroduced exactly
+    # that. Scanning asks the only question that matters for a colour assertion: is
+    # there a full-width horizontal band painted in the theme's gap colour?
+    local container_w container_h
+    read -r container_w container_h <<EOF
+$(container_size)
+EOF
+    [ -n "${container_h:-}" ] || {
+        check "the stacked divider is themed" 1 "cannot read the container size"
+        return 1
+    }
+    # The container starts where the sidebar ends, and the band must span the
+    # container — sampling from x=0 rules out nothing and found 0% because the first
+    # ~230pt are the sidebar. Measured: from x=230 a row is 900/900, from x=80 it is
+    # 658/800 (the sidebar's own colours are not the theme's gap colour).
+    local window_w sidebar_w band_w
+    window_w=$(driver window | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+    sidebar_w=$((window_w - container_w))
+    band_w=$((container_w - 120))
+    # Scan only the container's own vertical band, and skip its first rows too: the
+    # rows above the container (tab bar, the window's own background) can be the same
+    # colour as the theme's gap, and the first version broke on `y=38` — a row of the
+    # tab bar — then reported "rows 38 and 39 are the theme's gap colour" for a split
+    # that is actually at y=385. Measured: the real band is at 385/390 in this window,
+    # and y=38 matches too, so "the first full-width themed row" is not the divider.
+    local found="" y first last
+    first=$((container_h / 2))
+    last=$((container_h - 8))
+    for ((y = first; y < last; y++)); do
+        out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $y $band_w 1" \
+            --match "$DIVIDER_MATCH" 2>&1)
+        count=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+        [ -z "$count" ] && continue
+        # A whole row, not a few pixels: a hairline or one tinted cell is not a band.
+        if [ "$count" -ge "$((band_w * 9 / 10))" ]; then
+            found=$y
+            break
+        fi
+    done
+    if [ -z "$found" ]; then
+        check "the stacked divider is themed" 1 \
+            "no full-width row of the theme's gap colour anywhere in the window"
+        return 1
+    fi
+    # Two rows check it is a band (2 cells) rather than one antialiased line.
+    out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $((found + 1)) $band_w 1" \
+        --match "$DIVIDER_MATCH" 2>&1)
+    local second
+    second=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+    check "the stacked divider is themed" \
+        "$([ -n "$second" ] && [ "$second" -ge "$((band_w * 9 / 10))" ] && echo 0 || echo 1)" \
+        "rows $found and $((found + 1)) are the theme's gap colour at y=$found"
 }
 
 # Close Pane via the menu bar: the inverse of split, and the first case that has
@@ -1907,7 +2097,34 @@ print(",".join(sorted(w["workspace_id"] for w in workspaces if w["focused"])))
 # It is also the reason the backend defaults to `vm`: a drag is a synthetic mouse
 # event, so it needs the app frontmost and moves the real pointer. On `local` this
 # would take the pointer away from whoever is working.
+# Pins the theme this case asserts against.
+#
+# `gruvbox` on purpose: its `surface_dim` is 0x282828 = (40,40,40), a dark grey, while
+# the reported bug drew `Color.secondary` over a white `textBackgroundColor` and
+# measured (223,223,223). Those two are far enough apart that a pixel count separates
+# them cleanly, which is what makes this a measurable claim rather than a preference.
+#
+# It is a *pre-start* hook because the client resolves the theme once at launch; a
+# config written inside `action` would arrive too late.
+# gruvbox's `surface_dim` is 0x282828 = (40,40,40), and `paneGapColor` resolves to
+# exactly that. Matching the exact colour — not "is it dark" — is what gives this
+# assertion any power: a brightness threshold passed on the *bug* as well, because
+# `Color.secondary` is dark too under a dark system appearance. Measured: 800/800
+# pixels at (40,40,40) with the fix, 200/800 with `Color.secondary` injected.
+# shellcheck disable=SC2034 # DIVIDER_MATCH is read by check_divider_colour, later in the same shell.
+DIVIDER_MATCH="r>36,r<44,g>36,g<44,b>36,b<44"
+case_drag_divider_app_setup() {
+    theme_write_config "gruvbox"
+    return 0
+}
+
+# The theme is pinned by `case_drag_divider_app_setup` below, because the client
+# resolves it once at launch and this case asserts the divider follows it. Without
+# pinning, the case inherited whatever theme the *previous* case wrote — observed:
+# `theme-applied` left `gruvbox-light` behind, so this case ran against a light theme
+# and the "divider is not the system grey" threshold was measuring the wrong thing.
 case_drag_divider() {
+    :
     requires() { echo focus; }
     fixture() {
         if [ "$(pane_count)" = "0" ]; then
@@ -1980,6 +2197,16 @@ EOF
         # nudge is broken in the same way a stuck one is.
         printf '%s' "$coords" > "$host_dir/ratio-before.txt"
         printf '%s' "$container_w" > "$host_dir/container-width.txt"
+        # Remember where the divider sits, for the colour assertion. It moves during
+        # the drag, so the *pre-drag* position is the only one the screenshot at the
+        # end of `action` cannot see.
+        # Window origin too: `driver shot` produces a *window* image, while the
+        # divider position above is in screen points. The screenshot's pixel reader
+        # wants `--origin` for exactly this (see `regionOfInterest` in Pixels.swift),
+        # and omitting it reports a clamped rect rather than silently measuring the
+        # wrong band — which is how the first version of this assertion was caught.
+        printf '%s,%s,%s,%s,%s' "$divider_x" "$divider_y" "$container_h" \
+            "$origin_x" "$origin_y" > "$host_dir/divider-at.txt"
     }
     assert() {
         local before after
@@ -2024,8 +2251,147 @@ if abs(after - expected) > 0.06:
     raise SystemExit(1)
 print(f'ratio {before:.3f} -> {after:.3f} (expected ~{expected:.3f}, error {after - expected:+.3f})')
 ")
-        check "dragging the divider moves the ratio by the dragged distance" "$?" "$verdict"
+        check "dragging the divider moves the ratio by the dragged distance" "$?" "$verdict" || return 1
+
+        # Two things the ratio cannot see, both reported by the user:
+        #   "两个 panel 中间的白条很碍眼，颜色和主题不对"
+        #   "多动白条会闪屏"
+        #
+        # 1. The divider must be painted in the *theme's* colour, not the system
+        #    appearance's. `Color.secondary` at 0.25 over a white
+        #    `textBackgroundColor` measured (223,223,223) between two (17,20,25)
+        #    panes — a bright bar down a dark terminal.
+        # 2. Every screen reset must have been carried in the *same* write as its
+        #    repaint. Two writes is what produced the blank frame.
+        check_divider_colour || return 1
+        check_atomic_paints
     }
+}
+
+# The divider's pixels, from the app's own screenshot.
+#
+# Reads a one-point column down the middle of where the divider sat before the drag,
+# and counts pixels bright enough to be the *system* separator. The claim is narrow
+# on purpose: a themed divider sits on the theme's `surface_dim` (gruvbox: 0x282828 =
+# (40,40,40)), while the bug drew `Color.secondary` over a white
+# `textBackgroundColor`, measured (223,223,223). Counting bright pixels separates the
+# two without pinning an exact RGB, which would break the moment the user's theme
+# changes — and the user's theme is the thing this asserts follows.
+check_divider_colour() {
+    local at y h origin_x origin_y
+    at=$(cat "$host_dir/divider-at.txt" 2>/dev/null)
+    [ -n "$at" ] || { check "the divider is themed" 1 "no divider position recorded"; return 1; }
+    # `x` is the *pre-drag* position and is deliberately not used: see `after_x`.
+    IFS=',' read -r _ y h origin_x origin_y <<EOF
+$at
+EOF
+    [ -n "${origin_y:-}" ] || { check "the divider is themed" 1 "no window origin recorded"; return 1; }
+    # The divider moved during the drag, so its post-drag position has to come from
+    # the daemon. Sampling where it *was* measured the pane's own cells and reported
+    # 56/584 — a true reading of the wrong place.
+    local ratio after_x
+    ratio=$(pane_layout | layout_check '
+import json, sys
+print(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"])
+')
+    # The container starts where the sidebar ends; its width is what the app logged.
+    local container_w window_w sidebar_w
+    container_w=$(cat "$host_dir/container-width.txt" 2>/dev/null)
+    window_w=$(driver window | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+    [ -n "$ratio" ] && [ -n "$container_w" ] || {
+        check "the divider is painted in the theme's colour" 1 "cannot read the post-drag layout"
+        return 1
+    }
+    sidebar_w=$((window_w - container_w))
+    after_x=$(python3 -c "print(int($origin_x + $sidebar_w + float('$ratio') * $container_w))")
+    # 1pt wide, taken through the middle of the divider's band. Inset from both ends
+    # so the panes' own content is not sampled.
+    local rect="$after_x $((y - h / 2 + 40)) 1 $((h - 80))"
+    # `driver` runs **inside the guest** under the vm backend, so the image has to be
+    # named with a guest path. Using `$host_dir` here compiled, ran, and silently
+    # measured nothing: the shot landed in a guest directory that does not exist, the
+    # pixel count parsed to empty (0), and "0 bright pixels" read as a pass. It took a
+    # deliberate injection to notice — the "检查通过可能只是检查没跑" failure from
+    # AGENTS.md §3.
+    local shot="$VM_ROOT/divider.png"
+    local out count
+    if ! driver shot -o "$shot" >"$host_dir/shot-divider.txt" 2>&1; then
+        check "the divider is painted in the theme's colour" 1 \
+            "screenshot failed: $(cat "$host_dir/shot-divider.txt")"
+        return 1
+    fi
+    # The theme's own gap colour, as the app resolved it: `DIVIDER_MATCH` is
+    # `paneGapColor`'s RGB for the theme this case pins (gruvbox `surface_dim`). The
+    # bug drew `Color.secondary` over a white `textBackgroundColor` — (223,223,223)
+    # under a light system appearance and a dark grey under a dark one, which is why
+    # "how bright is it" cannot distinguish them and an exact colour can.
+    out=$(driver pixels --in "$shot" --rect "$rect" --origin "$origin_x $origin_y" \
+        --match "$DIVIDER_MATCH" 2>&1)
+    count=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+    # An unparsed count is a harness failure, not zero matching pixels. Without this
+    # the assertion cannot fail for the reason it exists.
+    if [ -z "$count" ]; then
+        check "the divider is painted in the theme's colour" 1 "unreadable pixel count: $out"
+        return 1
+    fi
+    local band=$((h - 80)) verdict
+    verdict=$(python3 - "$band" "$count" <<'PY_PIXELS'
+import sys
+band, count = int(sys.argv[1]), int(sys.argv[2])
+if band <= 0:
+    print(f"the divider band measured {band}pt, so this asserts nothing")
+    raise SystemExit(1)
+# Nearly the whole band, because the divider is a flat fill of one colour and the
+# sample column deliberately avoids the hairline.
+if count < band * 0.9:
+    print(f"only {count}/{band} pixels are the theme's gap colour: "
+          f"the divider is drawing something else")
+    raise SystemExit(1)
+print(f"{count}/{band} pixels are the theme's gap colour")
+PY_PIXELS
+)
+    check "the divider is painted in the theme's colour" "$?" "$verdict"
+}
+
+# No write handed the terminal an erased screen with nothing to put back.
+#
+# `PaneTerminalModel.deliver(_:)` logs one `paint:` line per write, with `erase=1`
+# when the buffer it actually sent carries `ED2` and `cells=1` when it carries row
+# writes. Both are read out of the bytes, not from a caller's flag, so this assertion
+# can see the defect it was written for: the flash was an erase in its own
+# `session.receive`, followed by a repaint in a second one.
+#
+# What must hold is therefore per write, not per reset: **every write that erased also
+# carried cells**. A reset with no erasing write is the `grid mismatch` path, which
+# parks the frame and deliberately does not erase — erasing there would blank a pane
+# with nothing to paint yet.
+check_atomic_paints() {
+    local log="$host_dir/kraal.log" verdict
+    if ! grep -q 'paint: pane=' "$log" 2>/dev/null; then
+        check "no write erased a screen it did not repaint" 1 "the app logged no paint line"
+        return 1
+    fi
+    verdict=$(grep -o 'paint: pane=.*' "$log" | python3 -c '
+import re, sys
+writes = erases = erases_without_cells = 0
+for line in sys.stdin:
+    writes += 1
+    erase = re.search(r"erase=(\d)", line)
+    cells = re.search(r"cells=(\d)", line)
+    if erase and erase.group(1) == "1":
+        erases += 1
+        if not (cells and cells.group(1) == "1"):
+            erases_without_cells += 1
+if erases == 0:
+    print(f"{writes} writes, none erased: the drag never reset, so this asserts nothing")
+    raise SystemExit(1)
+if erases_without_cells:
+    print(f"{erases_without_cells} of {erases} erased writes carried no cells: "
+          f"the screen was blank for a turn")
+    raise SystemExit(1)
+print(f"{writes} writes, {erases} erased and every one repainted in the same buffer")
+')
+    check "no write erased a screen it did not repaint" "$?" "$verdict"
 }
 
 # Close a real worktree group through the File menu.

@@ -28,6 +28,14 @@ struct PaneLayoutView: View {
     /// The scale of the screen this window is on. `displayScale` follows the
     /// view, unlike `NSScreen.main`, which follows the menu bar.
     @Environment(\.displayScale) private var displayScale
+    /// The user's theme.
+    ///
+    /// The pane container is the one piece of chrome that touches terminal content,
+    /// so it is also the one where a system colour hurts most: the divider used to be
+    /// `Color.secondary`, which is the *system appearance*, and a light-mode Mac
+    /// running a dark theme drew a `(223,223,223)` band between two `(17,20,25)`
+    /// panes. The theme has to reach here.
+    @Environment(\.palette) private var palette
 
     /// Where the divider sat when the current drag began.
     ///
@@ -99,6 +107,24 @@ struct PaneLayoutView: View {
     /// builds a second `PaneTerminalModel` rather than reusing a pane's.
     let popupContent: (ClientShellPopupSurface, PopupGeometry) -> AnyView
 
+    /// The colour behind a pane's border cell, or `nil` for the palette's own.
+    ///
+    /// The border belongs to the pane, not to the seam beside it, so it has to be the
+    /// terminal's own background — a colour that lives on the Ghostty surface, which
+    /// this file must not know about. `nil` (previews, tests) falls back to
+    /// `palette.paneSurfaceColor`.
+    let paneBorderColor: (@MainActor (String) -> Color?)?
+
+    init(
+        paneContent: @escaping (String, PaneSurfacePane) -> AnyView,
+        popupContent: @escaping (ClientShellPopupSurface, PopupGeometry) -> AnyView,
+        paneBorderColor: (@MainActor (String) -> Color?)? = nil
+    ) {
+        self.paneContent = paneContent
+        self.popupContent = popupContent
+        self.paneBorderColor = paneBorderColor
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let surface = store.surface
@@ -108,9 +134,26 @@ struct PaneLayoutView: View {
             )
 
             ZStack(alignment: .topLeading) {
+                // The baseline for everything the panes do not cover: the container's
+                // own background, in the system's text colour.
                 Color(nsColor: .textBackgroundColor)
+                // Then the theme's say in it, on top of that baseline. Every gap in
+                // this container — between panes and around them — shows this layer,
+                // so with a theme that names a surface the seams match the panes
+                // instead of the Mac's appearance. `.clear` when the theme has no
+                // opinion, which leaves the line above exactly as it was.
+                palette.paneGapColor
 
-                if let surface {
+                if let surface {                    // Cover each pane's border cell; see `PaneBorderCells`.
+                    PaneBorderCells(
+                        panes: surface.panes,
+                        grid: grid,
+                        container: proxy.size,
+                        cellSize: pointsPerCell,
+                        colour: { paneBorderColor?($0) ?? palette.paneSurfaceColor },
+                        rect: rect
+                    )
+
                     ForEach(surface.panes, id: \.paneId) { pane in
                         let frame = rect(
                             for: pane.innerRect,
@@ -333,9 +376,30 @@ struct PaneLayoutView: View {
                         in: proxy.size,
                         cellSize: cell
                     )
+                    // The cell origin is logged, not just the size.
+                    //
+                    // "Does every row belong to some pane, or does one fall between
+                    // them?" is not answerable from sizes alone, and that question is
+                    // the difference between a layout bug and a rendering one. A
+                    // 35-row grid with panes 20 rows and 14 rows tall leaves exactly
+                    // one row unaccounted for, and only the origin says which —
+                    // measured on a live split: `grid=112x35` with
+                    // `p14=112x20 p16=112x14`, i.e. 34 of 35 rows.
                     return "\(pane.paneId)=\(pane.innerRect.width)x\(pane.innerRect.height)"
+                        + "@\(pane.innerRect.originX),\(pane.innerRect.originY)"
+                        + " rect=\(pane.rect.width)x\(pane.rect.height)"
+                        + "@\(pane.rect.originX),\(pane.rect.originY)"
                         + "->\(Int(frame.width))x\(Int(frame.height))pt"
                 }
+                // The split's geometry, in cells. Logged next to the panes because the
+                // interesting question spans both: which rows does *nothing* cover?
+                // `hitRect` is what the divider is drawn in, and it is not necessarily
+                // the gap the daemon left between the two `innerRect`s.
+                let splitsLog = (store.surface?.splits ?? []).map { split -> String in
+                    let hit = split.hitRect
+                    return "\(split.direction)@\(split.position) "
+                        + "hit=\(hit.width)x\(hit.height)@\(hit.originX),\(hit.originY)"
+                }.joined(separator: " ")
                 // `containerOrigin` is the container's top-left **inside the
                 // window**, in points. It exists because the harness needs to map a
                 // pane onto a screenshot, and deriving the origin as
@@ -347,7 +411,8 @@ struct PaneLayoutView: View {
                     + "surfacePaned=\(store.surface != nil) "
                     + "cell=\(pointsPerCell.width)x\(pointsPerCell.height) "
                     + "containerOrigin=\(containerOriginInWindow) "
-                    + "panes=[\(panes.joined(separator: " "))]")
+                    + "panes=[\(panes.joined(separator: " "))] "
+                    + "splits=[\(splitsLog)]")
             }
         }
     }
@@ -385,8 +450,29 @@ struct PaneLayoutView: View {
     ) -> some View {
         let hit = rect(for: split.hitRect, grid: grid, in: size, cellSize: cellSize)
         return Rectangle()
-            .fill(Color.secondary.opacity(0.25))
+            // The band's fill is the theme's, not the platform's. `Color.secondary`
+            // is the system appearance: on a light-mode Mac it turned this 2-cell
+            // strip into a `(223,223,223)` bar running down a dark terminal.
+            .fill(palette.paneGapColor)
             .frame(width: hit.width, height: hit.height)
+            .overlay { gapLine(for: split.direction) }
+            // The divider must stay draggable whatever the fill is.
+            //
+            // `paneGapColor` resolves to `.clear` when a palette names neither
+            // `surface_dim` nor `panel_background`, and a shape that draws nothing is
+            // not reliably hit-tested: the divider would look right and stop responding
+            // to the mouse, which is a worse bug than the colour it fixes.
+            //
+            // No *built-in* theme reaches that arm — all 18 name `surface_dim` — so this
+            // is defensive for a palette built by hand or by a future theme loader. That
+            // makes it the kind of guard that quietly rots, so it is not left to
+            // reasoning: measured with the fill forced to `.clear`, removing this line
+            // gives `stuck: ratio 0.500 -> 0.500, the drag never reached the daemon`, and
+            // restoring it gives `0.500 -> 0.588` again.
+            //
+            // An explicit content shape also makes the whole `hitRect` — both cells of
+            // it — the target, rather than whatever the fill happens to paint.
+            .contentShape(Rectangle())
             .offset(x: hit.minX, y: hit.minY)
             .gesture(
                 DragGesture()
@@ -427,6 +513,27 @@ struct PaneLayoutView: View {
                     NSCursor.pop()
                 }
             }
+    }
+
+    /// The hairline down the middle of a split divider, along the divider's own axis.
+    ///
+    /// The axis comes from ``PaneSplitAxis``, the readable home of "the daemon names a
+    /// split after the line, not after where the panes go": a `.verticalDrag` divider
+    /// is a horizontal line between stacked panes, so its hairline runs full width and
+    /// is one point tall. Centred by `.overlay`'s default alignment, so a 2-cell band
+    /// gets the line in the middle of it.
+    ///
+    /// `.clear` when the theme has no `surface0`: no line, and `.allowsHitTesting(false)`
+    /// keeps an invisible 1pt strip from swallowing the drag.
+    @ViewBuilder
+    private func gapLine(for direction: PaneSurfaceSplitDirection) -> some View {
+        let line = Rectangle().fill(palette.paneGapLineColor)
+        switch PaneSplitAxis(direction) {
+        case .verticalDrag:
+            line.frame(height: 1).allowsHitTesting(false)
+        case .horizontalDrag:
+            line.frame(width: 1).allowsHitTesting(false)
+        }
     }
 
     /// The resize cursor matching a split direction.
@@ -654,82 +761,6 @@ public enum PaneFrameMath {
             width: pane.width,
             height: pane.height
         )
-    }
-}
-
-/// Which way a split divider moves.
-///
-/// The daemon names a split after the divider *line*, and the drag axis is
-/// perpendicular to that name. The two names therefore read backwards to anyone
-/// thinking about where the panes go, and that is the whole bug this type exists
-/// to make explicit:
-///
-/// * `.vertical` — a vertical line — leaves panes stacked top to bottom, which
-///   the UI offers as "Split Down". The divider moves **up and down**.
-/// * `.horizontal` — a horizontal line — leaves panes side by side, offered as
-///   "Split Right". The divider moves **left and right**.
-///
-/// Verified against a live daemon: a `direction: down` split came back as
-/// `.vertical` with a 120×2 hit rect in a 120×40 area (a wide, thin, horizontal
-/// strip), and its `position` tracked the row axis.
-public enum PaneSplitAxis: Sendable {
-    /// The divider moves along Y; the resize cursor is the up-down arrows.
-    case verticalDrag
-    /// The divider moves along X; the resize cursor is the left-right arrows.
-    case horizontalDrag
-
-    public init(_ direction: PaneSurfaceSplitDirection) {
-        switch direction {
-        case .vertical: self = .verticalDrag
-        case .horizontal: self = .horizontalDrag
-        }
-    }
-
-    public var direction: PaneSurfaceSplitDirection {
-        switch self {
-        case .verticalDrag: .vertical
-        case .horizontalDrag: .horizontal
-        }
-    }
-
-    /// Converts a drag in points into the ratio the daemon expects.
-    ///
-    /// `DragGesture` reports **points**; the daemon's `position` and `area` are
-    /// **cells**. Going straight from one to the other is the mistake that made the
-    /// divider leap to an edge: the old conversion multiplied by
-    /// `surface.height / grid.height`, and those are the same number by
-    /// construction, so a 40-point drag counted as 40 rows — 0.89 of a 45-row
-    /// surface, straight into the 0.9 clamp.
-    ///
-    /// Lives on the axis type because "which way does this move" and "in what unit"
-    /// are the same question: each axis divides by the cell extent along itself.
-    ///
-    /// A zero cell size is possible (Ghostty reports 0 before its first frame), and
-    /// must not divide by zero; treating one point as one cell is wrong but bounded,
-    /// since the result is clamped anyway.
-    public func ratio(
-        position: UInt16,
-        area: SurfaceRect,
-        dragPoints: CGSize,
-        cellSize: CGSize
-    ) -> Double {
-        let cellsWide = cellSize.width > 0 ? cellSize.width : 1
-        let cellsHigh = cellSize.height > 0 ? cellSize.height : 1
-        let translatedX = dragPoints.width / cellsWide
-        let translatedY = dragPoints.height / cellsHigh
-        // `.vertical` names a horizontal divider line between stacked panes, so it
-        // moves along Y; `.horizontal` is a vertical line, so it moves along X.
-        let base: Double
-        let span: Double
-        switch self {
-        case .verticalDrag:
-            base = Double(position) - Double(area.originY) + Double(translatedY)
-            span = Double(max(area.height, 1))
-        case .horizontalDrag:
-            base = Double(position) - Double(area.originX) + Double(translatedX)
-            span = Double(max(area.width, 1))
-        }
-        return min(max(base / span, 0.1), 0.9)
     }
 }
 
