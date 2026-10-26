@@ -39,7 +39,10 @@ struct TabBarView: View {
         }
         .padding(.horizontal, KraalTheme.Space.snug)
         .frame(height: KraalTheme.tabBarHeight)
-        .glassChrome(.bar, rim: false)
+        // The theme's `panel_bg` replaces the glass wash when it names one. Without
+        // this the tab bar stayed the same colour for every theme, because the material
+        // already draws an opaque background.
+        .glassChrome(.bar, rim: false, tint: palette.panelColor)
         .renamePrompt($prompt)
     }
 
@@ -64,8 +67,11 @@ struct TabBarView: View {
                 // accent fill at 25% looked muddy over the material, so the pill
                 // is a raised surface with an accent hairline instead.
                 RoundedRectangle(cornerRadius: KraalTheme.Radius.control, style: .continuous)
+                    // Most seeded palettes leave `selection_bg` unset, and an unset
+                    // token means "let the platform decide" — `selectionColor` already
+                    // resolves that, so there is no comparison here.
                     .fill(tab.focused
-                        ? AnyShapeStyle(.selection)
+                        ? AnyShapeStyle(palette.selectionColor)
                         : AnyShapeStyle(Color.clear))
                     .overlay {
                         if tab.focused {
@@ -73,7 +79,7 @@ struct TabBarView: View {
                                 cornerRadius: KraalTheme.Radius.control,
                                 style: .continuous
                             )
-                            .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                            .strokeBorder(palette.accentColor.opacity(0.35), lineWidth: 1)
                         }
                     }
             }

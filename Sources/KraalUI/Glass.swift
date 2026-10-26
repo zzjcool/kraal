@@ -99,11 +99,27 @@ struct GlassBackground: View {
     var showsRim = true
 
     @Environment(\.colorScheme) private var scheme
+    /// Replaces the wash when the active theme names this surface's colour.
+    var paletteTint: Color?
 
     var body: some View {
         ZStack {
             materialBase
-            wash
+            // A palette colour, when the theme names this surface's colour, *replaces*
+            // the contrast wash entirely rather than being stacked over it.
+            //
+            // Stacking it above `wash` did not work and looked like it did: `wash` is a
+            // translucent `windowBackgroundColor` over an `NSVisualEffectView` with
+            // `.behindWindow` blending, so a second translucent layer on top just mixed
+            // with it and the measured pixels did not change between two themes with
+            // opposite panel colours (7981 both times). Upstream paints `panel_bg` flat
+            // there instead of over a material (`src/client/shell.rs` reads every colour
+            // from `config.palette`), so flat is also the faithful answer.
+            if let paletteTint {
+                Rectangle().fill(paletteTint)
+            } else {
+                wash
+            }
             if showsRim { rim }
         }
     }
@@ -153,8 +169,19 @@ public extension View {
     ///
     /// Use for chrome only — sidebars, bars, sheets, overlays. Never for the
     /// terminal surface, which must stay opaque to keep glyph contrast.
-    func glassChrome(_ layer: GlassLayer, rim: Bool = true) -> some View {
-        background { GlassBackground(layer: layer, showsRim: rim) }
+    /// The glass chrome, optionally tinted by the active palette.
+    ///
+    /// `tint` is what makes a theme visible on the chrome. A `.background` applied on
+    /// top of `glassChrome` from the outside did not work: the glass already draws an
+    /// opaque `windowBackgroundColor` wash, so the extra layer sat behind something the
+    /// screenshot showed as unchanged. Tinting the wash itself is the layer that is
+    /// actually on screen.
+    func glassChrome(
+        _ layer: GlassLayer,
+        rim: Bool = true,
+        tint: Color? = nil
+    ) -> some View {
+        background { GlassBackground(layer: layer, showsRim: rim, paletteTint: tint) }
     }
 
     /// A rounded glass panel, for overlays that should read as a floating pane of
