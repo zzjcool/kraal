@@ -799,6 +799,59 @@ printf '\033]0;⠋ working\007'
 
 仍然造不出的：`done`（manifest 里它是从 working 迁移推出来的，不是独立规则）。
 
+### 发送路径现在可测了：`DaemonConnection` + 记录型替身（2026-10-26）
+
+在此之前，所有 `KraalUI` 的「我们发了什么」测试都停在 `connection == nil`：
+`AppStore.connection` 是具体的 `EndpointConnection`（actor，构造要真 socket）。
+
+UI 实际只用到 **9 个成员**：
+
+```
+connection.request / sendPaneInput / sendPopupInput / sendResize
+connection.start / stop / abort / currentBootId
+```
+
+帧、握手、读线程、pending-request 记账一概看不到。所以 `DaemonConnection` 协议
+只收这 9 个，`AppStore.connection` 改成 `(any DaemonConnection)?`，
+测试用 `Tests/KraalClientTests/DaemonConnectionRecorder.swift` 记录每一帧。
+
+**协议必须全 `async`。** 两种错法都试过：
+
+- 标 `@MainActor` → `actor 'EndpointConnection' cannot conform to
+  global-actor-isolated protocol`
+- 不标但保留同步 `throws` → `conformance crosses into actor-isolated code`
+
+替身的两个刻意的简化：
+
+- `request` 回一个空 JSON `{}`，不解析真实回包。被测路径都丢弃 body，
+  假回包只会往测试里塞一个解码器。
+- `sendResize` **不**像真 actor 那样去重。真实现尺寸没变就 early return，
+  替身若也去重，「只发一次」的断言会对着替身绿、对着生产因为别的原因红。
+
+这套东西解锁的断言（每条都做过 A/B）：resize 的最终网格、粘贴走 `.paste` 而不是
+按键、busy 拒绝的重试上限、控制类拒绝不重试、`sendMouse` 的闸门与坐标映射、
+copy-mode 的列 clamp 与 `content_revision`、关闭流程的组确认、`cyclePane` 的负步长包裹、
+效果路由的通知例外。
+
+### 覆盖率判据：逐函数名，不要看文件名（2026-10-26）
+
+「测试文件里是否出现源文件名」这个判据在本仓库**错了三次**（#153、#160、#162）。
+用它得出的结论每次都偏悲观：`isValidWorkspaceBlock`、`workspaceBlockParams`、
+`splitHostPort` 系列都有测试，只是因为测试文件名不同、或者经由公开入口间接调用。
+
+可用的判据是逐函数名：
+
+```bash
+for f in Sources/KraalUI/AppStore*.swift; do
+  for fn in $(grep -oE "func [a-zA-Z_]+" "$f" | sed 's/func //' | sort -u); do
+    grep -rq "\b$fn\b" Tests/ || echo "  $(basename $f): $fn"
+  done
+done
+```
+
+它仍会漏掉「经公开入口间接覆盖」的情况（`closeAfterChecking` 由 `close(workspaceId:)`
+覆盖），所以输出要人工过一遍：单行 `call` 包装基本不值得单独测。
+
 ### 目前明确无法自动化的（不要假装能做）
 
 | 项 | 原因 |
