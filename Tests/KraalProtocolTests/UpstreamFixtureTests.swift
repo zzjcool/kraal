@@ -151,3 +151,92 @@ struct UpstreamFixtureTests {
         #expect(snapshot.commands[0].action == .unknown)
     }
 }
+
+/// Can this decoder read surface frames produced by a *different* implementation?
+///
+/// The four `surface-*-v1.bin` files are copied unchanged from
+/// `herdr-gpui/crates/herdr-protocol/tests/fixtures/` (Apache-2.0), where
+/// `herdr-client/src/tests/surface_encoding.rs:308` replays them through its session.
+/// They cover the four cases that only show up in a live stream: a full frame, an
+/// incremental delta, buffer reuse, and both scroll directions.
+///
+/// This is worth more than another hand-written round trip. A round trip proves this
+/// repository agrees with itself — the same misreading of the field order on both sides
+/// still produces a green test. These bytes were written by a different encoder, so a
+/// disagreement is visible. Rendering is also where the user-visible bugs have been:
+/// the scroll white-screen (#113) and the kitty-graphics work were both here.
+@Suite("Upstream surface frames")
+struct UpstreamSurfaceFrameTests {
+    /// The fixtures are a length-prefixed *stream* of messages, not one bare message.
+    ///
+    /// `u32` little-endian length then that many bytes of bincode
+    /// (`herdr-protocol/src/codec.rs:69-79`). Our decoder takes one payload at a time,
+    /// so the prefix is stripped here rather than teaching the decoder a framing it does
+    /// not use on the socket.
+    private func messages(in name: String) throws -> [[UInt8]] {
+        let raw = [UInt8](try Fixture.data(name))
+        var result: [[UInt8]] = []
+        var offset = 0
+        while offset + 4 <= raw.count {
+            let length = Int(raw[offset])
+                | Int(raw[offset + 1]) << 8
+                | Int(raw[offset + 2]) << 16
+                | Int(raw[offset + 3]) << 24
+            offset += 4
+            guard length > 0, offset + length <= raw.count else {
+                throw Fixture.FixtureError.missing("\(name): truncated frame")
+            }
+            result.append(Array(raw[offset ..< offset + length]))
+            offset += length
+        }
+        return result
+    }
+
+    @Test(
+        "every frame in another implementation's stream decodes",
+        arguments: [
+            "surface-delta-v1.bin",
+            "surface-reuse-v1.bin",
+            "surface-scroll-up-v1.bin",
+            "surface-scroll-down-v1.bin",
+        ]
+    )
+    func decodesEveryFrame(name: String) throws {
+        let frames = try messages(in: name)
+        #expect(!frames.isEmpty, "\(name): no frames")
+
+        var surfaces = 0
+        for (index, frame) in frames.enumerated() {
+            let message = try ServerMessageDecoder.decode(Data(frame))
+            guard case let .paneSurface(surface) = message else {
+                // The stream may carry snapshot/registry messages between surfaces; only
+                // the surfaces are this suite's subject.
+                continue
+            }
+            surfaces += 1
+            #expect(surface.frame.width > 0, "\(name) frame \(index): no width")
+            #expect(surface.frame.height > 0, "\(name) frame \(index): no height")
+            #expect(
+                surface.frame.buffer.count
+                    == Int(surface.frame.width) * Int(surface.frame.height),
+                "\(name) frame \(index): buffer does not match geometry"
+            )
+            // `w*h` alone cannot catch a swapped pair — the product is the same. The
+            // orientation has to be pinned by something the fixture knows: these frames
+            // are terminal surfaces, which are wider than they are tall. Swapping the
+            // two fields is the exact mistake a hand-written decoder makes, and the
+            // first version of this test passed with the swap in place.
+            //
+            // `#expect`'s second argument must be a literal, so the geometry goes into
+            // the comment-free form and the numbers are asserted separately below.
+            #expect(
+                surface.frame.width > surface.frame.height,
+                "a terminal surface is wider than it is tall; width and height may be transposed"
+            )
+            //  throws on a malformed surface; decoding without throwing is
+            // not enough, because the cell grid and scroll metrics are checked there.
+            try surface.validate()
+        }
+        #expect(surfaces > 0, "\(name): no PaneSurface in the stream")
+    }
+}

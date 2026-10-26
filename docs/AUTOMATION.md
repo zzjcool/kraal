@@ -693,3 +693,98 @@ esac
 ```
 
 这条比 VM 的隔离更依赖纪律：VM 里搞错只影响 VM，local 里搞错会**真的分你的屏**。
+
+---
+
+## §14 测试方法的可靠性排序（2026-10-26）
+
+项目缺口不是「测试数量不够」，而是**只有两类证据**：`swift test`（判决逻辑）和
+`gui.sh`（daemon 状态）。中间那层——「我们的解码器/渲染器与另一个实现是否一致」——
+几乎没有。这一节按**判别力**排序，从最可靠往下。
+
+### 1. 上游 fixture（最强，成本最低）
+
+拿另一个实现写出的字节，喂给我们的解码器。
+
+```swift
+// Tests/KraalProtocolTests/UpstreamFixtureTests.swift
+@Suite("Upstream surface frames")
+struct UpstreamSurfaceFrameTests {
+    // 4 个 surface-*-v1.bin，原样拷自 herdr-gpui/crates/herdr-protocol/tests/fixtures/
+}
+```
+
+**为什么强**：手写一遍 encoder/decoder 再互相对照，只能证明**自己和自己一致**——
+两边对字段顺序的同一个误解会同时出现在两边，测试照样绿。上游字节由不同实现写出，
+不一致才可见。
+
+**成本**：拷文件 + 一个解析 helper。四个渲染帧覆盖 full / delta / reuse / 两个滚动方向。
+
+**怎么找**：`<ref>/crates/*/tests/fixtures/`。当前上游还有我们用不到的：
+`endpoint-agent-view-v1.json`（agent view 投影，我们未实现，见 #102）。
+
+**坑**：上游 fixture 常是**长度前缀的消息流**（`u32` LE + payload，
+`codec.rs:69-79`），不是单条裸消息。第一次直接喂给 `ServerMessageDecoder` 得到
+`unknown server message tag 61`——61 是长度前缀的第一个字节，不是 tag。
+
+### 2. 上游自己的测试序列（强，需要翻译）
+
+把上游断言**逐条复刻**成我们的测试，而不是只读它的算法再自己写一个。
+
+```swift
+// AgentPanelSortTests.upstreamSequenceReplays
+// 复刻 endpoints.rs:1915-1975 的三帧：idle→Local 先变→remote 变 working→remote 回 idle
+```
+
+**为什么强**：它钉的是**语义**，不是实现。第三帧「变回 idle 本身也是一次变化」是
+最容易写错的地方，只看代码很容易漏掉 `is_none_or` 的首次为真语义。
+
+**成本**：找到上游 `#[test]`，读懂它的断言，用我们的 fixture 重放。
+
+**坑**：写的时候把 `previous` 传成了新快照（自己跟自己比，`seq` 相等 → 判定没变化），
+测试先红了一次。要看**真实调用点**传的是什么，不是我以为的。
+
+### 3. 故意改坏（A/B，必须有）
+
+任何新断言都要证明「它曾经红过」。
+
+```bash
+# 改坏 → 跑 → 数红条 → 恢复
+python3 -c "..." ; swift test --filter X 2>&1 | grep -c '✘ Test "'
+```
+
+**为什么必须**：本轮写了一个「buffer 大小 == w*h」的断言，把 `width`/`height`
+交换后**照样绿**——乘积不变。加了「终端表面宽大于高」才抓住。没有 A/B 就交付了一个
+永远抓不到转置的断言。
+
+**纪律**：A/B 之后先 `swift build` 再信结果；SourceKit 的过期诊断会造成假恐慌。
+
+### 4. daemon 状态（已有，`gui.sh`）
+
+`gui.sh` 断言 daemon 侧状态（pane 集合、layout 几何、agent 列表），不是「点了没崩」。
+
+### 5. 像素（最弱，慎用）
+
+本项目已证伪过一次：#135 折叠态透明探针方向反了（有 chrome `dark=27`、
+无 chrome `dark=2295`），对「有没有背景」零判别力，断言被删除。
+
+**能用的情况**：被测对象在已知坐标、且颜色差异来自被测行为本身。
+
+### 目前明确无法自动化的（不要假装能做）
+
+| 项 | 原因 |
+| --- | --- |
+| 系统通知真的弹出 | ad-hoc 签名无 Developer ID，`UNUserNotificationCenter` 授权被拒（`UNErrorDomain 1`）。可断言「走到系统 API 并如实降级」 |
+| 卡片/行宽度 | AX 树没有行容器元素（背景由 SwiftUI 绘制），只有文字节点。靠结构保证 + 代码注释 |
+| 假 agent 的 `working` 状态 | 两次尝试（`⏵ …esc to interrupt`、`* Live turn`+MCP 任务行）daemon 都仍报 `idle`，**原因未查清**。stub 只能可靠产生 `idle` / `blocked` |
+| 改主题后实时重绘 | 需要自动化系统外观切换 |
+
+### 还能做但没做的
+
+1. **UI 层 32 个源文件零测试引用**（`AppStore+*` 共 2679 行）。它们不是 View，
+   是可测的状态机；`AppStore+Effects`（本轮新增）有 `EffectRoutingTests` 覆盖，
+   其余没有。
+2. **`Palette+Builtin` 可做逐值对照**：本轮手工核对过 342 个值全一致
+   （脚本一次性比对），但没有固化成测试。转录错误不会有任何单测失败。
+3. **`Bench.sh` 只有性能数字，没有回归门禁**：`docs/PERFORMANCE.md` 有实测值，
+   但没有「超过 N% 就红」的阈值断言。
