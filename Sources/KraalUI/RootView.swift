@@ -13,6 +13,7 @@ import KraalTransport
 
 @MainActor
 public struct RootView: View {
+    @Environment(\.palette) private var palette
     @State private var store: AppStore
     @State private var showCommands = false
     @State private var showConnection = false
@@ -64,6 +65,12 @@ public struct RootView: View {
                     // menu bar has, so it reads the same object instead of growing a
                     // second copy of "open settings" plumbing.
                     .environment(windowActions)
+                    // The palette's own sidebar tint. Every seeded theme leaves
+                    // `sidebar_bg` unset, so this resolves to `.clear` and the glass
+                    // shows through — that is what "no opinion" means, not "paint it
+                    // black". The panel colour below is what actually distinguishes
+                    // themes on screen.
+                    .background(palette.sidebarColor)
                 Divider()
             }
 

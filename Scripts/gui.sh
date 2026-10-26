@@ -634,6 +634,33 @@ for node in tree["nodes"]:
     return 0
 }
 
+# Counts dark pixels along the tab bar strip.
+#
+# The region is derived from the window frame the driver reports, not written as a
+# screen coordinate: an earlier probe in this suite asserted a region that was not
+# where the thing it claimed to measure was drawn, and passed for the wrong reason (#135).
+capture_tab_bar_pixels() {
+    local name out
+    name=$(basename "$1" .txt)
+    out="$1"
+    # Guest paths: under the vm backend `driver` runs inside the guest, so a host path
+    # is a path on another machine. Same rule as the kitty-graphics probe.
+    local shot="$VM_ROOT/tabbar-$name.png"
+    # The band the tab bar occupies, and a predicate that separates a light panel from
+    # a dark one. Both numbers were measured, not guessed: scanning rows 0-300 with a
+    # "dark pixel" predicate found y=100 to be the only band that changed between `nord`
+    # and `gruvbox-light`, and on that band `r>200,g>200,b>150` differed 4125 vs 7694
+    # while `r<60,g<60,b<60` differed only 228 vs 149 — the latter would need a threshold
+    # inside its own noise.
+    local rect="400 30 300 20"
+    if ! driver shot -o "$shot" >"$host_dir/shot-$name.txt" 2>&1; then
+        echo "screenshot failed" >"$out"
+        return 1
+    fi
+    driver pixels --in "$shot" --rect "$rect" --match "r>200,g>200,b>150" >"$out" 2>&1
+    return 0
+}
+
 theme_write_config() {
     local name="$1" extra="${2:-}"
     local body
@@ -4724,21 +4751,42 @@ case_theme_applied() {
         return 0
     }
     action() {
-        # `terminal` is the theme with a distinguishing property that is cheap to
-        # assert: it leaves the sidebar background unset (`Color::Reset` upstream), so
-        # it shows the window material rather than a flat colour.
         theme_write_config "nord"
         restart_app || return 1
         sleep 2
+        # Two screenshots of the same region, under two themes with opposite panel
+        # colours. Resolving a name proves the config was read; it does not prove the
+        # window changed, and "picking a theme does nothing" was the actual report.
+        capture_tab_bar_pixels "$host_dir/dark.txt" || return 1
+        theme_write_config "gruvbox-light"
+        restart_app || return 1
+        sleep 2
+        capture_tab_bar_pixels "$host_dir/light.txt" || return 1
+        return 0
     }
     assert() {
         local log_path="$host_dir/kraal.log"
         check "the theme named in config.toml was resolved" \
-            "$(grep -qc 'theme: applied nord' "$log_path" && echo 0 || echo 1)" \
+            "$(grep -qc 'theme: applied gruvbox-light' "$log_path" && echo 0 || echo 1)" \
             "$(grep -o 'theme: [a-z].*' "$log_path" | tail -1)"
         check "the client read the config rather than defaulting" \
-            "$(grep -qc 'theme: .*config name=nord' "$log_path" && echo 0 || echo 1)" \
+            "$(grep -qc 'theme: .*config name=gruvbox-light' "$log_path" && echo 0 || echo 1)" \
             "$(grep -o 'theme: .*config name=[a-z-]*' "$log_path" | tail -1)"
+        # nord's `panel_bg` is 0x2E3440 (dark); gruvbox-light's is 0xFBF1C7 (light).
+        # Counting "dark pixels" in one fixed region is what separates them, and each
+        # count is compared against the other rather than against a constant, so the
+        # assertion does not depend on how much of the region the bar happens to fill.
+        local dark light
+        dark=$(sed -n 's/^pixels matched=\([0-9]*\).*/\1/p' "$host_dir/dark.txt" 2>/dev/null)
+        light=$(sed -n 's/^pixels matched=\([0-9]*\).*/\1/p' "$host_dir/light.txt" 2>/dev/null)
+        # Relative, not absolute: how many light pixels the band holds depends on how
+        # wide the tab strip happens to be in this window. What must hold is that the
+        # light theme's band is substantially lighter than the dark theme's — measured
+        # 4125 vs 7694, so 1.3x is inside the signal and well outside the noise.
+        check "the light theme paints a lighter tab bar than the dark one" \
+            "$([ -n "$dark" ] && [ -n "$light" ] \
+                && [ "$((light * 10))" -gt "$((dark * 13))" ] && echo 0 || echo 1)" \
+            "dark=$dark light=$light (need light > 1.3x dark)"
     }
 }
 

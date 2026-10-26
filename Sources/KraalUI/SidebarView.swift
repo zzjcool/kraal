@@ -357,7 +357,7 @@ struct SidebarView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
-                .fill(isActive ? Color.accentColor.opacity(0.10) : .clear)
+                .fill(isActive ? palette.selectedRowColor : .clear)
         }
     }
 
@@ -646,7 +646,7 @@ private struct WorkspaceRowView: View {
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
                 .fill(workspace.focused && isActiveMachine
-                    ? Color.accentColor.opacity(0.20) : .clear)
+                    ? palette.activeRowColor : .clear)
         }
         .opacity(isActiveMachine ? 1 : 0.75)
     }
@@ -675,7 +675,7 @@ private struct WorkspaceRowView: View {
         default:
             StyledText(text: token.text, style: token.style)
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.mutedColor)
                 .lineLimit(1)
         }
     }
@@ -745,7 +745,7 @@ private struct AgentRowView: View {
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
-                .fill(agent.focused ? Color.accentColor.opacity(0.20) : .clear)
+                .fill(agent.focused ? palette.activeRowColor : .clear)
         }
     }
 
@@ -765,7 +765,7 @@ private struct AgentRowView: View {
         default:
             StyledText(text: token.text, style: token.style)
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.mutedColor)
                 .lineLimit(1)
         }
     }
@@ -774,6 +774,8 @@ private struct AgentRowView: View {
 /// A pane with no detected agent. Same row treatment as an agent row so the list
 /// does not jump when an agent appears.
 private struct PaneRowView: View {
+    @Environment(\.palette) private var palette
+
     let pane: ClientShellPane
     let workspace: ClientShellWorkspace?
     let tab: ClientShellTab?
@@ -815,7 +817,7 @@ private struct PaneRowView: View {
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: KraalTheme.cornerRadius)
-                .fill(pane.focused ? Color.accentColor.opacity(0.20) : .clear)
+                .fill(pane.focused ? palette.activeRowColor : .clear)
         }
     }
 
@@ -831,7 +833,7 @@ private struct PaneRowView: View {
         default:
             StyledText(text: token.text, style: token.style)
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.mutedColor)
                 .lineLimit(1)
         }
     }

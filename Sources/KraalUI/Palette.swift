@@ -175,8 +175,31 @@ public extension Palette {
     /// The sidebar's own background; transparent when the theme leaves it unset, so a
     /// `terminal` theme shows the window's material rather than a flat rectangle.
     var sidebarColor: Color { color(sidebarBackground, fallback: .clear) }
-    var activeRowColor: Color { color(activeRowBackground, fallback: .clear) }
-    var selectionColor: Color { color(selectionBackground, fallback: .clear) }
+    /// The current row's fill.
+    ///
+    /// Falls back to a translucent accent rather than a literal, because most palettes
+    /// leave `active_row_bg` unset (upstream treats `Color::Reset` as "let the terminal
+    /// decide") and a row with no fill at all cannot be told from its neighbours.
+    var activeRowColor: Color {
+        color(activeRowBackground, fallback: .accentColor.opacity(0.20))
+    }
+    /// A weaker current-row fill, for the row that is selected but not focused.
+    var selectedRowColor: Color {
+        color(activeRowBackground, fallback: .accentColor.opacity(0.10))
+            .opacity(0.5)
+    }
+    /// The selected-tab / selected-text fill.
+    ///
+    /// `nil` in the palette means "no opinion", and the platform's own selection colour
+    /// is the right answer there. The caller cannot test this by comparing to `.clear`
+    /// — SwiftUI `Color` has no useful equality — so the decision is made here.
+    /// `Color.selection` is a `SelectionShapeStyle`, not a `Color`, so the platform
+    /// fallback has to come from AppKit. Same shape as `separatorColor`.
+    var selectionColor: Color {
+        color(selectionBackground, fallback: Color(nsColor: .selectedContentBackgroundColor))
+    }
+    /// True when the palette names a selection colour of its own.
+    var hasSelectionColor: Bool { selectionBackground != nil }
     var surface0Color: Color { color(surface0, fallback: .clear) }
     var surface1Color: Color { color(surface1, fallback: .clear) }
     var separatorColor: Color { color(surfaceDim, fallback: Color(nsColor: .separatorColor)) }
