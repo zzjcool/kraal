@@ -201,3 +201,108 @@ struct OutgoingCommandTests {
         #expect(params?["target_pane_id"] as? String == "w1:p1")
     }
 }
+
+/// The copy-mode requests, which carry two rules that were measured, not guessed.
+@Suite("Copy-mode requests")
+@MainActor
+struct CopyModeRequestTests {
+    private func store() -> (AppStore, DaemonConnectionRecorder) {
+        let store = AppStore(target: .local)
+        let endpoint = EndpointState(id: .local, label: "Local", settings: .local)
+        let recorder = DaemonConnectionRecorder()
+        endpoint.connection = recorder
+        endpoint.status = .online
+        store.endpoints = [endpoint]
+        store.activeEndpointID = .local
+        store.phase = .live
+        store.surface = PaneSurfaceFrame(
+            bootId: "boot", projectionRevision: 1, surfaceRevision: 1,
+            frame: FrameData(
+                cells: Array(repeating: .blank, count: 118 * 2), width: 118, height: 2,
+                cursor: nil, hyperlinks: [], graphics: Data()
+            ),
+            panes: [PaneSurfacePane(
+                paneId: "w1:p1", contentRevision: 7,
+                rect: SurfaceRect(originX: 0, originY: 0, width: 118, height: 2),
+                innerRect: SurfaceRect(originX: 0, originY: 0, width: 116, height: 2),
+                scrollbarRect: nil, scroll: nil, focused: true,
+                mouseReporting: false, sgrPixelMouse: false,
+                alternateScreenActive: false, pixelWidth: 0, pixelHeight: 0
+            )],
+            splits: [], popup: nil, graphics: SurfaceGraphicsScene()
+        )
+        return (store, recorder)
+    }
+
+    private func waitUntil(_ label: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("timed out waiting for \(label)")
+    }
+
+    /// The linewise sentinel is `UInt16.max`; sending it unclamped is refused by the
+    /// daemon with `selection_unavailable`. Measured against a 118-column pane: 117
+    /// returned the line, 200 and 65535 returned nothing.
+    @Test("the line-end sentinel is clamped to the pane's width")
+    func sentinelIsClamped() async throws {
+        let (store, recorder) = store()
+        store.copySelection(
+            paneId: "w1:p1",
+            from: CopyModeCursor(row: 0, column: 0),
+            to: CopyModeCursor(row: 0, column: CopyModeCursor.lineEndColumn),
+            contentRevision: 7
+        ) { _ in }
+        try await waitUntil("selection.read") {
+            recorder.methods.contains("pane.selection.read")
+        }
+
+        let params = try #require(recorder.lastParams(of: "pane.selection.read"))
+        let cursor = try #require(params["cursor"] as? [String: Any])
+        let column = try #require(cursor["col"] as? Int)
+        // The pane's inner width is 116, so the last sendable column is 115.
+        #expect(column == 115,
+                "column \(column) was sent; an unclamped sentinel is refused outright")
+    }
+
+    /// A motion carries the content revision so the daemon can answer `stale_content`
+    /// when the text moved between reading the cursor and asking.
+    @Test("a motion carries the content revision")
+    func motionCarriesRevision() async throws {
+        let (store, recorder) = store()
+        store.requestCopyMotion(
+            paneId: "w1:p1",
+            from: CopyModeCursor(row: 0, column: 0),
+            motion: .nextWordStart,
+            contentRevision: 7
+        ) { _ in }
+        try await waitUntil("copy_motion") { !recorder.requests.isEmpty }
+
+        let params = try #require(recorder.lastParams(of: "pane.copy_motion"))
+        #expect(params["content_revision"] as? UInt64 == 7,
+                "the motion did not carry the revision, so a race returns a dead cursor")
+        #expect(params["motion"] as? String == CopyModeMotion.nextWordStart.rawValue)
+    }
+
+    /// A refused motion completes with nil rather than inventing a cursor.
+    @Test("a refused motion completes with nil")
+    func refusedMotionCompletesNil() async throws {
+        let (store, recorder) = store()
+        recorder.scriptedErrors = [ScriptedRefusal.code("stale_content")]
+        var completed = false
+        var result: CopyModeCursor?
+        store.requestCopyMotion(
+            paneId: "w1:p1",
+            from: CopyModeCursor(row: 0, column: 0),
+            motion: .nextWordStart,
+            contentRevision: 7
+        ) { cursor in
+            result = cursor
+            completed = true
+        }
+        try await waitUntil("the completion") { completed }
+        #expect(result == nil, "a refused motion produced a cursor")
+    }
+}

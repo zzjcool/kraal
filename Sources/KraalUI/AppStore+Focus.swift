@@ -28,6 +28,18 @@ extension AppStore {
     /// that would leave the pane permanently unfocused, which is worse than the
     /// redundant request this replaced.
     func sendPaneFocus(_ paneId: String) async -> Bool {
-        await callReturningErrorCode("pane.focus", ["pane_id": paneId]) == nil
+        // A skipped call is **not** an accepted one.
+        //
+        // `callReturningErrorCode` returns nil both for "the daemon accepted it" and
+        // for "there was no boot id yet, so nothing was sent", and it has to: from a
+        // close flow's point of view a skipped close is not a failure to report. Here
+        // the two cases are opposite. Reporting success for a skipped focus records the
+        // belief, and `FocusConfirmation` then *skips* the request once the connection
+        // is up — leaving the daemon with nothing focused until the user switches pane
+        // by hand. That is the exact failure the belief logic exists to prevent.
+        guard connection != nil, await connection?.currentBootId != nil else {
+            return false
+        }
+        return await callReturningErrorCode("pane.focus", ["pane_id": paneId]) == nil
     }
 }
