@@ -199,4 +199,78 @@ struct ChromeColourTests {
         #expect(!isClose(nord.activeRowColor, rgb(gruvbox.activeRowBackground ?? 0)),
                 "two themes resolved to the same row highlight")
     }
+
+    // MARK: - The pane gap follows the theme, not the system appearance
+
+    /// `surface_dim` is the theme's own "very dim surface, for separators", so it is
+    /// the answer for the band between two panes. `0x282828` is gruvbox's real value.
+    @Test("the pane gap takes surface_dim from the theme")
+    func paneGapUsesSurfaceDim() throws {
+        let themed = palette(surfaceDim: 0x282828)
+        #expect(isClose(themed.paneGapColor, rgb(0x282828)),
+                "the pane gap ignored surface_dim")
+        // The built-in theme has to resolve the same way, or the table is inert.
+        let gruvbox = try #require(Palette.named("gruvbox"))
+        #expect(isClose(gruvbox.paneGapColor, rgb(0x282828)),
+                "gruvbox did not reach the pane gap")
+    }
+
+    /// A theme that names its panels but leaves `surface_dim` unset still has an
+    /// opinion about chrome: the gap belongs to the panels, not to the terminal.
+    @Test("an unset surface_dim falls back to the panel colour")
+    func paneGapFallsBackToPanel() {
+        let themed = palette(panel: 0x3B4252)
+        #expect(isClose(themed.paneGapColor, rgb(0x3B4252)),
+                "the pane gap did not fall back to the panel colour")
+    }
+
+    /// The regression guard for the reported bug: a palette that names no surface at all
+    /// must resolve the gap to *nothing*, never to the platform separator.
+    ///
+    /// `Color(nsColor: .separatorColor)` / `Color.secondary` describe the **system**
+    /// appearance, and the panes do not follow it: measured, a light-mode Mac running a
+    /// dark theme drew a `(223,223,223)` band between two `(17,20,25)` panes. Only
+    /// `.clear` — "the theme has no opinion", so the container's own background shows —
+    /// is correct here.
+    @Test("an unset pane gap is clear, not the platform separator")
+    func unsetPaneGapIsClear() {
+        let bare = palette()
+        guard let actual = channels(bare.paneGapColor) else {
+            Issue.record("pane gap fallback did not resolve")
+            return
+        }
+        #expect(actual.alpha == 0,
+                "the pane gap painted over the container instead of leaving it")
+        // And say explicitly what it must not be: the platform hairline that caused
+        // the report.
+        let separator = NSColor.separatorColor.usingColorSpace(.sRGB)
+        let separatorAlpha = Double(separator?.alphaComponent ?? -1)
+        // The sibling `unsetSeparatorIsPlatform` already pins this, and the comparison
+        // below is worthless without it: an invisible platform separator and `.clear`
+        // would both read as alpha 0.
+        #expect(separatorAlpha > 0.02,
+                "the platform separator is invisible here, so the comparison proves nothing")
+        #expect(actual.alpha != separatorAlpha,
+                "the pane gap fell back to the platform separator colour")
+    }
+
+    /// The same guard for the theme a user picks when they want the terminal to decide.
+    ///
+    /// Worth pinning separately because the built-in `terminal` table is **not** all
+    /// `nil`: it names `surface_dim` (`0x444444`), so its gap is a themed dark grey
+    /// rather than `.clear`. (Verified against `Palette+Builtin.swift`; no built-in
+    /// theme leaves `surface_dim` unset, so the `.clear` arm above is the defensive one.)
+    /// What must hold either way is that no platform colour reaches the divider.
+    @Test("the terminal theme's pane gap is its own surface, not the platform's")
+    func terminalPaneGapIsThemed() throws {
+        let terminal = try #require(Palette.named("terminal"))
+        #expect(isClose(terminal.paneGapColor, rgb(0x444444)),
+                "the terminal theme's pane gap is not its surface_dim")
+        guard let actual = channels(terminal.paneGapColor) else {
+            Issue.record("the terminal theme's pane gap did not resolve")
+            return
+        }
+        #expect(actual.alpha == 1,
+                "the terminal theme's pane gap is see-through, so the system shows through")
+    }
 }

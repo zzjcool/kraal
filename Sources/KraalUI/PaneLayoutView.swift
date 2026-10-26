@@ -28,6 +28,14 @@ struct PaneLayoutView: View {
     /// The scale of the screen this window is on. `displayScale` follows the
     /// view, unlike `NSScreen.main`, which follows the menu bar.
     @Environment(\.displayScale) private var displayScale
+    /// The user's theme.
+    ///
+    /// The pane container is the one piece of chrome that touches terminal content,
+    /// so it is also the one where a system colour hurts most: the divider used to be
+    /// `Color.secondary`, which is the *system appearance*, and a light-mode Mac
+    /// running a dark theme drew a `(223,223,223)` band between two `(17,20,25)`
+    /// panes. The theme has to reach here.
+    @Environment(\.palette) private var palette
 
     /// Where the divider sat when the current drag began.
     ///
@@ -80,7 +88,15 @@ struct PaneLayoutView: View {
             )
 
             ZStack(alignment: .topLeading) {
+                // The baseline for everything the panes do not cover: the container's
+                // own background, in the system's text colour.
                 Color(nsColor: .textBackgroundColor)
+                // Then the theme's say in it, on top of that baseline. Every gap in
+                // this container — between panes and around them — shows this layer,
+                // so with a theme that names a surface the seams match the panes
+                // instead of the Mac's appearance. `.clear` when the theme has no
+                // opinion, which leaves the line above exactly as it was.
+                palette.paneGapColor
 
                 if let surface {
                     ForEach(surface.panes, id: \.paneId) { pane in
@@ -357,8 +373,20 @@ struct PaneLayoutView: View {
     ) -> some View {
         let hit = rect(for: split.hitRect, grid: grid, in: size, cellSize: cellSize)
         return Rectangle()
-            .fill(Color.secondary.opacity(0.25))
+            // The band's fill is the theme's, not the platform's. `Color.secondary`
+            // is the system appearance: on a light-mode Mac it turned this 2-cell
+            // strip into a `(223,223,223)` bar running down a dark terminal.
+            .fill(palette.paneGapColor)
             .frame(width: hit.width, height: hit.height)
+            .overlay { gapLine(for: split.direction) }
+            // The divider must stay draggable whatever the fill is. A themed `.clear`
+            // (`Palette.system`: every token `nil`, which is what an unthemed app gets)
+            // draws nothing, and a shape that draws nothing is not reliably hit-tested —
+            // the divider would look right and stop responding to the mouse, which is a
+            // worse bug than the colour. An explicit content shape makes the whole
+            // `hitRect` — both cells of it — the target regardless of what is painted
+            // inside it.
+            .contentShape(Rectangle())
             .offset(x: hit.minX, y: hit.minY)
             .gesture(
                 DragGesture()
@@ -397,6 +425,27 @@ struct PaneLayoutView: View {
                     NSCursor.pop()
                 }
             }
+    }
+
+    /// The hairline down the middle of a split divider, along the divider's own axis.
+    ///
+    /// The axis comes from ``PaneSplitAxis``, the readable home of "the daemon names a
+    /// split after the line, not after where the panes go": a `.verticalDrag` divider
+    /// is a horizontal line between stacked panes, so its hairline runs full width and
+    /// is one point tall. Centred by `.overlay`'s default alignment, so a 2-cell band
+    /// gets the line in the middle of it.
+    ///
+    /// `.clear` when the theme has no `surface0`: no line, and `.allowsHitTesting(false)`
+    /// keeps an invisible 1pt strip from swallowing the drag.
+    @ViewBuilder
+    private func gapLine(for direction: PaneSurfaceSplitDirection) -> some View {
+        let line = Rectangle().fill(palette.paneGapLineColor)
+        switch PaneSplitAxis(direction) {
+        case .verticalDrag:
+            line.frame(height: 1).allowsHitTesting(false)
+        case .horizontalDrag:
+            line.frame(width: 1).allowsHitTesting(false)
+        }
     }
 
     /// The resize cursor matching a split direction.

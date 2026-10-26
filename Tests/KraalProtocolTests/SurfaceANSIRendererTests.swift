@@ -526,4 +526,93 @@ struct SurfaceANSIRendererTests {
         // Row 2, column 7 (0-based) → CUP `3;8`.
         #expect(text.contains("\u{1B}[3;8H"), "expected the bottom-right fallback: \(text)")
     }
+
+    // MARK: - Erase and repaint are one update
+
+    /// A reset must be **one** write, with the erase inside the
+    /// synchronized-output block.
+    ///
+    /// The bug this pins: the erase and the repaint were two `session.receive`
+    /// calls and the erase sat outside `?2026h`/`?2026l`. Ghostty applies a flush
+    /// when it arrives, so the surface composited *empty* between the two. A split
+    /// divider changes the grid on nearly every drag event, so the flash repeated
+    /// all the way across the drag — reported as "多动白条会闪屏".
+    ///
+    /// Asserted on the byte stream because that is where the defect lived: one
+    /// `render` call returning one `Data` is the whole contract, and the tests
+    /// below cannot see a `session.receive` split from here.
+    @Test("a clearing render erases inside the synchronized block")
+    func clearingRenderKeepsEraseInsideSync() {
+        var renderer = SurfaceANSIRenderer()
+        // A baseline first, so `previous` is set and a diff would otherwise be
+        // possible: the erase has to force a full repaint on its own.
+        _ = renderer.render(frame(width: 3, height: 2))
+
+        let reset = String(
+            bytes: renderer.render(frame(width: 2, height: 2), clearingFirst: true),
+            encoding: .utf8
+        ) ?? ""
+        guard let open = reset.range(of: "\u{1B}[?2026h"),
+              let erase = reset.range(of: "\u{1B}[2J"),
+              let close = reset.range(of: "\u{1B}[?2026l")
+        else {
+            Issue.record("missing sync pair or erase: \(reset)")
+            return
+        }
+        #expect(open.upperBound <= erase.lowerBound, "the erase preceded the sync block: \(reset)")
+        #expect(erase.upperBound < close.lowerBound, "the erase landed after the sync block: \(reset)")
+        // `3J` too: the rows written at the old width are in the scrollback, and an
+        // incremental repaint never revisits them.
+        #expect(reset.contains("\u{1B}[3J"), "the scrollback was left behind: \(reset)")
+    }
+
+    /// A clearing render repaints **every** row, even the ones that did not change.
+    ///
+    /// An erase that trusted `previous` would clear the screen and then emit only
+    /// the rows that differ — which after an erase is all of them, but only if the
+    /// flag is honoured. This is the assertion that would catch "the erase was
+    /// added, the diff was not disabled".
+    @Test("a clearing render repaints every row")
+    func clearingRenderRepaintsEveryRow() {
+        var renderer = SurfaceANSIRenderer()
+        // Same cells both times, so a diff would legitimately emit nothing.
+        _ = renderer.render(frame(width: 2, height: 3))
+        let reset = String(
+            bytes: renderer.render(frame(width: 2, height: 3), clearingFirst: true),
+            encoding: .utf8
+        ) ?? ""
+        for row in 1 ... 3 {
+            #expect(reset.contains("\u{1B}[\(row);1H"), "row \(row) was not repainted: \(reset)")
+        }
+    }
+
+    /// Without the flag nothing changes: a plain `render` still diffs, and still
+    /// keeps the scrollback. The default is what every non-reset frame uses.
+    @Test("a plain render still diffs and keeps the scrollback")
+    func plainRenderStillDiffs() {
+        var renderer = SurfaceANSIRenderer()
+        let first = frame(width: 2, height: 2)
+        _ = renderer.render(first)
+        let second = String(bytes: renderer.render(first), encoding: .utf8) ?? ""
+        #expect(!second.contains("\u{1B}[2J"), "a no-op frame erased the screen: \(second)")
+        #expect(!second.contains("\u{1B}[3J"), "a no-op frame erased the scrollback: \(second)")
+        #expect(!second.contains("\u{1B}[1;1H"), "a no-op frame repainted row 1: \(second)")
+    }
+
+}
+
+/// A blank frame of the given grid.
+///
+/// File scope rather than a member of the suite: `type_body_length` counts the
+/// suite's lines, and the erase tests pushed it over. The helper has no state, so
+/// where it lives is a lint question, not a design one.
+private func frame(width: UInt16, height: UInt16) -> FrameData {
+    FrameData(
+        cells: Array(repeating: CellData.blank, count: Int(width) * Int(height)),
+        width: width,
+        height: height,
+        cursor: nil,
+        hyperlinks: [],
+        graphics: Data()
+    )
 }

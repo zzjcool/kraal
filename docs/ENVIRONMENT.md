@@ -1042,3 +1042,81 @@ watchdog 包住，否则裸 `recv` 会永久挂起。
 
 探针断言的是 **daemon 之外的真实剪贴板**（`osascript -e "the clipboard as text"`），
 并且先把剪贴板设成哨兵值 `NOT_THE_PANE_VALUE`，所以「本来就是那个值」不可能误判为通过。
+
+### 8.11 分隔条：颜色不跟主题 + 拖拽闪屏（2026-10-26 实测并修复）
+
+用户报告两条：「两个 panel 中间的白条很碍眼，颜色和主题不对」「多动白条会闪屏」。
+两个独立的根因，都不是「画错了像素」。
+
+#### 根因 1：用了系统语义色，而不是主题色
+
+`splitHandle` 画的是 `Color.secondary.opacity(0.25)`。`Color.secondary` 是
+**系统外观**的语义色，而 pane 里的终端按**用户主题**着色，两者无关。用户的
+系统是浅色外观、主题是深色，于是 2 cell 宽的分隔带被画成：
+
+```text
+255×0.75 + 128×0.25 = 223.25  →  实测 (223,223,223)
+```
+
+而两侧 pane 的内容背景是 `(17,20,25)`。整条亮灰白带因此「很碍眼」。
+
+**修法**：`Palette` 新增 `paneGapColor`（`surface_dim` → `panel_background` →
+`.clear`）与 `paneGapLineColor`（`surface0` → `.clear`），`PaneLayoutView` 注入
+`@Environment(\.palette)`。fallback 是 `.clear` 而不是平台色：`nil` 在这个类型里
+的含义就是「主题没意见」，回退到系统色等于把同一个 bug 再藏一次。
+
+`gruvbox` 的 `surface_dim` 是 `0x282828` = (40,40,40)，实测分隔带 582/584 像素
+命中该色。
+
+#### 根因 2：擦屏与重绘是**两次** flush，且擦屏在同步输出块之外
+
+`apply(surface:)` 里重置路径的形状是：
+
+```swift
+session.receive(Data(clearScreenSequence.utf8))   // 第一次 flush：2J 3J H
+let painted = renderer.render(frame)              // 自身用 ?2026h … ?2026l 包住
+session.receive(painted)                          // 第二次 flush
+```
+
+Ghostty 收到一次 flush 就合成一次。于是中间存在一个**已擦除、尚未重绘**的状态，
+屏幕上就是一帧空白。拖分隔条时每跨一个 cell 网格就触发一次 reset，所以闪屏在
+整段拖拽中反复出现——这就是「多动白条会闪屏」。`render()` 的注释写着「每个 frame
+都包同步输出」，但擦屏根本不在那个 frame 里。
+
+`grid mismatch` 分支更糟：它 `resetSurfaces()` 后 `return`，**擦了屏却不画**。
+
+**修法**（`Sources/KraalProtocol/SurfaceANSIRenderer.swift` 与
+`Sources/KraalTerminalView/PaneTerminal.swift`）：
+
+- `render(_:clearingFirst:)`：擦屏序列进入同一个 `?2026h` 块，并强制全量重绘。
+- 所有擦屏路径改成「暂存帧并返回」语义：不擦屏，等网格可信时一次画完。
+- `resetSurfaces()` 移到 encode **之前**（`needsCleanRepaint` 分支原来在 encode 之后，
+  会让图片被擦掉却没有重新上传）。
+
+#### 断言与注入验证
+
+`gui.sh run drag-divider` 新增两条断言，都做过 A/B：
+
+| 断言 | 修复后 | 注入缺陷后 |
+| --- | --- | --- |
+| 分隔带像素命中主题 `surface_dim` | 582/584 | **37/584**，`exit 1` |
+| 每笔写出的擦屏都带着 cells | 12 writes，12 擦屏且全部同笔重绘 | **5/16 擦屏写没有 cells**，`exit 1` |
+
+三条坑，每条都是「检查通过其实没检查」：
+
+1. **亮度阈值抓不住这个 bug**。第一版用「分隔带不能是亮色」，注入
+   `Color.secondary` 后**依然通过**——深色系统外观下 `Color.secondary` 也是深色。
+   必须匹配精确主题色（`0x282828 ± 4`）才有区分力。
+2. **guest 路径写成了 host 路径**。VM 后端下 `driver` 在 guest 里跑，
+   `--in "$host_dir/shot-after.png"` 指向一个 guest 不存在的文件；截图失败、
+   像素数解析为空、按 0 处理，于是「0 个亮像素」读成了通过。现在截图失败与
+   计数不可解析都直接判失败。
+3. **擦屏那一笔没走日志**。第一版断言 `atomic/count`，但注入的缺陷把擦屏交给了
+   裸 `session.receive`，日志看不到它，断言照样绿。现在分类从**实际写出的字节**
+   推导（`;1H` 判定 cells，`ED2` 判定 erase），并让所有写出经过同一个 `deliver`。
+
+`.clear` 主题下分隔条不画任何东西，所以 `.contentShape(Rectangle())` 是必需的：
+一个不绘制内容的 shape 不保证命中测试，分隔条会「看着对、拖不动」。
+
+未验证：Retina（scale=2）下 `pixelSnapped(.up)` 是否让 2 cell 带多出 1pt；
+`hitRect` 厚度是否恒为 2 cell（只有 0.9.5 的 `120x2` / `2x20` 两个样本）。
