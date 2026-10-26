@@ -122,6 +122,8 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 ./Scripts/bench.sh                       # 性能探针（release；见 docs/PERFORMANCE.md）
 ./Scripts/bench.sh render                # 只测 VT 编码
 ./Scripts/bench.sh patch                 # 只测 patch 应用
+./Scripts/bench.sh patch --assert        # 对基线做回归判定（超 2x → exit 1）
+./Scripts/bench.sh patch --assert --record   # 改完热路径后重录基线
 
 ./Scripts/vm-bootstrap.sh                # 幂等：建/查 VM、验 Aqua、验三条 TCC 授权
 ./Scripts/vm-bootstrap.sh --fix-tcc      # 授权丢了才用（升级 guest 内 Homebrew 包后会丢）

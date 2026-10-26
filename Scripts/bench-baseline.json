@@ -1,0 +1,25 @@
+{
+  "_note": "Minimum of several runs. Regenerate with Scripts/bench.sh --assert --record on an idle machine.",
+  "factor": 2.0,
+  "labels": {
+    "200x1200 copy-then-publish": 18.651,
+    "200x1200 write-in-place": 18.981,
+    "200x300 copy-then-publish": 4.072,
+    "200x300 write-in-place": 4.22,
+    "200x50 1-cell patch": 1.7,
+    "200x50 copy-then-publish": 1.645,
+    "200x50 validate()": 4.525,
+    "200x50 whole-row patch": 2.62,
+    "200x50 write-in-place": 1.578,
+    "300x80 1-cell patch": 2.225,
+    "300x80 copy-then-publish": 1.958,
+    "300x80 validate()": 10.433,
+    "300x80 whole-row patch": 3.504,
+    "300x80 write-in-place": 1.956,
+    "80x24 1-cell patch": 0.965,
+    "80x24 copy-then-publish": 0.752,
+    "80x24 validate()": 0.747,
+    "80x24 whole-row patch": 1.295,
+    "80x24 write-in-place": 0.727
+  }
+}
