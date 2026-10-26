@@ -30,10 +30,17 @@ main 合入 issue #2 后是 **32 绿 / 22 红**。
 |---|---|---|---|
 | `Tests/KraalProtocolTests/WireOrderTests.swift` | 9 | 3 | herdr-gpui `herdr-protocol/tests/{compatibility,host_theme,clipboard}.rs` |
 | `Tests/KraalProtocolTests/ANSIConformanceTests.swift` | 14 | 10 | herdr `src/protocol/render_ansi.rs`（51 个测试里挑出与渲染结果有关的） |
-| `Tests/KraalProtocolTests/FramingConformanceTests.swift` | 8 | 2 | herdr-gpui `compatibility.rs` + herdr `render_ansi.rs:1882` + `herdr-client/tests/framing.rs` |
+| `Tests/KraalProtocolTests/FramingConformanceTests.swift` | 8 | 2 | herdr-gpui `compatibility.rs` + herdr `render_ansi.rs:1882` + `herdr-client/src/tests/framing.rs` |
 | `Tests/KraalProtocolTests/UpstreamFixtureTests.swift` | 4 | 1 | herdr-gpui 的三份冻结 fixture（已复制进 `Fixtures/upstream-*.json`） |
 | `Tests/KraalClientTests/HandshakeFencingTests.swift` | 10 | 7 | herdr-gpui `version_mismatch.rs`、`session_state.rs`、`framing.rs`、`supervisor.rs`；rootshell 快照校验 |
 | `Tests/KraalClientTests/GeometryFencingTests.swift` | 10 | 1 | rootshell `TmuxDividerResizeTests`、`HerdrProtocolTests`；herdr-gpui `surface_prefix.rs` |
+
+### 后续补的（这些不是本轮移植的那 54 条）
+
+| 文件 | 条数 | 来源 | 为什么需要 |
+|---|---|---|---|
+| `Tests/KraalClientTests/SplitDragFenceTests.swift` | 15 | herdr-gpui `terminal/splits.rs` 的 `topology`、`window/mouse.rs` 的 `flush_split` | 拖拽途中结构变化会移动错的分隔条；且请求不带 `tab_id` 时会改错 tab。两者都静默。 |
+| `Tests/KraalProtocolTests/SplitWireOrderTests.swift` | 9 | herdr-gpui `crates/herdr-protocol/src/wire.rs:457`（`direction, pos, area, hit_rect, path`） | `decodeSplit` 此前**零覆盖**：`WireOrderTests` 只断言过 `splits.isEmpty`，唯一的 surface fixture 也没有 splits。字段对调不会解码失败，只会把分隔条画到别处。 |
 
 `root shell` 与 `herdr-gpui` 里另有大量测试是**没有移植**的，理由写在第四节。
 
@@ -108,9 +115,9 @@ main 合入 issue #2 后是 **32 绿 / 22 红**。
 |---|---|---|---|
 | `bytes after a complete message are rejected` | `compatibility.rs:430` | `ServerMessageDecoder` 解完就返回，不检查 `reader.isAtEnd()`。`BincodeError.trailingBytes` 是**死代码**（定义了、从不抛出）。解码错位的流会继续把垃圾当作下一条消息的开头。 | #7 |
 | `overlapping rows are rejected` | `render_ansi.rs:1882`、`surface_scroll.rs` | `validatePatch` 查每行边界，不查行间重叠。重叠时后一行静默覆盖前一行，屏幕上出现 daemon 从未合成过的内容。 | #7 |
-| `an unrenderable grid is refused by the store` | `herdr-client/tests/framing.rs:24` | `resizeSurface` 只挡 0。daemon 的上限是每轴 4096、总计 1 000 000 格；`4097×24` 和 `1001×1000` 现在都被接受并直接发给 daemon。 | #8 |
+| `an unrenderable grid is refused by the store` | `herdr-client/src/tests/framing.rs:24` | `resizeSurface` 只挡 0。daemon 的上限是每轴 4096、总计 1 000 000 格；`4097×24` 和 `1001×1000` 现在都被接受并直接发给 daemon。 | #8 |
 | `a non-finite drag cannot produce a ratio` | rootshell `TmuxDividerResizeTests:66` | `splitRatio` 挡了除数为 0，没挡分子。`translatedY` 为 `NaN`/`∞` 时直接传出去（`min`/`max` 不消毒 NaN）。daemon 侧 `layout.set_split_ratio` 会拒（`src/app/api/layouts.rs:235`），但那条错误用户看不到，分隔条**一动不动**。 | #8 |
-| `a ratio request names its tab and never a pane` | rootshell `HerdrProtocolTests:29` | `setSplitRatio` 只发 `path` + `ratio`，不发 `tab_id`。daemon 侧 `tab_id` 可选，缺省时走 "当前 workspace 的当前 tab"（`src/app/api/layouts.rs` 的 `resolve_layout_export_target` 的 `(None, None)` 分支）—— 只有在本客户端恰好显示着它时才是同一个 tab。拖拽落在焦点切换之后，就会**静默地改掉用户没在看的那个 tab**。为了可测，只把参数构造成提成了纯函数 `AppStore.splitRatioParams`，行为未改。 | #8 |
+| `a ratio request names its tab and never a pane` | rootshell `HerdrProtocolTests:29` | 当时 `setSplitRatio` 只发 `path` + `ratio`，不发 `tab_id`。daemon 侧 `tab_id` 可选，缺省时走 "当前 workspace 的当前 tab"（`src/app/api/layouts.rs` 的 `resolve_layout_export_target` 的 `(None, None)` 分支）—— 只有在本客户端恰好显示着它时才是同一个 tab。拖拽落在焦点切换之后，就会**静默地改掉用户没在看的那个 tab**。**已在 #182 修完**：`setSplitRatio` 是零调用方的死路（生产拖拽走的是内联字典），已删除；唯一路径 `SplitDragState.drive()` 经 `AppStore.splitRatioParams` 发送，恒带 `tab_id`。教训：这条测试原本守护的是那条死路，所以「拖拽带 tab_id」从未被真正验证过。 | #8、#182 |
 | `a hidden cursor is parked, not abandoned` | `render_ansi.rs:2218` | 光标隐藏时要把它停在**上次可见的位置**再 `?25l`，否则 IME 候选框出现在角落。我们现在只发 `?25l`。 | #3 |
 | `the frozen hello keeps every negotiated field` | `endpoint.rs:361` | `EndpointClientHello` 没有自定义 `init(from:)`，每个字段都必填。上游 fixture 省掉了 `surface_active`（serde 默认 `true`）等四个字段。**目前不影响 app**（我们只发不收），但类型描述的不是它所声称的线协议，将来任何读 hello 的代码（测试替身、诊断工具）都会在合法载荷上失败。 | #10 |
 
@@ -180,5 +187,45 @@ swift test --filter "Handshake compatibility"  # 按 suite
 swift test 2>&1 | grep -E '^✘ Test "' | grep -v 'failed after'
 ```
 
-参考项目在 `/tmp/kraal-refs/{herdr,herdr-gpui,rootshell}`（`--depth 1` 克隆）；
-文件不在的话重新 clone 即可，坐标（文件:行号）取自本轮的快照。
+## 参考仓库的位置
+
+本文件里的坐标（`文件:行号`）是**快照**，不是可以长期依赖的路径。`/tmp/kraal-refs/...`
+只是写文档时手边恰好有的克隆；`/tmp` 在 macOS 上是会被系统清理的，实测就发生过三个
+目录被逐层删空（`herdr` 只剩 59 个 `src/detect/manifests/*.toml`、`herdr-gpui` 与
+`rootshell` 只剩空目录），此后所有坐标都指向不存在的文件。
+
+**位置可以任意，失效就重新 clone。**
+
+```bash
+git clone --depth 1 https://github.com/herdrdev/herdr      ~/refs/herdr
+git clone --depth 1 https://github.com/penso/herdr-gpui    ~/refs/herdr-gpui
+git clone --depth 1 https://github.com/kitknox/rootshell   ~/refs/rootshell
+```
+
+放 `~/refs/` 而不是 `/tmp/`：这样不会在下次重启后消失。
+
+`--depth 1` 够用——本文只引用测试文件，不查历史。但**行号会随上游漂移**，
+上游改过之后按位置找可能落到别的地方；文件路径比行号稳定得多，优先按路径找，
+找不到再按测试名搜（`rg -n "the_test_name"`）。
+
+### 三个仓库的目录形状不一样
+
+上面 §二、§三 的表格为了短，写的是裸文件名（`compatibility.rs`、
+`version_mismatch.rs`）。它们在各自仓库里的**真实位置**并不都在顶层
+`tests/` 下，照裸名找会找不到：
+
+| 裸文件名 | 实际路径 |
+|---|---|
+| `compatibility.rs`、`host_theme.rs`、`clipboard.rs`、`surface_prefix.rs`、`surface_encodings.rs` | herdr-gpui `crates/herdr-protocol/tests/` |
+| `framing.rs` | herdr-gpui `crates/herdr-client/src/tests/`（**不是** `crates/herdr-client/tests/`，那个目录下只有 `live.rs`） |
+| `session_state.rs` | herdr-gpui `crates/herdr-client/src/tests/` |
+| `version_mismatch.rs` | herdr-gpui `crates/herdr-gpui/src/state/tests/` |
+| `supervisor.rs` | herdr-gpui `crates/herdr-gpui/src/code_server/` |
+| `surface_scroll.rs`、`surface_delta.rs` | herdr-gpui `crates/herdr-protocol/src/`（是实现，不是测试） |
+| `TmuxDividerResizeTests.swift`、`HerdrProtocolTests.swift` | rootshell `rootshellTests/` |
+| `render_ansi.rs`、`activation_tests.rs`、`layouts.rs` | herdr（daemon）`src/` 下 |
+
+注意最后一行：**`herdr` 和 `herdr-gpui` 是两个仓库**。本文引的 `render_ansi.rs`、
+`activation_tests.rs`、`src/app/api/layouts.rs` 都在 herdr 里，在 herdr-gpui 里搜不到，
+不要因此以为路径写错、也不要拿 herdr-gpui 的版本来替代——daemon 的行为只有 daemon
+仓库能定义。反过来，`compatibility.rs` 这批只在 herdr-gpui 里有。
