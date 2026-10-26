@@ -234,6 +234,23 @@ public extension Palette {
     /// and a dark-theme terminal on a light Mac then gets a bright hairline running
     /// through its own colours. "No opinion" means the band alone is the seam.
     var paneGapLineColor: Color { color(surface0, fallback: .clear) }
+
+    /// The fill of a pane's border cell — the ring the daemon reserves outside
+    /// `innerRect`.
+    ///
+    /// It must match what the pane's *content* is drawn on, because the border is
+    /// continuous with it: a different colour there reads as a one-row blank band
+    /// above and below every pane. That is the defect this token exists for, and it
+    /// became visible only once the container got a themed tint — before that the
+    /// border and the container happened to be the same platform colour.
+    ///
+    /// `panel_background` first: it is the theme's own chrome surface and the closest
+    /// thing to "the surface a pane sits on". `.clear` last, which leaves the
+    /// container behind it, i.e. `paneGapColor` — the seam's colour, which is what a
+    /// caller with no better information would pick anyway.
+    var paneSurfaceColor: Color {
+        color(panelBackground, fallback: color(surfaceDim, fallback: .clear))
+    }
     var mutedColor: Color { color(overlay0, fallback: .secondary) }
     var mutedStrongColor: Color { color(overlay1, fallback: .secondary) }
     var textColor: Color { color(text, fallback: .primary) }

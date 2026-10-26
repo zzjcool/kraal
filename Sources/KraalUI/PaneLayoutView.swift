@@ -79,6 +79,24 @@ struct PaneLayoutView: View {
     /// builds a second `PaneTerminalModel` rather than reusing a pane's.
     let popupContent: (ClientShellPopupSurface, PopupGeometry) -> AnyView
 
+    /// The colour behind a pane's border cell, or `nil` for the palette's own.
+    ///
+    /// The border belongs to the pane, not to the seam beside it, so it has to be the
+    /// terminal's own background — a colour that lives on the Ghostty surface, which
+    /// this file must not know about. `nil` (previews, tests) falls back to
+    /// `palette.paneSurfaceColor`.
+    let paneBorderColor: (@MainActor (String) -> Color?)?
+
+    init(
+        paneContent: @escaping (String, PaneSurfacePane) -> AnyView,
+        popupContent: @escaping (ClientShellPopupSurface, PopupGeometry) -> AnyView,
+        paneBorderColor: (@MainActor (String) -> Color?)? = nil
+    ) {
+        self.paneContent = paneContent
+        self.popupContent = popupContent
+        self.paneBorderColor = paneBorderColor
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let surface = store.surface
@@ -98,7 +116,16 @@ struct PaneLayoutView: View {
                 // opinion, which leaves the line above exactly as it was.
                 palette.paneGapColor
 
-                if let surface {
+                if let surface {                    // Cover each pane's border cell; see `PaneBorderCells`.
+                    PaneBorderCells(
+                        panes: surface.panes,
+                        grid: grid,
+                        container: proxy.size,
+                        cellSize: pointsPerCell,
+                        colour: { paneBorderColor?($0) ?? palette.paneSurfaceColor },
+                        rect: rect
+                    )
+
                     ForEach(surface.panes, id: \.paneId) { pane in
                         let frame = rect(
                             for: pane.innerRect,
@@ -321,9 +348,30 @@ struct PaneLayoutView: View {
                         in: proxy.size,
                         cellSize: cell
                     )
+                    // The cell origin is logged, not just the size.
+                    //
+                    // "Does every row belong to some pane, or does one fall between
+                    // them?" is not answerable from sizes alone, and that question is
+                    // the difference between a layout bug and a rendering one. A
+                    // 35-row grid with panes 20 rows and 14 rows tall leaves exactly
+                    // one row unaccounted for, and only the origin says which —
+                    // measured on a live split: `grid=112x35` with
+                    // `p14=112x20 p16=112x14`, i.e. 34 of 35 rows.
                     return "\(pane.paneId)=\(pane.innerRect.width)x\(pane.innerRect.height)"
+                        + "@\(pane.innerRect.originX),\(pane.innerRect.originY)"
+                        + " rect=\(pane.rect.width)x\(pane.rect.height)"
+                        + "@\(pane.rect.originX),\(pane.rect.originY)"
                         + "->\(Int(frame.width))x\(Int(frame.height))pt"
                 }
+                // The split's geometry, in cells. Logged next to the panes because the
+                // interesting question spans both: which rows does *nothing* cover?
+                // `hitRect` is what the divider is drawn in, and it is not necessarily
+                // the gap the daemon left between the two `innerRect`s.
+                let splitsLog = (store.surface?.splits ?? []).map { split -> String in
+                    let hit = split.hitRect
+                    return "\(split.direction)@\(split.position) "
+                        + "hit=\(hit.width)x\(hit.height)@\(hit.originX),\(hit.originY)"
+                }.joined(separator: " ")
                 // `containerOrigin` is the container's top-left **inside the
                 // window**, in points. It exists because the harness needs to map a
                 // pane onto a screenshot, and deriving the origin as
@@ -335,7 +383,8 @@ struct PaneLayoutView: View {
                     + "surfacePaned=\(store.surface != nil) "
                     + "cell=\(pointsPerCell.width)x\(pointsPerCell.height) "
                     + "containerOrigin=\(containerOriginInWindow) "
-                    + "panes=[\(panes.joined(separator: " "))]")
+                    + "panes=[\(panes.joined(separator: " "))] "
+                    + "splits=[\(splitsLog)]")
             }
         }
     }

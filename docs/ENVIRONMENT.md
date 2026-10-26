@@ -1140,3 +1140,73 @@ Ghostty 收到一次 flush 就合成一次。于是中间存在一个**已擦除
 扫描而不是推算，是因为坐标换算在这里有三层（屏幕点 / 窗口点 / 窗口图像素），
 每错一层都是 ~25pt 级别的静默偏差。颜色断言只需要回答「有没有一条全宽的、
 主题色的横带」，这是扫描能直接回答的问题。
+
+### 8.12 pane 四周的空白带：daemon 保留了边框 cell，没人画（2026-10-26 实测并修复）
+
+用户第二次报的是「上下拖动分隔条后，上面 pane 的下方会多出一条空白行，上下都
+可能出现」。它不是 §8.11 那个白条，是另一个缺陷，而且**在本轮改动之前就存在**：
+容器底色原来是系统的 `textBackgroundColor`，和 pane 边框区域同色，所以看不见；
+§8.11 给容器铺了主题色之后，没人画的那一圈就变成了实心色块。
+
+#### 实测几何（`split-down`，VM 后端）
+
+```text
+layout: container=959x664 grid=119x36 cell=8.0x18.0 containerOrigin=221,71
+panes=[w1:p1=116x16@1,1 rect=119x18@0,0->928x288pt
+       w1:p2=116x16@1,19 rect=119x18@0,18->928x288pt]
+splits=[vertical@18 hit=119x2@0,17]
+```
+
+- `pane.rect` **包含** daemon 预留的 1 cell 边框，`pane.innerRect` 是内容
+- 只有 `innerRect` 有 view；`rect - innerRect` 那一圈没有任何 view
+- grid 是**居中**的（`max((size - gridSize) / 2, 0)`），容器 664pt 装 36×18=648pt
+  的 grid，上下各余 8pt —— 这两条也归不到任何 pane
+- 于是 row 0、row 35 以及它们的左右两侧露出容器底色
+
+截图（gruvbox，1180×760）里就是 `rows 72..78` 和 `rows 727..733` 两条
+`(40,40,40)`，各 7px ≈ 1 cell 减掉的内容偏移。用户看到的就是这两条。
+
+#### 修法：给每个 pane 补一层背景，**不能**改 pane 的 frame
+
+```swift
+paneBorderColor?(paneId) ?? palette.paneSurfaceColor
+    .frame(w: rect(pane.rect), h: ...)     // 背景可以用外框
+    .position(...)
+```
+
+颜色取**终端自己的** `state.backgroundColor`（`PaneTerminalModel.state` 上就有），
+因为边框在语义上属于 pane、与里面的终端连续，不属于旁边的缝隙。它只存在于
+Ghostty surface 上，所以由 app 层注入（`RootView.paneBorderColor` →
+`PaneLayoutView` → `PaneBorderCells`）。
+
+`CGRect.extendedToContainerEdge(cellRect:grid:container:cellSize:)`
+（`Sources/KraalUI/PaneCoverageRect.swift`）把贴边的 pane 背景向外拉满，吸收居中
+余量；中间的 pane 原样返回。
+
+**必须是 background，绝不能去撑 pane 的 frame**：Ghostty 用 view 的像素尺寸
+floor 除 cell 尺寸来定 grid，宽一格就会重排、每行都折行（同 §8.8 那次的根因）。
+
+#### 三条「检查通过但其实没查」
+
+| 做法 | 结果 |
+| --- | --- |
+| 用 `DIVIDER_MATCH`（`surfaceDim`）判「边框画上了」 | gruvbox 的 `panel_background` 与 `surfaceDim` 同为 `0x282828`，两者无法区分 |
+| 断言 `state.backgroundColor` 的日志 | 日志打了 16 次 `bg=247,247,247`，但那是**另一次**求值；要用像素才知道最终画了什么 |
+| 把 ring 临时改成 `Color.red` | 这个才是决定性的：红色只出现在 `rows 79..96` 和 `709..726`，证明 ring 覆盖的是**内层边框**，容器上下那 7px 余量还没人管 |
+
+最终断言扫描容器内每一行，只允许**一段**（可被 1pt hairline 切开）gap 色带 ——
+即分隔带自己。注入「删掉 ring」后变成三段：
+
+```text
+3 gap-coloured band(s) [(73, 96), (385, 420), (709, 732)]
+```
+
+`(73,96)` 与 `(709,732)` 各 24px = 1 cell + 8pt 居中余量，正是用户报的那两条。
+`split-down` 因此从 `passed` 变 `FAILED ... exit 1`。
+
+#### 未验证
+
+- 只测了 `split-down`（用户报的那个方向）。`split-right` / 四宫格没做像素级
+  border 断言；几何上走的是同一段代码。
+- 只在 gruvbox 上验证。`terminal` 主题（`surfaceDim = 0x444444`）下边框和缝隙
+  颜色不同，视觉上是否可接受没有截图确认。

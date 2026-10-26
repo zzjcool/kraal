@@ -1225,7 +1225,106 @@ print(f"direction=down heights={heights}")
         # has a bright bar across it" is the claim that was actually made, and it is
         # cheap to assert on the shape it was reported in.
         check_horizontal_divider_colour
+        check_border_rows || return 1
     }
+}
+
+# The rows the daemon reserves as a pane border must not show the container behind them.
+#
+# The defect: `pane.rect` includes a border cell, `pane.innerRect` is the content, and
+# only the latter had a view. So the border cells fell through to the container's own
+# background. That was invisible while the container was the system's
+# `textBackgroundColor` and the panes' chrome matched it; it became a visible one-row
+# band above and below every pane once the container got a themed tint.
+#
+# Measured on a live split (`grid=119x36`):
+#   panes = p1 116x16@1,1 and p2 116x16@1,19   divider hit = 119x2@0,17
+#   -> rows 1..16 and 19..34 are panes, 17..18 are the divider, and rows 0 and 35
+#      belong to nobody. One full cell each at 18pt.
+#
+# The assertion is "no full-width row of the container's gap colour remains": after the
+# fix every row of the grid is painted by either a pane, the divider, or a pane border.
+check_border_rows() {
+    local shot="$VM_ROOT/border-rows.png" out verdict
+    if ! driver shot -o "$shot" >"$host_dir/shot-border.txt" 2>&1; then
+        check "no unpainted border row above or below the panes" 1 \
+            "screenshot failed: $(cat "$host_dir/shot-border.txt")"
+        return 1
+    fi
+    local container_w container_h window_w sidebar_w band_w
+    read -r container_w container_h <<EOF
+$(container_size)
+EOF
+    [ -n "${container_h:-}" ] || {
+        check "no unpainted border row above or below the panes" 1 "cannot read the container size"
+        return 1
+    }
+    window_w=$(driver window | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+    sidebar_w=$((window_w - container_w))
+    band_w=$((container_w - 120))
+    # Sweep every row of the container and collect the rows that are entirely the
+    # container's gap colour. Before the fix that set is exactly {row 0, row 35}; after
+    # it, empty.
+    # The container's own rows, in the screenshot's coordinates. `driver shot` captures
+    # the *window*, and the app reports where the container starts inside it
+    # (`containerOrigin=X,Y` in the `layout:` line), so the sweep has to start there —
+    # otherwise the tab bar above it is measured too, and the tab bar legitimately *is*
+    # the gap colour. That off-by-a-region made the first run report 92 rows.
+    local layout container_oy
+    layout=$(grep -o 'layout: container=.*' "$host_dir/kraal.log" 2>/dev/null | tail -1)
+    container_oy=$(printf '%s' "$layout" | sed -n 's/.*containerOrigin=-*[0-9]*,\(-*[0-9]*\).*/\1/p')
+    [ -n "$container_oy" ] || {
+        check "no unpainted border row above or below the panes" 1 "cannot read the container origin"
+        return 1
+    }
+    # Sweep the container's rows and record which ones are *entirely* the gap
+    # colour. Before the fix the answer is "every strip outside the grid": the top
+    # and bottom edges (the centred grid leaves ~8pt each) plus each pane's border
+    # cell. After it, the only such rows are the divider's own band.
+    local gap_rows="" y
+    for ((y = container_oy + 2; y < container_oy + container_h - 2; y++)); do
+        out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $y $band_w 1" \
+            --match "$DIVIDER_MATCH" 2>&1)
+        local n
+        n=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+        [ -z "$n" ] && continue
+        [ "$n" -ge "$((band_w * 19 / 20))" ] && gap_rows="$gap_rows $y"
+    done
+    local verdict
+    verdict=$(python3 - "$gap_rows" "$container_h" <<'PY_BORDER'
+import sys
+rows = [int(v) for v in sys.argv[1].split()]
+# The divider is a band with a 1pt hairline down its middle, so the band itself
+# arrives as two runs separated by that line. Treat gaps of up to 2 rows as the
+# same band rather than as an unpainted strip.
+RIDGE = 2
+# The divider's band is the one run of gap-coloured rows that is allowed to exist,
+# and it is a single contiguous run. Anything else is an unpainted strip: the
+# container's own background showing through where neither a pane nor the divider
+# has a view.
+runs, start, prev = [], None, None
+for r in rows:
+    if start is None:
+        start = prev = r
+    elif r - prev <= 1 + RIDGE:
+        prev = r
+    else:
+        runs.append((start, prev))
+        start = prev = r
+if start is not None:
+    runs.append((start, prev))
+longest = max((b - a + 1 for a, b in runs), default=0)
+stray = [r for a, b in runs if b - a + 1 != longest for r in (a, b)]
+if len(runs) > 1 or longest < 2:
+    print(
+        f"{len(runs)} gap-coloured band(s) {[(a, b) for a, b in runs]}; "
+        "only the divider's own band may be unpainted"
+    )
+    raise SystemExit(1)
+print(f"one gap-coloured band at rows {runs[0][0]}..{runs[0][1]} (the divider)")
+PY_BORDER
+)
+    check "no unpainted border row above or below the panes" "$?" "$verdict"
 }
 
 # The divider of a stacked split, as pixels.

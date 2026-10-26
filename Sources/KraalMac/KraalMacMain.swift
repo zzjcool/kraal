@@ -77,6 +77,27 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         return candidate == real ? "This Mac" : "sandbox"
     }
 
+    /// The colour behind a pane's border cell: the terminal's own background.
+    ///
+    /// The daemon reserves one cell of border around each pane and the border belongs
+    /// to the pane, not to the seam beside it, so it must match the ghostty surface
+    /// inside that pane. That colour only exists on the surface, which is why it is
+    /// resolved here rather than inside `PaneLayoutView`.
+    private static func paneBorderColour(
+        store: AppStore,
+        paneId: String,
+        pool: PaneTerminalPool
+    ) -> Color? {
+        guard let surface = store.surface else { return nil }
+        pool.selectMachine(surface.bootId)
+        let colour = pool.model(for: paneId).state.backgroundColor
+        return Color(
+            red: Double(colour.red) / 255,
+            green: Double(colour.green) / 255,
+            blue: Double(colour.blue) / 255
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // An accessory launch has no Dock tile and never activates, which is what
         // keeps a second copy from pulling focus away from the first. It still
@@ -130,6 +151,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             )
         } popupPaneContent: { store, popup, _ in
             self.popupView(store: store, popup: popup, pool: pool)
+        } paneBorderColor: { store, paneId in
+            Self.paneBorderColour(store: store, paneId: paneId, pool: pool)
         }
         // Injected on the view rather than on the hosting view, so sheets and
         // popovers inherit it too.
