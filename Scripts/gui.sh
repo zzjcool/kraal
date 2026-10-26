@@ -1177,6 +1177,13 @@ print(splits[0]["direction"])
 }
 
 # Split Down: proves the direction is honoured rather than hard-coded.
+# Pins the theme, like `case_drag_divider_app_setup`: the divider assertion below
+# compares against `paneGapColor`, which only means something if the theme is known.
+case_split_down_app_setup() {
+    theme_write_config "gruvbox"
+    return 0
+}
+
 case_split_down() {
     requires() { echo ax; }
     fixture() {
@@ -1212,7 +1219,91 @@ if problems:
 print(f"direction=down heights={heights}")
 ')
         check "split-down stacks two equal rows" "$?" "$geometry"
+        # The user's report was a **horizontal** band between two stacked panes, which
+        # is this case's geometry (`direction: down` -> a `.vertical` divider line).
+        # The colour fix is one `.fill` and therefore direction-agnostic, but "no pane
+        # has a bright bar across it" is the claim that was actually made, and it is
+        # cheap to assert on the shape it was reported in.
+        check_horizontal_divider_colour
     }
+}
+
+# The divider of a stacked split, as pixels.
+#
+# The user's report was a **horizontal** band between two stacked panes, which is this
+# case's geometry. The colour fix is a single `.fill` and therefore direction-agnostic,
+# but "no pane has a bright bar across it" is the claim that was actually made and it is
+# cheap to assert in the shape it was reported in.
+#
+# The band's position comes from the app's own `layout:` line, not from arithmetic on
+# `pos`: that line already carries `containerOrigin` (in window points) and each pane's
+# rendered rectangle in points. Deriving it instead is the 25pt mistake issue #103
+# records — `window_h - container_h` also counts the status bar and the bottom gap.
+check_horizontal_divider_colour() {
+    local shot="$VM_ROOT/divider-down.png" out count
+    if ! driver shot -o "$shot" >"$host_dir/shot-divider-down.txt" 2>&1; then
+        check "the stacked divider is themed" 1 \
+            "screenshot failed: $(cat "$host_dir/shot-divider-down.txt")"
+        return 1
+    fi
+    # The band is **found**, not computed.
+    #
+    # Every coordinate-based attempt here was wrong by a different amount: the app's
+    # `containerOrigin` is in window points, `driver shot` produces a window image, and
+    # the status bar plus title bar move the two apart by ~26pt — the class of error
+    # issue #103 recorded (`window_h - container_h` was off by 25pt). Deriving the
+    # divider's row from `pos`, cells and the container height reintroduced exactly
+    # that. Scanning asks the only question that matters for a colour assertion: is
+    # there a full-width horizontal band painted in the theme's gap colour?
+    local container_w container_h
+    read -r container_w container_h <<EOF
+$(container_size)
+EOF
+    [ -n "${container_h:-}" ] || {
+        check "the stacked divider is themed" 1 "cannot read the container size"
+        return 1
+    }
+    # The container starts where the sidebar ends, and the band must span the
+    # container — sampling from x=0 rules out nothing and found 0% because the first
+    # ~230pt are the sidebar. Measured: from x=230 a row is 900/900, from x=80 it is
+    # 658/800 (the sidebar's own colours are not the theme's gap colour).
+    local window_w sidebar_w band_w
+    window_w=$(driver window | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+    sidebar_w=$((window_w - container_w))
+    band_w=$((container_w - 120))
+    # Scan only the container's own vertical band, and skip its first rows too: the
+    # rows above the container (tab bar, the window's own background) can be the same
+    # colour as the theme's gap, and the first version broke on `y=38` — a row of the
+    # tab bar — then reported "rows 38 and 39 are the theme's gap colour" for a split
+    # that is actually at y=385. Measured: the real band is at 385/390 in this window,
+    # and y=38 matches too, so "the first full-width themed row" is not the divider.
+    local found="" y first last
+    first=$((container_h / 2))
+    last=$((container_h - 8))
+    for ((y = first; y < last; y++)); do
+        out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $y $band_w 1" \
+            --match "$DIVIDER_MATCH" 2>&1)
+        count=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+        [ -z "$count" ] && continue
+        # A whole row, not a few pixels: a hairline or one tinted cell is not a band.
+        if [ "$count" -ge "$((band_w * 9 / 10))" ]; then
+            found=$y
+            break
+        fi
+    done
+    if [ -z "$found" ]; then
+        check "the stacked divider is themed" 1 \
+            "no full-width row of the theme's gap colour anywhere in the window"
+        return 1
+    fi
+    # Two rows check it is a band (2 cells) rather than one antialiased line.
+    out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $((found + 1)) $band_w 1" \
+        --match "$DIVIDER_MATCH" 2>&1)
+    local second
+    second=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+    check "the stacked divider is themed" \
+        "$([ -n "$second" ] && [ "$second" -ge "$((band_w * 9 / 10))" ] && echo 0 || echo 1)" \
+        "rows $found and $((found + 1)) are the theme's gap colour at y=$found"
 }
 
 # Close Pane via the menu bar: the inverse of split, and the first case that has
@@ -1934,6 +2025,7 @@ case_drag_divider_app_setup() {
 # `theme-applied` left `gruvbox-light` behind, so this case ran against a light theme
 # and the "divider is not the system grey" threshold was measuring the wrong thing.
 case_drag_divider() {
+    :
     requires() { echo focus; }
     fixture() {
         if [ "$(pane_count)" = "0" ]; then
