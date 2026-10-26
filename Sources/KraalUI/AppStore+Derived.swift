@@ -62,13 +62,31 @@ extension AppStore {
     /// current position and clamped; asking to move past either end is a no-op
     /// rather than a request the daemon will reject.
     public func shiftFocusedTab(by delta: Int) {
+        guard let plan = shiftFocusedTabPlan(by: delta) else { return }
+        move(tabId: plan.tabId, toIndex: plan.index)
+    }
+
+    /// The target a shift would move to, or nil when there is nothing to do.
+    ///
+    /// Split out so the boundary is assertable. `move` only sends an asynchronous
+    /// request and does not touch local order, so a test watching `visibleTabs` passed
+    /// with the bounds check **removed** — it was asserting that a request sent into
+    /// nothing changed nothing. The plan is the decision itself.
+    public struct TabShift: Equatable, Sendable {
+        public var tabId: String
+        public var index: Int
+    }
+
+    public func shiftFocusedTabPlan(by delta: Int) -> TabShift? {
         let tabs = visibleTabs
         guard let current = tabs.firstIndex(where: { $0.focused })
             ?? tabs.firstIndex(where: { $0.tabId == actionTabId })
-        else { return }
+        else { return nil }
         let target = current + delta
-        guard tabs.indices.contains(target) else { return }
-        move(tabId: tabs[current].tabId, toIndex: target)
+        // `tab.move` takes an absolute `insert_index`; asking for one past either end
+        // is a request the daemon rejects.
+        guard tabs.indices.contains(target) else { return nil }
+        return TabShift(tabId: tabs[current].tabId, index: target)
     }
 
     /// Every machine's agents, in the pane's display order.
