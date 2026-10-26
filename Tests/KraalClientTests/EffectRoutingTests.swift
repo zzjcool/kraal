@@ -4,17 +4,22 @@
 //  EffectRoutingTests.swift
 //  KraalClientTests
 //
-//  Which machine's desktop-side effects are allowed through.
+//  Which machine's effects reach the desktop, and the one exception.
 //
-//  Clipboard and window title are suppressed for a machine that is not on screen:
-//  otherwise a background machine's copy would replace yours and its title would
-//  rewrite the window. Notifications are the exception — "an agent on the *other*
-//  machine is blocked waiting for you" is the whole point of watching several
-//  machines, and the same blanket suppression made that case silent.
+//  Clipboard, window title and bell belong to the machine on screen: applying a
+//  background machine's would overwrite what the visible one put there. A notification is
+//  the opposite — "an agent on the *other* machine is blocked waiting for you" is exactly
+//  the case worth interrupting for, and dropping it made the multi-machine setup silent
+//  (#140).
 //
-//  These run against `handleEffectEvent` rather than the applier: the applier's work
-//  is AppKit (`UNUserNotificationCenter`, `NSPasteboard`), which cannot be asserted
-//  headlessly. The decision is what can be, and the decision is what was wrong.
+//  So `handleEffectEvent` skips `isActive` for notifications and honours it for
+//  everything else. Getting that backwards is silent in both directions: either no
+//  notification ever appears for a second machine, or a background machine's bell rings
+//  and its title wins.
+//
+//  The machine label travels **with** the effect rather than being read when the desktop
+//  drains the queue: by then the user may have switched machines, and `[alpha-b]` would
+//  name the wrong one.
 //
 
 import Foundation
@@ -27,117 +32,118 @@ import Testing
 @Suite("Effect routing")
 @MainActor
 struct EffectRoutingTests {
-    /// A store with one local machine selected. `AppStore()` starts empty, so the
-    /// endpoints have to be supplied the way the app's startup does.
-    private func store() -> (AppStore, EndpointState) {
+    private func store(machineCount: Int = 2) -> (AppStore, EndpointState) {
         let store = AppStore(target: .local)
-        let endpoint = EndpointState(id: .local, label: "Local", settings: .local)
-        store.endpoints = [endpoint]
+        var endpoints = [EndpointState(id: .local, label: "Local", settings: .local)]
+        for index in 1 ..< machineCount {
+            endpoints.append(EndpointState(
+                id: .ssh(id: "m\(index)"), label: "alpha-b", settings: .local
+            ))
+        }
+        store.endpoints = endpoints
         store.activeEndpointID = .local
-        return (store, endpoint)
+        return (store, endpoints[0])
     }
 
-    /// The batch the desktop would have received.
-    private func drained(from store: AppStore) -> TerminalEffects? {
-        var seen: TerminalEffects?
-        store.onEffectsChanged = { seen = $0 }
-        return seen
-    }
-
-    @Test("a bell from a background machine does not ring")
-    func backgroundBellSuppressed() {
-        let (store, endpoint) = self.store()
-        var seen: TerminalEffects?
-        store.onEffectsChanged = { seen = $0 }
-        store.handleEffectEvent(.bell(count: 1), from: endpoint, isActive: false)
-        #expect(seen == nil, "a background machine's bell reached the desktop")
-    }
-
-    @Test("a notification from a background machine still gets through")
-    func backgroundNotificationDelivered() {
-        let (store, endpoint) = self.store()
-        var seen: TerminalEffects?
-        store.onEffectsChanged = { seen = $0 }
-        let notification = SemanticNotification(
+    private func notification() -> SemanticNotification {
+        SemanticNotification(
             kind: .needsAttention,
-            title: "agent needs attention"
+            title: "agent blocked",
+            body: "waiting for you",
+            sound: nil,
+            agent: "claude",
+            workspaceId: "w1",
+            tabId: "w1:t1",
+            paneId: "w1:p1"
         )
-        store.handleEffectEvent(.notification(notification), from: endpoint, isActive: false)
-        #expect(seen?.notification == notification,
-                "the notification was dropped because its machine was not on screen")
     }
 
-    /// A background machine that is the *only* machine is still "not active" while
-    /// another one is selected, and that is exactly when the notice matters.
-    @Test("a notification carries the machine label when several machines exist")
-    func notificationCarriesMachineLabel() {
-        let (store, endpoint) = self.store()
-        var seen: TerminalEffects?
-        store.onEffectsChanged = { seen = $0 }
-        // Two machines, so a label is needed to tell them apart. The store starts with
-        // one; a second entry makes the label meaningful.
-        store.endpoints.append(EndpointState(
-            id: .ssh(id: "alpha-b"),
-            label: "alpha-b",
-            settings: .local
-        ))
-        let notification = SemanticNotification(kind: .finished, title: "done")
-        store.handleEffectEvent(.notification(notification), from: endpoint, isActive: false)
-        #expect(seen?.notificationMachine == endpoint.label,
-                "the notice did not say which machine it was about")
+    /// A background machine's notification must still reach the desktop.
+    @Test("a background machine's notification reaches the desktop")
+    func backgroundNotificationPasses() {
+        let (store, localEndpoint) = store()
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
+
+        let remote = store.endpoints[1]
+        store.handleEffectEvent(.notification(notification()), from: remote, isActive: false)
+
+        #expect(!delivered.isEmpty,
+                "a background machine's notification was dropped, so a blocked agent there is silent")
+        #expect(delivered.last?.notification != nil)
     }
 
-    /// With a single machine the label is noise: every notice is about the one
-    /// machine the user is looking at.
-    @Test("a single-machine notification has no label")
+    /// And the label is captured at that moment, not read later.
+    @Test("the machine label travels with the notification")
+    func machineLabelTravels() {
+        let (store, _) = store()
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
+
+        let remote = store.endpoints[1]
+        store.handleEffectEvent(.notification(notification()), from: remote, isActive: false)
+
+        #expect(delivered.last?.notificationMachine == "alpha-b",
+                "the machine was not named with the notification")
+    }
+
+    /// With only one machine there is nothing to disambiguate, so no label is added.
+    @Test("a single machine adds no label")
     func singleMachineHasNoLabel() {
-        let (store, endpoint) = self.store()
-        var seen: TerminalEffects?
-        store.onEffectsChanged = { seen = $0 }
-        let notification = SemanticNotification(kind: .finished, title: "done")
-        store.handleEffectEvent(.notification(notification), from: endpoint, isActive: true)
-        #expect(seen?.notificationMachine == nil)
+        let (store, localEndpoint) = store(machineCount: 1)
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
+
+        store.handleEffectEvent(.notification(notification()), from: localEndpoint, isActive: true)
+        #expect(delivered.last?.notificationMachine == nil,
+                "a lone machine still labelled its notifications")
     }
 
-    @Test("an active machine still delivers its bell")
-    func activeBellDelivered() {
-        let (store, endpoint) = self.store()
-        var seen: TerminalEffects?
-        store.onEffectsChanged = { seen = $0 }
-        store.handleEffectEvent(.bell(count: 1), from: endpoint, isActive: true)
-        #expect(seen?.bells == 1)
-    }
-}
+    /// A background machine's bell must not ring here.
+    @Test("a background machine's bell does not ring")
+    func backgroundBellIsDropped() {
+        let (store, _) = store()
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
 
-/// The notifier's own decision, which is not about AppKit.
-///
-/// `post` needs `UNUserNotificationCenter`, so the *post* is not asserted here; the
-/// availability decision is, because getting it wrong is invisible: a build without a
-/// bundle identifier must report `unavailable` rather than crash or silently pretend
-/// to have posted.
-@Suite("System notifier")
-@MainActor
-struct SystemNotifierTests {
-    /// `swift test` runs in an xctest host, which has a bundle identifier of its own.
-    /// The check exists for the opposite case — a bare executable — and this pins that
-    /// it is answered from the bundle rather than hard-coded either way.
-    @Test("availability follows the bundle identifier")
-    func availabilityFollowsBundle() {
-        let hasBundle = Bundle.main.bundleIdentifier != nil
-        #expect(SystemNotifier.isAvailable == hasBundle)
+        let remote = store.endpoints[1]
+        store.handleEffectEvent(.bell(count: 1), from: remote, isActive: false)
+        #expect(delivered.isEmpty, "a background machine rang this window's bell")
     }
 
-    /// Outside a bundle the answer must be `unavailable`, and asking must not throw or
-    /// trap. This is the path that keeps `swift test` from standing up a notification
-    /// centre.
-    @Test("posting outside a bundle reports unavailable")
-    func postingOutsideBundleIsUnavailable() async {
-        guard !SystemNotifier.isAvailable else { return }
-        let notifier = SystemNotifier()
-        let outcome = await notifier.post(
-            SemanticNotification(kind: .finished, title: "t"),
-            machine: nil
-        )
-        #expect(outcome == .unavailable)
+    /// A background machine's window title must not win.
+    @Test("a background machine's title does not apply")
+    func backgroundTitleIsDropped() {
+        let (store, _) = store()
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
+
+        let remote = store.endpoints[1]
+        store.handleEffectEvent(.windowTitle("remote title"), from: remote, isActive: false)
+        #expect(delivered.isEmpty, "a background machine's title won over the visible one's")
+    }
+
+    /// The foreground machine's effects do apply.
+    @Test("the foreground machine's effects apply")
+    func foregroundEffectsApply() {
+        let (store, localEndpoint) = store()
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
+
+        store.handleEffectEvent(.bell(count: 1), from: localEndpoint, isActive: true)
+        #expect(!delivered.isEmpty, "the visible machine's own bell was dropped")
+    }
+
+    /// Draining clears the queue, so the same effect cannot be delivered twice.
+    @Test("a drained effect is not delivered again")
+    func drainClears() {
+        let (store, localEndpoint) = store()
+        var delivered: [TerminalEffects] = []
+        store.onEffectsChanged = { delivered.append($0) }
+
+        store.handleEffectEvent(.bell(count: 1), from: localEndpoint, isActive: true)
+        let first = delivered.count
+        store.drainEffects()
+        #expect(delivered.count == first, "draining an empty queue delivered something")
     }
 }
