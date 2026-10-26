@@ -50,7 +50,19 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 MODE="${1:-all}"
 [ "$MODE" = "--json" ] && MODE=all
 JSON=0
-for arg in "$@"; do [ "$arg" = "--json" ] && JSON=1; done
+ASSERT=0
+RECORD=0
+FACTOR=2.0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --json) JSON=1 ;;
+        --assert) ASSERT=1 ;;
+        --record) RECORD=1 ;;
+        --factor) FACTOR="${2:-2.0}"; shift ;;
+        render | patch | all) MODE="$1" ;;
+    esac
+    shift
+done
 
 BUILD="$ROOT/.build/release"
 # Rebuild when the library is missing **or older than the sources it was built
@@ -650,6 +662,59 @@ echo "compiling probe against $BUILD ..." >&2
 # patch row ends with `(2% of 16.7ms)`, so `--json` printed the three validate()
 # rows and silently dropped the number issue #50 is about. The probe now emits
 # the JSON itself, where the label and the fields are both in hand.
+# `--assert` compares against a recorded baseline and exits non-zero on a regression.
+#
+# There was no such mode before: `budgetPercent` was only ever *printed*, so a change
+# that made VT encoding three times slower still exited 0 with a nicer-looking
+# percentage. The numbers in docs/PERFORMANCE.md were a snapshot, not a gate.
+#
+# It is deliberately **not** part of verify.sh. Wall-clock costs move with machine load
+# and differ per machine; a gate that fails on a busy laptop teaches people to ignore it.
+# Run it by hand before and after a change to a hot path.
+#
+# Usage:
+#   Scripts/bench.sh --assert              compare against the committed baseline
+#   Scripts/bench.sh --assert --record     (re)write the baseline from this run
+#   Scripts/bench.sh --assert --factor 2.5 allow a larger regression
+if [ "$ASSERT" -eq 1 ]; then
+    BASELINE="${BASELINE:-$ROOT/Scripts/bench-baseline.json}"
+    # Sampling, not one shot. Seven runs of the same 1-cell patch on an idle M1 Pro
+    # gave 1.00-1.64us -- a 1.64x spread from noise alone (measured 2026-10-26). An
+    # absolute threshold inside that band would be either always red or always green.
+    #
+    # So: take the **minimum** of N runs (the least noise-contaminated estimate) and
+    # allow a generous factor. The minimum is what a hot path's true cost is; a real
+    # regression moves it, and noise only ever pushes measurements up.
+    SAMPLES="${SAMPLES:-3}"
+    "$WORK/bench" "$MODE" >/dev/null 2>&1   # warm up the page cache and JIT-free caches
+    : >"$WORK/samples.json"
+    for _ in $(seq 1 "$SAMPLES"); do
+        KRAAL_BENCH_JSON=1 "$WORK/bench" "$MODE" >>"$WORK/samples.json"
+    done
+    # `--record` only when asked. `${RECORD:+--record}` looked right but is a classic
+    # bash trap: RECORD=0 is a *non-empty* string, so the flag was passed on every run
+    # and `--assert` silently re-recorded the baseline instead of comparing. The gate
+    # could never fail. (Caught by running it against a deliberately tight baseline and
+    # watching it exit 0.)
+    # macOS ships bash 3.2, where `"${arr[@]}"` on an *empty* array trips `set -u`
+    # with "unbound variable". `${arr[@]+"${arr[@]}"}` is the portable form: expand
+    # nothing (not even an empty word) when the array is unset or empty.
+    if [ "$RECORD" -eq 1 ]; then
+        python3 "$ROOT/Scripts/bench-assert.py" \
+            --samples "$WORK/samples.json" \
+            --baseline "$BASELINE" \
+            --factor "$FACTOR" \
+            --record
+    else
+        python3 "$ROOT/Scripts/bench-assert.py" \
+            --samples "$WORK/samples.json" \
+            --baseline "$BASELINE" \
+            --factor "$FACTOR"
+    fi
+    STATUS=$?
+    exit "$STATUS"
+fi
+
 if [ "$JSON" -eq 1 ]; then
     KRAAL_BENCH_JSON=1 "$WORK/bench" "$MODE"
 else
