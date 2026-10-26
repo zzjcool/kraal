@@ -186,17 +186,22 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 改 `gui.sh` 或驱动后，**用注入验证它还抓得住**（§0.3）：故意改坏一个被断言的
 行为，确认对应断言变红且退出码是 1。
 
-### `scripts/build-app.sh` 的 `nested herdr is disabled` 是噪音
+### `build-app.sh` 曾有的 `nested herdr is disabled` 已修掉（2026-10-26）
 
-输出里会出现：
+这段输出**不会再出现**了（#144 / `e9bce4b`）。原因不是「它是噪音可以忽略」——
+那是对现象的错误解释，它当时确实是一个 bug：
 
-```
-error: nested herdr is disabled by default.
-see configuration if you want to enable it.
-```
+生成的 debug 启动器里有一行注释写了 `` `herdr` ``（反引号），heredoc 求值时
+反引号被当成命令替换执行，于是**每次构建都真的跑了一次 `herdr`**，它拒绝嵌套运行
+就打印了那两行 `error:`。产物本身没坏，但每次构建都白起一个进程。
 
-它来自生成的 debug 启动器里的 `$(herdr)` 命令替换被求值，**不是构建失败**，
-产物正常。判断成功的标志是末尾的 `==> Done: .../Kraal.app`。
+修法是那行注释不再带反引号（`# Herdr honours ...`）。
+
+如果哪天又在 `make run` 的输出里看到 `error:`，不要沿用「是噪音」这个旧结论 ——
+先看它来自哪个命令替换，用 `bash -x` 或直接读产物
+（`build/Kraal.app/Contents/MacOS/KraalMac`）确认。
+
+判断构建成功的标志始终是末尾的 `==> Done: .../Kraal.app`。
 
 ---
 
