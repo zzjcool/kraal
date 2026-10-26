@@ -39,6 +39,17 @@ struct PaneLayoutView: View {
     /// yields the same ratio.
     @State private var dragAnchor: (path: [Bool], position: UInt16)?
 
+    /// The layout's structure when the current drag began.
+    ///
+    /// Every ratio this gesture sends is checked against it by
+    /// ``AppStore/dragSplitRatio(path:ratio:fence:)``. A divider is named by its
+    /// `path`, which is a position in a tree rather than an identity, so a pane
+    /// that closes or splits while the button is held leaves the same path naming
+    /// another border. Captured here — once, on the first change — because the
+    /// fence has to describe the layout the user grabbed, not one that arrived
+    /// mid-drag.
+    @State private var dragFence: PaneSplitFence?
+
     /// The container's top-left inside the window, in points, as last reported.
     ///
     /// Read from a `GeometryReader` in the global (window) space rather than derived
@@ -60,6 +71,23 @@ struct PaneLayoutView: View {
 
     private func clearSplitDragAnchor() {
         dragAnchor = nil
+        dragFence = nil
+    }
+
+    /// The fence for this split, capturing it on first use within a gesture.
+    ///
+    /// Same shape as ``splitDragAnchor(for:)`` and for the same reason: the value
+    /// has to be the one from before the drag, so it is stored on the first call
+    /// and reused until ``clearSplitDragAnchor()``.
+    ///
+    /// `nil` is returned when the layout has no dividers at all. That is not a
+    /// failure to capture — it means there is nothing structural to compare, so
+    /// the store skips the check rather than refusing every send.
+    private func splitDragFence() -> PaneSplitFence? {
+        if let dragFence { return dragFence }
+        let fence = store.surface?.splitFence
+        dragFence = fence
+        return fence
     }
 
     /// Builds each pane's terminal view; injected so this file stays free of the
@@ -372,7 +400,8 @@ struct PaneLayoutView: View {
                         store.dragSplitRatio(
                             path: split.path,
                             ratio: ratio(for: split, drag: value, cellSize: cellSize,
-                                         anchoringAt: position)
+                                         anchoringAt: position),
+                            fence: splitDragFence()
                         )
                     }
                     .onEnded { value in
@@ -385,7 +414,8 @@ struct PaneLayoutView: View {
                         store.dragSplitRatio(
                             path: split.path,
                             ratio: ratio(for: split, drag: value, cellSize: cellSize,
-                                         anchoringAt: position)
+                                         anchoringAt: position),
+                            fence: splitDragFence()
                         )
                         clearSplitDragAnchor()
                     }
