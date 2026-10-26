@@ -109,7 +109,11 @@ extension AppStore {
     }
 
     /// How many times a refused-for-busy command is resent.
-    private static let busyRetryLimit = 4
+    ///
+    /// Internal rather than private so a test can assert against the same number. A
+    /// copied literal in the test would keep passing after this changed, which is the
+    /// one thing the assertion exists to catch.
+    static let busyRetryLimit = 4
 
     /// Issues a request and hands back the daemon's error code, if it refused.
     ///

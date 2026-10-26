@@ -70,7 +70,32 @@ public enum ConnectionLimits {
     public static let handshakeWatchdog: TimeInterval = 45
 }
 
-public actor EndpointConnection {
+/// The part of a connection the UI uses.
+///
+/// `AppStore` reaches a daemon through nine members — lifecycle, three input sends, a
+/// resize, a request, the boot id, and the abort flag. Everything else here (framing,
+/// handshake, the reader thread, pending-request bookkeeping) is invisible to it.
+///
+/// This protocol exists so a test can substitute a recorder. The store-level behaviour
+/// that had no coverage until now is precisely "what did we send": a resize must send
+/// the *last* size requested rather than every intermediate one, a paste must travel as
+/// `.paste` rather than as keystrokes, and a refusal must be classified before the
+/// caller acts on it. All three are invisible without something on the other end.
+///
+/// Deliberately the smallest surface that covers those call sites: adding a member here
+/// is a promise that every implementation must make, so `_test` doubles stay honest.
+public protocol DaemonConnection: AnyObject, Sendable {
+    var currentBootId: String? { get async }
+    func start() async throws
+    func stop() async
+    nonisolated func abort()
+    func sendResize(to size: ClientSurfaceSize) async throws
+    func sendPaneInput(_ paneId: String, events: [ClientPaneInputEvent]) async throws
+    func sendPopupInput(_ terminalId: String, events: [ClientPaneInputEvent]) async throws
+    func request(_ method: String, params: [String: Any]) async throws -> Data
+}
+
+public actor EndpointConnection: DaemonConnection {
     private let target: HerdrTarget
     /// The grid this connection last told the daemon to render, starting with the
     /// one in the hello. Tracked so a resize that matches it is not re-sent: the
