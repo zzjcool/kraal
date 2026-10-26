@@ -379,13 +379,22 @@ struct PaneLayoutView: View {
             .fill(palette.paneGapColor)
             .frame(width: hit.width, height: hit.height)
             .overlay { gapLine(for: split.direction) }
-            // The divider must stay draggable whatever the fill is. A themed `.clear`
-            // (`Palette.system`: every token `nil`, which is what an unthemed app gets)
-            // draws nothing, and a shape that draws nothing is not reliably hit-tested —
-            // the divider would look right and stop responding to the mouse, which is a
-            // worse bug than the colour. An explicit content shape makes the whole
-            // `hitRect` — both cells of it — the target regardless of what is painted
-            // inside it.
+            // The divider must stay draggable whatever the fill is.
+            //
+            // `paneGapColor` resolves to `.clear` when a palette names neither
+            // `surface_dim` nor `panel_background`, and a shape that draws nothing is
+            // not reliably hit-tested: the divider would look right and stop responding
+            // to the mouse, which is a worse bug than the colour it fixes.
+            //
+            // No *built-in* theme reaches that arm — all 18 name `surface_dim` — so this
+            // is defensive for a palette built by hand or by a future theme loader. That
+            // makes it the kind of guard that quietly rots, so it is not left to
+            // reasoning: measured with the fill forced to `.clear`, removing this line
+            // gives `stuck: ratio 0.500 -> 0.500, the drag never reached the daemon`, and
+            // restoring it gives `0.500 -> 0.588` again.
+            //
+            // An explicit content shape also makes the whole `hitRect` — both cells of
+            // it — the target, rather than whatever the fill happens to paint.
             .contentShape(Rectangle())
             .offset(x: hit.minX, y: hit.minY)
             .gesture(
