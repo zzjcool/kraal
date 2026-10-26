@@ -770,13 +770,42 @@ python3 -c "..." ; swift test --filter X 2>&1 | grep -c '✘ Test "'
 
 **能用的情况**：被测对象在已知坐标、且颜色差异来自被测行为本身。
 
+### 假 agent：`working` 现在造得出来了（2026-10-26 更新）
+
+之前记为「两次尝试都失败、原因未查清」。**查清了**：
+
+`claude.toml` 的三条 `working` 规则走**不同 region**：
+
+| 规则 | region |
+| --- | --- |
+| `osc_title_working` | `osc_title`（终端标题） |
+| `live_turn_working` | `bottom_non_empty_lines(12)`（屏幕正文） |
+| `background_mcp_task_working` | 同上 |
+
+前两次尝试都在**正文**里造格式，而那两条屏幕规则匹配的形状里含 prompt box ——
+stub 没有，「屏幕内容明明对、daemon 仍报 idle」就是这个原因：我一直在查自己造的
+文本，而规则看的是另一个 region。
+
+正解是标题，一条转义序列就够：
+
+```bash
+printf '\033]0;⠋ working\007'
+```
+
+**每个状态都要重置标题**：第一版无条件设置，`plant_agent idle` 也报 `working`
+（上次的标题还在）。
+
+代码：`Scripts/gui.sh` 的 `plant_agent` stub；用例 `status-change-resorts`。
+
+仍然造不出的：`done`（manifest 里它是从 working 迁移推出来的，不是独立规则）。
+
 ### 目前明确无法自动化的（不要假装能做）
 
 | 项 | 原因 |
 | --- | --- |
 | 系统通知真的弹出 | ad-hoc 签名无 Developer ID，`UNUserNotificationCenter` 授权被拒（`UNErrorDomain 1`）。可断言「走到系统 API 并如实降级」 |
 | 卡片/行宽度 | AX 树没有行容器元素（背景由 SwiftUI 绘制），只有文字节点。靠结构保证 + 代码注释 |
-| 假 agent 的 `working` 状态 | 两次尝试（`⏵ …esc to interrupt`、`* Live turn`+MCP 任务行）daemon 都仍报 `idle`，**原因未查清**。stub 只能可靠产生 `idle` / `blocked` |
+| 假 agent 的 `done` 状态 | 见上节：`working` 已能造出，`done` 是 manifest 从 working 迁移**推出来**的，不是独立规则 |
 | 改主题后实时重绘 | 需要自动化系统外观切换 |
 
 ### 还能做但没做的
