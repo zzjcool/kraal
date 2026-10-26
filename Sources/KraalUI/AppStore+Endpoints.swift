@@ -109,7 +109,9 @@ public final class EndpointState {
     /// keeps a `ReconnectState` per endpoint and connects them all at launch);
     /// what distinguishes the foreground machine there is the surface lease, not
     /// the existence of a connection.
-    @ObservationIgnored var connection: EndpointConnection?
+    /// Any connection, not the concrete actor: a test substitutes a recorder to
+    /// observe what the store sent. See `DaemonConnection`.
+    @ObservationIgnored var connection: (any DaemonConnection)?
     @ObservationIgnored var connectionTask: Task<Void, Never>?
     /// Per-connection epoch. Replaces the single store-wide counter: with one
     /// connection per machine, an epoch has to identify *which* connection an

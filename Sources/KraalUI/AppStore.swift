@@ -167,7 +167,7 @@ public final class AppStore {
     /// whichever is foreground. Everything that talks to "the daemon" — input,
     /// requests, resize — reads this and therefore follows the selection without
     /// knowing that connections are per-machine.
-    var connection: EndpointConnection? { activeEndpoint?.connection }
+    var connection: (any DaemonConnection)? { activeEndpoint?.connection }
     @ObservationIgnored private var healthTask: Task<Void, Never>?
     /// One decoder per `(machine, terminal)`, not per pane id.
     ///
