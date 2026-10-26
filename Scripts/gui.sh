@@ -4035,7 +4035,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4576,7 +4576,7 @@ plant_agent() {
     # the whole script at the stub's `;;` — `shellcheck` reported "clean" because it
     # also stopped parsing there.
     local script
-    script=$(printf '%s' 'IyEvYmluL2Jhc2gKIyBhcmd2WzBdIG11c3QgYmUgImNsYXVkZSIgZm9yIHRoZSBkYWVtb24gdG8gaWRlbnRpZnkgdGhlIGFnZW50OyB0aGUgc3RhdGUgY29tZXMgZnJvbQojIHdoYXQgdGhlIHNjcmVlbiBzaG93cyBhZ2FpbnN0IHRoZSBidW5kbGVkIG1hbmlmZXN0LgojCiMgRWFjaCBzdGF0ZSBwcmludHMgZXhhY3RseSB3aGF0IGBzcmMvZGV0ZWN0L21hbmlmZXN0cy9jbGF1ZGUudG9tbGAgbWF0Y2hlczoKIwojICAgYmxvY2tlZCAtPiBgZXNjIHRvIGNhbmNlbGAgKyBgZW50ZXIgdG8gY29uZmlybWAgICAgICAgICAgKGNsYXVkZV9ibG9ja2VkLCA6ODEtODcpCiMgICB3b3JraW5nIC0+IGAqIExpdmUgdHVybmAgKyBgwrcgMSBNQ1AgdGFzayBzdGlsbCBydW5uaW5nYCAgKGJhY2tncm91bmRfbWNwX3Rhc2tfd29ya2luZywgOjM1LTQxKQojCiMgVHdvIHNpbXBsZXIgYXR0ZW1wdHMgZGlkIG5vdCB0YWtlLCBhbmQgdGhlIHJlYXNvbiBtYXR0ZXJzOiBgbGl2ZV90dXJuX3dvcmtpbmdgIHdhbnRzCiMgYOKPuGAvYOKPtWAgcGx1cyBgZXNjIHRvIGludGVycnVwdGAsIHdoaWNoIGEgKnRleHQtb25seSogc3R1YiBwcmludHMgb25jZSBhbmQgdGhlbiBsZWF2ZXMKIyBvbiBhIHNjcmVlbiB3aG9zZSBuZXh0IGxpbmUgaXMgdGhlIHNoZWxsIHByb21wdCDigJQgdGhlIHJlZ2lvbiBtYXRjaGVyIHN0aWxsIHJlamVjdGVkIGl0CiMgKG1lYXN1cmVkOiB0aGUgcGFuZSBzaG93ZWQgYOKPtSBSdW5uaW5nIHRlc3Rz4oCmIChlc2MgdG8gaW50ZXJydXB0KWAgd2hpbGUgdGhlIGRhZW1vbgojIHJlcG9ydGVkIGBpZGxlYCkuIFRoZSBNQ1AtdGFzayBydWxlIGlzIGEgcGxhaW4gbXVsdGktbGluZSB0ZXh0IG1hdGNoLCBzbyBpdCBmaXJlcwojIGZyb20gYSBzaW5nbGUgcHJpbnRmLgpwcmludGYgIlwwMzNbSFwwMzNbMkoiCmNhc2UgIiR7MTotaWRsZX0iIGluCmJsb2NrZWQpCiAgcHJpbnRmICJEbyB5b3Ugd2FudCB0byBwcm9jZWVkP1xuICAxLiBZZXNcbiAgMi4gTm9cbmVzYyB0byBjYW5jZWxcbmVudGVyIHRvIGNvbmZpcm1cbiIKICA7Owp3b3JraW5nKQogIHByaW50ZiAiKiBMaXZlIHR1cm5cbsK3IDEgTUNQIHRhc2sgc3RpbGwgcnVubmluZ1xuIgogIDs7CiopCiAgcHJpbnRmICJyZWFkeVxuIgogIDs7CmVzYWMKc2xlZXAgNjAwCg==' | base64 -d)
+    script=$(printf '%s' 'IyEvYmluL2Jhc2gKIyBhcmd2WzBdIG11c3QgYmUgImNsYXVkZSIgZm9yIHRoZSBkYWVtb24gdG8gaWRlbnRpZnkgdGhlIGFnZW50OyB0aGUgc3RhdGUgY29tZXMgZnJvbQojIHdoYXQgdGhlIHNjcmVlbiAob3IgdGhlIHRlcm1pbmFsIHRpdGxlKSBzaG93cyBhZ2FpbnN0IHRoZSBidW5kbGVkIG1hbmlmZXN0LgojCiMgICBibG9ja2VkIC0+IGBlc2MgdG8gY2FuY2VsYCArIGBlbnRlciB0byBjb25maXJtYCAgICAoY2xhdWRlX2Jsb2NrZWQsIDo4MS04NykKIyAgIHdvcmtpbmcgLT4gT1NDIDAgdGl0bGUgYmVnaW5uaW5nIHdpdGggYSBicmFpbGxlIHNwaW5uZXIKIyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIChvc2NfdGl0bGVfd29ya2luZywgOjctMTQpCiMgICBpZGxlICAgIC0+IHRpdGxlIHJlc2V0IGFuZCBub3RoaW5nIG9uIHNjcmVlbgojCiMgVGhlIHdvcmtpbmcgc3RhdGUgaXMgc2V0IHRocm91Z2ggdGhlICoqdGl0bGUqKiwgbm90IHRoZSBzY3JlZW4uIFR3byBlYXJsaWVyIGF0dGVtcHRzCiMgcHJpbnRlZCB0aGUgYWN0aXZpdHkgbGluZSBpbnRvIHRoZSBib2R5IGFuZCB0aGUgZGFlbW9uIHN0aWxsIHJlcG9ydGVkIGBpZGxlYDogdGhlIGJvZHkKIyBydWxlcyAoYGxpdmVfdHVybl93b3JraW5nYCwgYGJhY2tncm91bmRfbWNwX3Rhc2tfd29ya2luZ2ApIG1hdGNoIHNoYXBlcyB0aGF0IGluY2x1ZGUgYQojIHByb21wdCBib3ggdGhlIHN0dWIgZG9lcyBub3QgaGF2ZS4gVGhlIHRpdGxlIHJ1bGUgbmVlZHMgbm90aGluZyBidXQgYW4gZXNjYXBlCiMgc2VxdWVuY2UsIGFuZCBpdCBpcyB3aGF0IGEgcmVhbCBDTEkgc2hvd3Mgd2hpbGUgaXQgaXMgYnVzeS4KIwojIFRoZSB0aXRsZSBtdXN0IGJlIHJlc2V0IGZvciB0aGUgb3RoZXIgc3RhdGVzLiBUaGUgZmlyc3QgdmVyc2lvbiBzZXQgaXQKIyB1bmNvbmRpdGlvbmFsbHkgYXQgdGhlIHRvcCwgc28gYHBsYW50X2FnZW50IGlkbGVgIGFsc28gcmVwb3J0ZWQgYHdvcmtpbmdgIOKAlCB0aGUKIyBwcmV2aW91cyBydW4ncyB0aXRsZSB3YXMgc3RpbGwgaW4gZWZmZWN0IGFuZCB0aGUgc3RhdGUgbmV2ZXIgY2FtZSBiYWNrIGRvd24uCmNhc2UgIiR7MTotaWRsZX0iIGluCndvcmtpbmcpCiAgcHJpbnRmICJcMDMzXTA7XHhlMlx4YTBceDhiIHdvcmtpbmdcMDA3IgogIDs7CiopCiAgcHJpbnRmICJcMDMzXTA7Y2xhdWRlXDAwNyIKICA7Owplc2FjCnByaW50ZiAiXDAzM1tIXDAzM1sySiIKY2FzZSAiJHsxOi1pZGxlfSIgaW4KYmxvY2tlZCkKICBwcmludGYgIkRvIHlvdSB3YW50IHRvIHByb2NlZWQ/XG4gIDEuIFllc1xuICAyLiBOb1xuZXNjIHRvIGNhbmNlbFxuZW50ZXIgdG8gY29uZmlybVxuIgogIDs7CndvcmtpbmcpCiAgcHJpbnRmICJceGUyXHhhMFx4OGIgcnVubmluZ1xuIgogIDs7CiopCiAgcHJpbnRmICJyZWFkeVxuIgogIDs7CmVzYWMKc2xlZXAgNjAwCg==' | base64 -d)
 
     # Reuse the same pane on purpose: the daemon notifies on a state *transition* of
     # one agent, so starting a second stub in a new pane would just add another idle
@@ -4832,6 +4832,70 @@ case_notification_posted_app_setup() {
 }
 
 case_sidebar_priority_across_machines_app_setup() {
+    machines_teardown
+    machines_prereqs || { echo "loopback ssh unavailable"; return 1; }
+    local target
+    target=$(fixture_ssh_target) || return 1
+    roster_cmd machine add "$target" --remote-session fx-alpha --label alpha-a \
+        >/dev/null 2>&1 || { echo "machine add alpha-a failed"; return 1; }
+    roster_cmd machine add "$target" --remote-session fx-beta --label alpha-b \
+        >/dev/null 2>&1 || { echo "machine add alpha-b failed"; return 1; }
+    return 0
+}
+
+# A status change re-sorts the list across machines.
+#
+# Two machines, both idle, second one's agent alphabetically first. Then the *second*
+# one changes to `working`, which outranks `idle` no matter which machine it is on — so
+# the order must flip. That is the whole claim of the global sort (#136), and until the
+# stub could reach `working` it was only assertable in unit tests.
+#
+# `working` is set through the terminal title (OSC 0), not the screen: the body rules in
+# `claude.toml` match shapes that include a prompt box a stub does not have. See
+# `plant_agent`.
+case_status_change_resorts() {
+    requires() { echo ax; }
+    fixture() {
+        ensure_sidebar_expanded || return 1
+        select_priority_sort || return 1
+        plant_agent alpha-a idle || return 1
+        plant_agent alpha-b idle || return 1
+        sleep 1
+        # alpha-b changes; it must overtake alpha-a.
+        plant_agent alpha-b working || return 1
+        sleep 2
+        return 0
+    }
+    action() {
+        driver ax --json --depth 22 >"$host_dir/ax.json" 2>&1 || {
+            echo "cannot read the AX tree"
+            return 1
+        }
+    }
+    assert() {
+        python3 "$ROOT/Scripts/sidebar-agent-order.py" "$host_dir/ax.json" \
+            >"$host_dir/order.txt" 2>&1 || true
+        local order
+        order=$(cat "$host_dir/order.txt")
+        check "the machine that started working leads the list" \
+            "$(printf '%s' "$order" | grep -qcE '^working@alpha-b idle@alpha-a$' \
+                && echo 0 || echo 1)" \
+            "$order"
+        # And the daemon's own record backs it: the status really did change, rather
+        # than the row order moving for some other reason.
+        local statuses
+        statuses=$(herdr_for_machine alpha-b agent list 2>/dev/null \
+            | python3 -c 'import json,sys
+try:
+    print(",".join(a["agent_status"] for a in json.load(sys.stdin)["result"]["agents"]))
+except Exception:
+    print("unreadable")' 2>/dev/null)
+        check "the daemon reports the new status" \
+            "$([ "$statuses" = "working" ] && echo 0 || echo 1)" "agents: $statuses"
+    }
+}
+
+case_status_change_resorts_app_setup() {
     machines_teardown
     machines_prereqs || { echo "loopback ssh unavailable"; return 1; }
     local target
