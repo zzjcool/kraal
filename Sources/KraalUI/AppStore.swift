@@ -707,16 +707,13 @@ public final class AppStore {
         ]
     }
 
-    public func setSplitRatio(path: [Bool], ratio: Double) {
-        let params = Self.splitRatioParams(
-            path: path,
-            ratio: ratio,
-            tabId: snapshot?.focusedTabId
-        )
-        Task { await call("layout.set_split_ratio", params) }
-    }
-
     /// The `layout.set_split_ratio` params, as a pure function.
+    ///
+    /// The only way a divider resize is asked for. It used to have a sibling,
+    /// `setSplitRatio(path:ratio:)`, that nothing called — and the test guarding
+    /// `tab_id` drove that dead path instead of the real one, so the production
+    /// drag could have dropped `tab_id` without a single test noticing. The
+    /// params builder is now reached from the one caller that exists.
     ///
     /// Follows the same pattern as `splitParams`: the body of a request that
     /// silently targets the wrong thing is only testable as a value, and the
@@ -765,22 +762,19 @@ public final class AppStore {
     /// Also used for the released position: the last `onChanged` can be coalesced
     /// away and the daemon has no idea where the pointer stopped, so the final
     /// ratio has to be sent through the same path rather than dropped.
-    public func dragSplitRatio(path: [Bool], ratio: Double) {
-        splitDrag.pending = SplitDragState.Target(path: path, ratio: ratio)
-        guard !splitDrag.inFlight else { return }
-        splitDrag.inFlight = true
-        Task {
-            // Loop rather than recurse: each iteration drains the newest value
-            // that arrived while the previous request was on the wire.
-            while let next = splitDrag.pending {
-                splitDrag.pending = nil
-                await call("layout.set_split_ratio", [
-                    "path": next.path,
-                    "ratio": next.ratio,
-                ])
-            }
-            splitDrag.inFlight = false
-        }
+    ///
+    /// `fence` is the layout the drag was grabbed from. It is captured once, by
+    /// the first call of a drag, and every send after that is refused if the
+    /// daemon's layout no longer has the same structure. `herdr-gpui` does the
+    /// same in `flush_split`: a `path` is a position in a tree, so a close or a
+    /// split underneath a held drag can leave it naming another border, and the
+    /// request would move one the user never touched.
+    public func dragSplitRatio(
+        path: [Bool],
+        ratio: Double,
+        fence: PaneSplitFence? = nil
+    ) {
+        Task { await splitDrag.drive(path: path, ratio: ratio, fence: fence, of: self) }
     }
 
     public func invoke(commandId: String) {
@@ -817,7 +811,7 @@ public final class AppStore {
 /// carry where the pointer is *now*, never a stale position queued behind them.
 /// Because ratios are absolute positions rather than increments, dropping the
 /// intermediate ones loses nothing.
-struct SplitDragState {
+final class SplitDragState {
     struct Target {
         var path: [Bool]
         var ratio: Double
@@ -827,4 +821,76 @@ struct SplitDragState {
     var pending: Target?
     /// Whether a sender loop is already draining `pending`.
     var inFlight = false
+    /// The tab the drag started on, named on every request.
+    ///
+    /// Without it the daemon falls back to "the current tab of the current
+    /// workspace", which is the tab this client is showing only for as long as it
+    /// keeps showing it. A drag that lands just after a focus change then resizes
+    /// a tab nobody is looking at, with no error on either side. `herdr-gpui`
+    /// snapshots the same id at press (`SplitDrag.tab`) and names it in every
+    /// `layout.set_split_ratio`.
+    var tabId: String?
+    /// The layout's structure when the drag began, or `nil` when it could not be
+    /// read. Every send is fenced against the current one.
+    ///
+    /// A `path` names a divider by its place in the tree, so a pane closing or
+    /// splitting mid-drag can leave the same path naming a different border — the
+    /// ratio would be applied to a divider the user never touched, silently.
+    var fence: PaneSplitFence?
+    /// Whether the drag this state belongs to is still the live one.
+    ///
+    /// A fence mismatch ends the drag: the rest of `pending` is dropped rather
+    /// than retried against a layout it no longer describes.
+    var alive = true
+
+    /// Records a new pointer position and drains it, coalescing while one request
+    /// is on the wire.
+    ///
+    /// Kept here rather than in `AppStore` because the loop is all state machine —
+    /// the store owns none of it beyond handing over `call`. `AppStore`'s body is
+    /// already at swiftlint's limit, and the limit is the thing that noticed the
+    /// loop did not belong there.
+    @MainActor
+    func drive(
+        path: [Bool],
+        ratio: Double,
+        fence: PaneSplitFence?,
+        of store: AppStore
+    ) async {
+        // A new drag (no sender running, nothing pending) adopts the caller's
+        // fence; the rest of the same drag keeps the one it started with. Comparing
+        // against a fence captured mid-drag would let a structure change slip
+        // through between two changes of the same gesture.
+        if !inFlight && pending == nil {
+            tabId = store.snapshot?.focusedTabId
+            self.fence = fence
+            alive = true
+        }
+        pending = Target(path: path, ratio: ratio)
+        guard !inFlight else { return }
+        inFlight = true
+        // Loop rather than recurse: each iteration drains the newest value that
+        // arrived while the previous request was on the wire.
+        //
+        // `defer` and not a trailing statement: `drive` suspends at every `call`,
+        // and a second caller reaches the `guard` above while this one is held
+        // there, so the flag has to be cleared on every exit path.
+        defer { inFlight = false }
+        while let next = pending {
+            pending = nil
+            guard alive else { continue }
+            // The live layout must still be the one the drag was grabbed from,
+            // checked per send rather than once per drag: the answer that cleared
+            // the previous request is exactly where a structure change arrives.
+            if let grabbed = fence, store.surface?.splitFence != grabbed {
+                alive = false
+                continue
+            }
+            await store.call("layout.set_split_ratio", AppStore.splitRatioParams(
+                path: next.path,
+                ratio: next.ratio,
+                tabId: tabId
+            ))
+        }
+    }
 }
