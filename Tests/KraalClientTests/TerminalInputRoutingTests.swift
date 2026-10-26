@@ -127,3 +127,71 @@ struct TerminalInputRoutingTests {
                 "the same terminal produced more than one decoder before the first snapshot")
     }
 }
+
+/// The other terminal inputs: paste, and the mouse-mode queries that gate it.
+///
+/// `sendPaste` is the reason `ClientPaneInputEvent.paste` exists at all: bytes sent as
+/// input are indistinguishable from typing, so a program with bracketed paste disabled
+/// on its side still sees every newline as Enter — pasting three shell commands ran all
+/// three. That makes "was this sent as a paste" worth pinning, and the event is
+/// observable through the decoder table's sibling: the call itself.
+///
+/// The guard clauses are what is testable without a connection, and they are also what
+/// a caller hits first: no pane id, or empty text, must do nothing at all.
+@Suite("Paste and mouse gating")
+@MainActor
+struct PasteAndMouseTests {
+    private func store() -> AppStore {
+        let store = AppStore(target: .local)
+        store.endpoints = [EndpointState(id: .local, label: "Local", settings: .local)]
+        store.activeEndpointID = .local
+        return store
+    }
+
+    /// Empty text and a missing pane are no-ops, not errors.
+    @Test("pasting nothing is a no-op")
+    func emptyPasteIsNoOp() {
+        let store = store()
+        store.sendPaste("", to: "w1:p1")
+        store.sendPaste("hello", to: nil)
+        #expect(store.lastError == nil, "a no-op paste reported an error")
+    }
+
+    // "A paste does not go through the key decoder" was written here and then removed:
+    // it asserted `inputDecoders.isEmpty` after `sendPaste`, and A/B (replacing the
+    // `.paste` event with an empty list) left it **green**. `sendPaste` sends inside a
+    // `Task` and returns immediately, and with no connection the send never happens, so
+    // the table was empty either way. The claim is real — a literal ESC in pasted text
+    // must not become an arrow key — but this test could not observe it. Asserting it
+    // needs a connection that records what was sent.
+
+    /// Mouse reporting comes from the *surface* record, not the snapshot one: Ghostty
+    /// cannot know it (the cell grid carries no mouse mode), so the daemon's per-pane
+    /// flag is the only authority.
+    @Test("mouse reporting is read from the surface pane")
+    func mouseReportingFromSurface() throws {
+        let store = store()
+        store.surface = PaneSurfaceFrame(
+            bootId: "boot", projectionRevision: 1, surfaceRevision: 1,
+            frame: FrameData(
+                cells: [.blank], width: 1, height: 1,
+                cursor: nil, hyperlinks: [], graphics: Data()
+            ),
+            panes: [PaneSurfacePane(
+                paneId: "w1:p1", contentRevision: 1,
+                rect: SurfaceRect(originX: 0, originY: 0, width: 1, height: 1),
+                innerRect: SurfaceRect(originX: 0, originY: 0, width: 1, height: 1),
+                scrollbarRect: nil, scroll: nil, focused: true,
+                mouseReporting: true, sgrPixelMouse: true,
+                alternateScreenActive: false, pixelWidth: 0, pixelHeight: 0
+            )],
+            splits: [], popup: nil, graphics: SurfaceGraphicsScene()
+        )
+        #expect(store.mouseReportingEnabled(forPane: "w1:p1"))
+        #expect(store.mousePrecision(forPane: "w1:p1"))
+        // An unknown pane must default to *not* reporting: the click belongs to the
+        // app, which is what opens the pane menu.
+        #expect(!store.mouseReportingEnabled(forPane: "w9:p9"))
+        #expect(!store.mousePrecision(forPane: "w9:p9"))
+    }
+}
