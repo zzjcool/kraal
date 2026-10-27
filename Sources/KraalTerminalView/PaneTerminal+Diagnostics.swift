@@ -71,7 +71,20 @@ extension PaneTerminalModel {
         frameWidth: Int, frameHeight: Int,
         gridColumns: UInt16, gridRows: UInt16
     ) -> Bool {
-        gridColumns >= frameWidth && gridRows >= frameHeight
+        // **Exactly**, not "at least".
+        //
+        // An earlier revision used `>=` on the theory that a frame whose cells all
+        // land on real coordinates cannot be wrong, and that waiting was only
+        // costing latency. A live session shows why that is false: the pane's view
+        // was 13 rows (240.5 pt) while Ghostty still reported a 14-row grid, so
+        // `14 >= 13` allowed a 13-row frame to be written into a 14-row screen.
+        // The last row kept whatever the *previous* layout had left there — the
+        // band at the bottom that did not go away — and because `frameGrid` was
+        // then set to the frame, nothing repainted it later.
+        //
+        // Waiting costs latency and is recoverable; painting at the wrong height is
+        // neither.
+        gridColumns == frameWidth && gridRows == frameHeight
     }
 
     /// Re-runs `apply` for the most recent surface once the terminal's grid has

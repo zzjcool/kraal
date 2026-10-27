@@ -67,27 +67,38 @@ struct ParkedFrameRetryTests {
         ))
     }
 
-    /// The rule `flushPendingFrame` actually uses: exact, or a grid the frame fits
-    /// inside.
+    /// The rule `flushPendingFrame` uses: **exact**, and the live trace that says
+    /// why it cannot be "at least".
     ///
-    /// Waiting for exact equality was a real defect, not a conservative choice.
-    /// Ghostty measures its grid from the NSView's bounds, which SwiftUI applies
-    /// one layout pass after the frame that asked for it — so while a window is
-    /// being dragged the two stay one pass apart and equality never holds. The
-    /// park then aged out after twelve attempts, and the row the mismatch left
-    /// blank stayed on screen until the program next printed. That is what the
-    /// user described as "it fixes itself after a while".
-    @Test("a parked frame paints at an equal grid or a larger one")
-    func parkedFramePaintsWhenGridIsLargeEnough() {
-        // Equal: the ordinary case.
+    /// A previous revision allowed a grid larger than the frame, reasoning that a
+    /// frame whose cells all land on real coordinates cannot be wrong and that
+    /// waiting was only costing latency. Both halves of that are wrong, and a real
+    /// session shows it:
+    ///
+    /// ```
+    /// [18:00:09.786] grid mismatch: pane=wB:p16 ghostty=126x14 frame=126x13
+    /// ```
+    ///
+    /// The pane's view was 13 rows (240.5 pt); Ghostty still reported 14. `14 >= 13`
+    /// let a 13-row frame be written into a 14-row screen. The last row kept
+    /// whatever the previous layout left there — the band at the bottom of the pane
+    /// that would not go away — and because `frameGrid` was then set to the frame,
+    /// nothing repainted it. Wait instead: one more layout pass and the grid
+    /// arrives at 13, at which point the frame is exact.
+    @Test("a parked frame paints only at the exact grid it was composed for")
+    func parkedFramePaintsOnlyAtExactGrid() {
+        // The ordinary case.
         #expect(PaneTerminalModel.parkedFrameFits(
             frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 30
         ))
-        // Ghostty still one layout pass behind: 29 rows against a 30-row frame.
-        #expect(PaneTerminalModel.parkedFrameFits(
+        // The live failure. One row more must keep waiting, not paint.
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 126, frameHeight: 13, gridColumns: 126, gridRows: 14
+        ))
+        #expect(!PaneTerminalModel.parkedFrameFits(
             frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 31
         ))
-        // Too small: every row would wrap, so this one must keep waiting.
+        // Too small: every row would wrap.
         #expect(!PaneTerminalModel.parkedFrameFits(
             frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 29
         ))

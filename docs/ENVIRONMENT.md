@@ -1417,3 +1417,32 @@ A/B 实测：删掉这两行，`swift test` **741 tests 仍全绿**。按 §0.3�
 `✘ a mismatched grid paints nothing and parks the frame` 立刻变红；恢复后绿。
 这条测试原本叫 `a mismatched grid still reaches the terminal`，断言的正是
 「必须画」——方向反了，已连同理由一起改写。
+
+#### 8.14.2 `>=` 是错的：一帧写进更高的 grid，底部那行就是带子
+
+上面那条「parked frame 在 grid 不比 frame 小时就画」的放宽（`>=`）**本身就是
+缺陷**，2026-10-27 在用户真机上抓到现场（`~/Library/Logs/Kraal-live.log`）：
+
+```
+[18:00:09.786] grid mismatch: pane=wB:p16 ghostty=126x14 frame=126x13 2142x518px fits=14
+[18:00:23.700] paint: pane=wB:p16 ... paints=340      ← 最后一次
+        …… 18:00:20 之后 191 条 p16 日志里，paint 为 0，全是 layout
+```
+
+pane 的视图是 **13 行（240.5pt）**，Ghostty 仍报 **14 行**。`14 >= 13` 通过，
+于是 13 行的 frame 被写进 14 行的屏幕：**前 13 行是内容，第 14 行保留上一个布局
+留下的画面**。随后 `frameGrid = frame`，没有任何东西再画它 —— 那就是「带子不会
+自己消失」。
+
+同一时刻 p14 是干净的对照组：mismatch 0 条、paint 177 条，因为它 grid 相等。
+
+所以规则只能是**严格相等**。等待只花延迟且可恢复；画在错误高度上两者都不是。
+`parkedFrameFits` 已改回 `==`，测试 `a parked frame paints only at the exact grid
+it was composed for` 直接钉住这条实测数据（`126x13` vs `126x14`）。
+
+**这一条同时说明了 `reapplyAfterGridViewMoved` 为什么必需**：严格相等之后
+mismatch 必拒画，如果没人在 grid 追上时重投一帧，pane 会一直空白。
+
+**教训（§0.3 的正确用法）**：上一轮的 A/B 只证明了「改回 `==` 会让某条测试变红」，
+没有证明「`>=` 在真实场景下是对的」。注入缺陷能证明代码被覆盖，不能证明方向正确
+——方向要靠真实日志。
