@@ -737,4 +737,74 @@ struct ScreenResetScopeTests {
         )
     }
 
+    // MARK: - The grid is not the size
+
+    /// A pane can be handed two different point sizes for the **same** cell grid,
+    /// and this pair of numbers is from the reporter's own log (issue #185):
+    ///
+    /// ```
+    /// pane view: wT:pZ size=819x323pt cells=105x19
+    /// pane view: wT:pZ size=892x351pt cells=105x19
+    /// ```
+    ///
+    /// 73pt wider and 28pt taller, with the grid identical. At the 8.5x18.5pt cell
+    /// those sizes are what 96x17 and 105x19 cells actually measure, so the view was
+    /// being laid out smaller than the grid it was told it had — which is the shape
+    /// a divider drag produces while the daemon's new frame is still in flight.
+    ///
+    /// This is the case the repaint decision cannot see. `needsRepaint` compares
+    /// `previousGrid` against `currentGrid`, and both are `105x19`; the revision did
+    /// not move because resizing a pane does not change a pane's *content*; and the
+    /// cells are identical because the daemon re-rendered the same content at a
+    /// bigger box. Every cheap reason says "nothing to do", so `apply` returns
+    /// early — while the terminal's own layer still holds the pixels it drew at the
+    /// old size.
+    ///
+    /// The fix is not in this function: a grid comparison cannot see a point size it
+    /// is not given. It is a clip on the pane's box, so pixels outside the box cannot
+    /// show, which is what upstream does
+    /// (`herdr-gpui/crates/herdr-gpui/src/window/render.rs:441`, `.overflow_hidden()`:
+    /// "a frame the daemon has not resized yet may be larger than the box, so the box
+    /// clips it"). This test pins the premise the clip exists for — that the grid can
+    /// stay put while the box changes — so a future "optimisation" that narrows the
+    /// clip away fails here first.
+    @Test("the grid can stay put while the pane's point size changes")
+    func gridIsNotThePointSize() {
+        let cells = 105
+        let rows = 19
+        let cell = CGSize(width: 8.5, height: 18.5)
+
+        // From the log, verbatim: the same grid measured at two sizes.
+        let before = CGSize(width: 819, height: 323)
+        let after = CGSize(width: 892, height: 351)
+        #expect(before != after, "the two log lines must be different sizes")
+
+        // What the grid actually measures, and therefore what the pane *should* be.
+        let expected = CGSize(
+            width: CGFloat(cells) * cell.width,
+            height: CGFloat(rows) * cell.height
+        )
+        #expect(expected.width == 892.5 && expected.height == 351.5)
+
+        // The repaint decision cannot tell these apart: the grid is the number it
+        // compares, and the grid is the same on both lines.
+        let grid = (width: cells, height: rows)
+        #expect(!SurfaceGeometry.needsRepaint(
+            contentRevisionChanged: false,
+            previousGrid: grid,
+            currentGrid: grid,
+            cellsDiffer: false
+        ), "the grid-only decision claimed a repaint for a resize it cannot see")
+        #expect(!SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: grid,
+            currentGrid: grid
+        ), "the grid-only decision claimed a reset for a resize it cannot see")
+
+        // So a stale layer is a real possibility here, and the box has to clip it.
+        // Recorded as an assertion rather than a comment because the *reason* the
+        // clip is required is exactly this gap.
+        #expect(before.width < expected.width, "the old box was narrower than the grid")
+        #expect(after.width < expected.width, "even the later box stayed a half-point short")
+    }
 }
