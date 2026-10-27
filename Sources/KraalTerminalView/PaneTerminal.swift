@@ -106,6 +106,8 @@ public final class PaneTerminalModel {
     /// Counted here rather than inferred by a test: `swift test` has no Ghostty
     /// surface, and the GUI case can only read what the app logs.
     private(set) var paintCount = 0
+    /// The bytes of the most recent write; the only output a test can assert on.
+    private(set) var lastPainted: Data?
     /// Writes that carried an erase together with their repaint.
     ///
     /// Not the same count as `screenResetCount`, and the difference is the point:
@@ -292,6 +294,14 @@ public final class PaneTerminalModel {
             projectionChanged: projectionChanged, geometry: geometry
         )
         let eraseBeforePaint = decision.erase
+        // A first frame still has to forget the graphics cache: `GraphicsEncoder` is
+        // stateful, and a cache believing the image is already on screen encodes to
+        // zero bytes. That is separate from *erasing*, which concerns cells that were
+        // never painted — conflating the two is how "no previous grid" came to mean
+        // "erase".
+        if eraseBeforePaint || frameGrid == nil {
+            resetSurfaces()
+        }
         if eraseBeforePaint {
             screenResetCount += 1
             // Runs **before** `paneFrame` below for every path that erases, not
@@ -461,6 +471,7 @@ public final class PaneTerminalModel {
     /// `erase=0` and pass). Verified by injection; see `docs/ENVIRONMENT.md` §8.11.
     private func deliver(_ painted: Data) {
         paintCount += 1
+        lastPainted = painted
         // The clear pair this app erases with: `ED2` + `ED3` + cursor home.
         let carriesErase = painted.range(of: Data("\u{1B}[2J".utf8)) != nil
         // "Cells" means *row writes*: a cursor-position sequence `CSI <row>;1H`.

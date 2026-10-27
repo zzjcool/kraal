@@ -410,12 +410,43 @@ struct ScreenResetScopeTests {
     }
 
     /// Until a frame has been painted there is nothing incremental to paint onto.
-    @Test("the first frame needs a screen reset")
-    func firstFrameNeedsReset() {
-        #expect(SurfaceGeometry.needsScreenReset(
+    /// "No previous grid" is not a reason to erase, and saying it was is what made
+    /// an erase self-sustaining.
+    ///
+    /// `needsScreenReset` answers one question: does the screen hold cells that this
+    /// frame can no longer describe? With no previous grid there is nothing painted
+    /// to describe, so the answer is no. The first frame still *clears* — the
+    /// renderer does that itself (`clear = firstFrame || clearingFirst`) — but the
+    /// caller does not need to ask, and asking cost real frames:
+    ///
+    ///   * the caller clears `frameGrid` whenever the daemon's grid disagrees with the
+    ///     frame, so during startup every frame looked like "no previous grid";
+    ///   * 110 of 116 erases in one session carried `projection=false restart=false
+    ///     widthMoved=false clean=false`, i.e. all four named reasons were false and
+    ///     the frame still erased.
+    @Test("needsScreenReset has no opinion when nothing has been painted")
+    func firstFrameIsNotAReset() {
+        #expect(!SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: false,
             previousGrid: nil,
             currentGrid: (width: 111, height: 35)
+        ))
+        // What does need a reset: a width change, and a restarted delta stream.
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 112, height: 35)
+        ))
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: true,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 111, height: 35)
+        ))
+        // And a height change does not, which is what keeps a vertical drag cheap.
+        #expect(!SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 111, height: 36)
         ))
     }
 

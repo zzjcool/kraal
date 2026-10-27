@@ -205,7 +205,11 @@ struct PaneFrameCropTests {
         )
         model.apply(surface: surface(rows: 18))
         let resetsBefore = model.screenResetCount
-        #expect(resetsBefore >= 1, "the first frame has nothing to diff against")
+        // The first frame establishes the screen, and does so without asking the
+        // caller to erase: the renderer already treats a missing baseline as
+        // `firstFrame` and clears inside its own synchronized block. Asking as well
+        // was the only reason "no previous grid" used to mean "erase".
+        #expect(resetsBefore == 0, "a first frame has nothing on screen to erase")
 
         // Now a frame whose height the grid has not caught up with. Same width.
         model.apply(surface: surface(rows: 19))
@@ -247,14 +251,14 @@ struct PaneFrameCropTests {
             cellWidthPixels: 17, cellHeightPixels: 37
         )
         model.apply(surface: surface(rows: 19))
-        #expect(model.screenResetCount == 1, "the first frame has no baseline to trust")
+        #expect(model.screenResetCount == 0, "a first frame has nothing on screen to erase")
 
         // Same grid, same boot, new projection: repaint, not erase.
         var reprojected = surface(rows: 19)
         reprojected.projectionRevision = 2
         reprojected.surfaceRevision = 2
         model.apply(surface: reprojected)
-        #expect(model.screenResetCount == 1,
+        #expect(model.screenResetCount == 0,
                 "a projection change with an unchanged width must not erase the screen")
     }
 
@@ -281,8 +285,9 @@ struct PaneFrameCropTests {
             model.apply(surface: surface)
             if model.screenResetCount > before { erases += 1 }
         }
-        // The first establishes the screen; nothing after it has a reason.
-        #expect(erases == 1, "a settled pane erased \(erases) times, expected 1")
+        // Nothing here has a reason to erase: the first frame clears inside the
+        // renderer, and every frame after it is identical.
+        #expect(erases == 0, "a settled pane erased \(erases) times, expected 0")
     }
 
 }

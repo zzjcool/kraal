@@ -202,7 +202,18 @@ public enum SurfaceGeometry {
         currentGrid: (width: Int, height: Int)
     ) -> Bool {
         if deltaStreamRestarted { return true }
-        guard let previousGrid else { return true }
+        // No previous grid means nothing has been painted yet, which is not a reason
+        // to erase: the frame is already a full one (the renderer treats a missing
+        // baseline as `firstFrame`) and the screen it would erase is empty.
+        //
+        // Returning `true` here is what made an erase self-sustaining and invisible.
+        // The caller cleared `frameGrid` whenever the daemon's grid disagreed with
+        // the frame — during startup that is every frame for ~200 ms — so every one
+        // of them erased, while the caller's own `widthMoved` (already `?? false`)
+        // logged `false` and pointed the investigation at the wrong condition.
+        // Measured: 110 of 116 erases in one session carried `projection=false
+        // restart=false widthMoved=false clean=false`.
+        guard let previousGrid else { return false }
         // Only a **width** change needs a screen reset.
         //
         // A width change reflows every row: no cell keeps its coordinate, so the
