@@ -510,4 +510,46 @@ struct ScreenResetScopeTests {
         #expect(PaneTerminalModel.widthMoved(from: nil, to: wide))
     }
 
+    /// A grid change must reissue the cells even when the frame's own size is the
+    /// same, and must **not** erase.
+    ///
+    /// The live failure: after a vertical drag settled, `paint:` logged `bytes=38`
+    /// (cursor sequence, zero cells) every second for as long as it was observed.
+    /// The pane's grid had moved, so the rows the cells belong to no longer matched
+    /// what was on screen — but the frame was the same size as the previous one, so
+    /// every row compared equal and nothing was written. The rows the pane stopped
+    /// covering kept their old content: the blank area.
+    @Test("a grid move reissues the cells without erasing")
+    func gridMoveReissuesWithoutErase() {
+        var renderer = SurfaceANSIRenderer()
+        // Paint one frame at 20 rows.
+        let first = renderer.render(Self.blankFrame(columns: 8, rows: 20), clearingFirst: true)
+        #expect(!first.isEmpty)
+
+        // Same 8x20 frame, but the grid moved, so the baseline is meaningless.
+        let again = renderer.render(
+            Self.blankFrame(columns: 8, rows: 20),
+            clearingFirst: false,
+            invalidateBaseline: true
+        )
+        let text = String(bytes: again, encoding: .utf8) ?? ""
+        // Every row written again: `CSI <n>;1H` for each.
+        #expect(text.contains("\u{1B}[1;1H"), "row 1 was not reissued")
+        #expect(text.contains("\u{1B}[20;1H"), "the last row was not reissued")
+        // And without the erase, which a vertical drag cannot afford per mouse move.
+        #expect(!text.contains("\u{1B}[2J"), "a grid move must not throw the screen away")
+        #expect(!text.contains("\u{1B}[3J"), "a grid move must not throw the scrollback away")
+    }
+
+    /// `gridMoved` is the predicate that feeds it.
+    @Test("gridMoved sees a grid change the renderer cannot")
+    func gridMovedDetectsGridChange() {
+        let frame = Self.blankFrame(columns: 8, rows: 20)
+        #expect(PaneTerminalModel.gridMoved(from: nil, to: frame))
+        #expect(!PaneTerminalModel.gridMoved(from: frame, to: frame))
+        #expect(PaneTerminalModel.gridMoved(
+            from: Self.blankFrame(columns: 8, rows: 21), to: frame
+        ))
+    }
+
 }

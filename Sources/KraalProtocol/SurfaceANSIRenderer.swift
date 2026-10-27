@@ -90,6 +90,27 @@ public struct SurfaceANSIRenderer {
     /// state. It also removes the possibility of a caller erasing and then not
     /// painting at all.
     public mutating func render(_ frame: FrameData, clearingFirst: Bool) -> Data {
+        render(frame, clearingFirst: clearingFirst, invalidateBaseline: false)
+    }
+
+    /// Same, with the two decisions separable.
+    ///
+    /// `invalidateBaseline` is "the rows on screen no longer mean what this
+    /// renderer thinks they mean", without the erase. The case it exists for: the
+    /// terminal's grid changed (so the *rows* the cells belong to changed) while the
+    /// frame's own size did not — a pane that got shorter in a drag. The diff against
+    /// `previous` is meaningless then, but erasing would be pure cost, and on a
+    /// vertical drag it is one erase per mouse move.
+    ///
+    /// Without this the renderer wrote **nothing**: a live session showed `paint:
+    /// ... bytes=38` for seconds after a drag settled, which is the cursor sequence
+    /// with zero cells, because every row compared equal to the frame it had just
+    /// painted at the old grid.
+    public mutating func render(
+        _ frame: FrameData,
+        clearingFirst: Bool,
+        invalidateBaseline: Bool
+    ) -> Data {
         var output = Data()        // Three separate questions, deliberately kept separate. Collapsing them
         // into one flag is what made a resize clear the scrollback.
         //
@@ -103,7 +124,7 @@ public struct SurfaceANSIRenderer {
         let firstFrame = previous == nil
         let widthChanged = previous?.width != frame.width
         let heightChanged = previous?.height != frame.height
-        let repaintAll = firstFrame || widthChanged || heightChanged
+        let repaintAll = firstFrame || widthChanged || heightChanged || invalidateBaseline
         // A caller asking for an erase has already thrown the baseline away, so
         // this frame is a full repaint whatever `previous` says. Cheap to state
         // and it removes an ordering footgun: `clearingFirst` with a stale

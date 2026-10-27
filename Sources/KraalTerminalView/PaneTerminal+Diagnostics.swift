@@ -231,3 +231,20 @@ extension PaneTerminalModel {
         )
     }
 }
+
+extension PaneTerminalModel {
+    /// Whether the grid this frame belongs to differs from the last painted one.
+    ///
+    /// A grid change invalidates the row diff but does **not** need the screen erased:
+    /// a pane that got shorter during a vertical drag keeps every row's coordinates.
+    /// Conflating the two is what made a settled drag write nothing — measured
+    /// `bytes=38`, the cursor sequence with zero cells, repeated for seconds, because
+    /// every row compared equal to the frame just painted at the old grid. The rows
+    /// the pane no longer covered kept their previous content, which is the blank
+    /// area at the bottom.
+    nonisolated static func gridMoved(from previous: FrameData?, to frame: FrameData) -> Bool {
+        guard let previous else { return true }
+        return Int(previous.width) != Int(frame.width)
+            || Int(previous.height) != Int(frame.height)
+    }
+}

@@ -441,15 +441,12 @@ public final class PaneTerminalModel {
             return
         }
 
-        if needsCleanRepaint {
-            // Reached only when the grid became trustworthy *between* the reset
-            // decision at the top of this call and here, which cannot happen: the
-            // flag is folded into `eraseBeforePaint` above. Kept as an explicit
-            // clear so a future edit cannot leave the flag stuck on.
-            needsCleanRepaint = false
-        }
-
-        let painted = renderer.render(frame, clearingFirst: eraseBeforePaint)
+        needsCleanRepaint = false
+        let painted = renderer.render(
+            frame,
+            clearingFirst: eraseBeforePaint,
+            invalidateBaseline: Self.gridMoved(from: frameGrid, to: frame)
+        )
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: surface.graphics.assets.count,
                     placements: surface.graphics.placements.count)
