@@ -330,33 +330,53 @@ extension PaneTerminalModel {
     /// look identical: `paint: erase=1` with a constant width. That is why the flash
     /// during a vertical drag survived three attempts — each one removed a reason
     /// and the line did not change, because a different reason was firing.
+    /// What this frame needs: wipe the screen, repaint every row, or both.
+    struct PaintDecision {
+        /// Erase before painting, which also destroys scrollback.
+        var erase = false
+        /// Write every row again, leaving scrollback alone.
+        var repaintAll = false
+    }
+
     func eraseDecision(
         projectionChanged: Bool,
         geometry: PaneSurfacePane
-    ) -> Bool {
+    ) -> PaintDecision {
         let restart = SurfaceGeometry.deltaStreamRestarted(
             previousRevision: lastRevision,
             incomingRevision: geometry.contentRevision
         )
         let currentGrid = Self.paneGrid(geometry)
         let widthMoved = frameGrid.map { Int($0.width) != currentGrid.width } ?? true
-        let reset = projectionChanged || SurfaceGeometry.needsScreenReset(
+        // A width change reflows every row, so the baseline is worthless and the
+        // scrollback is already meaningless. A **height** change does not: the rows
+        // keep their columns, and the renderer clears the rows the frame no longer
+        // covers.
+        let widthReset = SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: restart,
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
             currentGrid: currentGrid
         )
         // A clean repaint was requested by an earlier frame that could not be painted
-        // at a trustworthy grid. It is a reset for the same reason a changed grid is:
-        // the rows on screen were written at the wrong width.
-        let erase = reset || needsCleanRepaint
-        if erase {
+        // at a trustworthy grid. That is a width problem by construction: the rows on
+        // screen were written at the wrong width.
+        var decision = PaintDecision()
+        decision.erase = widthReset || needsCleanRepaint
+        // A new projection means the cells on screen came from somewhere else, so
+        // every row has to be written again — but not necessarily erased. Measured on
+        // a live start: `erase why: projection=true widthMoved=false` fired twice
+        // while the width never moved, throwing away both panes' scrollback for a
+        // repaint that only needed the rows rewritten.
+        decision.repaintAll = projectionChanged || decision.erase
+        if decision.erase || projectionChanged {
             // Named, because four unrelated conditions all reach the same line and
             // from the log they look identical: `paint: erase=1` with a constant
             // width. Three attempts removed one reason each and the line did not
             // change, because a different reason was firing.
             kraalLog("erase why: \(paneId) projection=\(projectionChanged) restart=\(restart)"
-                + " widthMoved=\(widthMoved) clean=\(needsCleanRepaint)")
+                + " widthMoved=\(widthMoved) clean=\(needsCleanRepaint)"
+                + " -> erase=\(decision.erase) repaintAll=\(decision.repaintAll)")
         }
-        return erase
+        return decision
     }
 }

@@ -223,4 +223,31 @@ struct PaneFrameCropTests {
                 "a width mismatch left the old baseline in place")
     }
 
+    /// The decision itself: a projection change with a constant width must repaint
+    /// without erasing.
+    ///
+    /// The renderer's own test proves it *can* do that; this one proves the caller
+    /// asks. Without it, both injections at the call site — adding
+    /// `|| projectionChanged` to `erase`, and dropping `repaintAll` — stayed green,
+    /// which would let the erase come back unnoticed.
+    @Test("a projection change with a steady width does not ask for an erase")
+    func projectionChangeDoesNotEraseAtTheCallSite() {
+        let model = PaneTerminalModel(paneId: "w1:p1") { _ in }
+        model.gridOverride = TerminalGridMetrics(
+            columns: 112, rows: 19,
+            widthPixels: 1904, heightPixels: 703,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        model.apply(surface: surface(rows: 19))
+        #expect(model.screenResetCount == 1, "the first frame has no baseline to trust")
+
+        // Same grid, same boot, new projection: repaint, not erase.
+        var reprojected = surface(rows: 19)
+        reprojected.projectionRevision = 2
+        reprojected.surfaceRevision = 2
+        model.apply(surface: reprojected)
+        #expect(model.screenResetCount == 1,
+                "a projection change with an unchanged width must not erase the screen")
+    }
+
 }

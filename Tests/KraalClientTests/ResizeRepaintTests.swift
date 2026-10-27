@@ -625,4 +625,33 @@ struct ScreenResetScopeTests {
         #expect(second.hasMeasuredCellSize)
     }
 
+    /// A new projection must rewrite every row without throwing the screen away.
+    ///
+    /// Measured on a live start, twice, with the width constant the whole time:
+    ///
+    ///     [19:46:12.725] erase why: wB:p16 projection=true restart=false \
+    ///                    widthMoved=false clean=false
+    ///
+    /// Both panes erased and repainted 6 KB for a projection change that needed only
+    /// the rows rewritten. Erasing also drops scrollback, which is the part a user
+    /// notices.
+    @Test("a projection change repaints every row and does not erase")
+    func projectionChangeRepaintsWithoutErasing() {
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(Self.blankFrame(columns: 8, rows: 20), clearingFirst: true)
+        // Same grid, different projection: baseline worthless, scrollback fine.
+        let repaint = renderer.render(
+            Self.blankFrame(columns: 8, rows: 20),
+            clearingFirst: false,
+            invalidateBaseline: true
+        )
+        let text = String(bytes: repaint, encoding: .utf8) ?? ""
+        // Every row written again.
+        #expect(text.contains("\u{1B}[1;1H"), "row 1 was not reissued")
+        #expect(text.contains("\u{1B}[20;1H"), "the last row was not reissued")
+        // And the screen — hence the scrollback — survives.
+        #expect(!text.contains("\u{1B}[2J"), "a projection change must not erase")
+        #expect(!text.contains("\u{1B}[3J"), "a projection change must not drop scrollback")
+    }
+
 }

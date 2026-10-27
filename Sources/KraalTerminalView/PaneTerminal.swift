@@ -288,9 +288,10 @@ public final class PaneTerminalModel {
             previous: lastProjection,
             current: projection
         )
-        let eraseBeforePaint = eraseDecision(
+        let decision = eraseDecision(
             projectionChanged: projectionChanged, geometry: geometry
         )
+        let eraseBeforePaint = decision.erase
         if eraseBeforePaint {
             screenResetCount += 1
             // Runs **before** `paneFrame` below for every path that erases, not
@@ -435,7 +436,11 @@ public final class PaneTerminalModel {
         let painted = renderer.render(
             frame,
             clearingFirst: eraseBeforePaint,
-            invalidateBaseline: Self.gridMoved(from: frameGrid, to: frame)
+            // A new projection invalidates the diff even when the grid held still:
+            // the cells on screen came from another projection, so comparing rows
+            // against them is meaningless. Repainting is required; erasing is not.
+            invalidateBaseline: decision.repaintAll
+                || Self.gridMoved(from: frameGrid, to: frame)
         )
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: surface.graphics.assets.count,
