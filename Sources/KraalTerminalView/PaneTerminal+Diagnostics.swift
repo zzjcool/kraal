@@ -114,3 +114,19 @@ extension PaneTerminalModel {
         ))
     }
 }
+
+/// Logs a pane whose view disagrees with the grid the daemon asked for.
+///
+/// Only the disagreement, because a drag changes a pane's height at mouse speed and
+/// every line here is a synchronous file write on the main thread — measured 562 in
+/// one drag, which is itself part of why dragging felt heavy.
+func logPaneViewIfMismatched(
+    paneId: String,
+    size: CGSize,
+    cells: SurfaceRect,
+    grid: TerminalGridMetrics?
+) {
+    guard let grid, Int(grid.rows) != Int(cells.height) else { return }
+    kraalLog("pane view: \(paneId) size=\(size.width)x\(size.height)pt "
+        + "cells=\(cells.width)x\(cells.height) ghostty=\(grid.columns)x\(grid.rows)")
+}

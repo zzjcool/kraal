@@ -20,6 +20,7 @@
 // the view cannot be driven without a window.
 
 import CoreGraphics
+import Foundation
 import Testing
 
 import KraalProtocol
@@ -350,21 +351,51 @@ struct ScreenResetScopeTests {
         #expect(!needs)
     }
 
-    /// A new grid must reset: rows written at the old width are still in the
-    /// scrollback, and an incremental repaint only revisits rows that changed.
-    @Test("a grid change does need a screen reset")
-    func gridChangeNeedsReset() {
+    /// A **width** change must reset: rows written at the old width are still in
+    /// the scrollback, and an incremental repaint only revisits rows that changed.
+    @Test("a width change does need a screen reset")
+    func widthChangeNeedsReset() {
         #expect(SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: false,
             previousGrid: (width: 119, height: 40),
             currentGrid: (width: 111, height: 35)
         ))
-        // Rows only, so a check that compared columns alone would miss it.
+        // Same height, so a check that compared rows alone would miss it.
         #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 119, height: 40),
+            currentGrid: (width: 111, height: 40)
+        ))
+    }
+
+    /// A **height**-only change must not reset, and the renderer must still clear
+    /// the rows the frame no longer covers.
+    ///
+    /// This is the drag path. A vertical divider produces one-row height changes at
+    /// mouse speed, and treating each as a reset meant `2J 3J H` plus a full
+    /// rewrite: measured on a live drag, 1139 of 1195 paints took that path at ~6 KB
+    /// of ANSI each, up to 97 in a second. Correctness has to survive dropping the
+    /// reset, so the clear is asserted here rather than assumed.
+    @Test("a height-only change does not reset, but clears the rows it lost")
+    func heightChangeClearsWithoutReset() {
+        #expect(!SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: false,
             previousGrid: (width: 111, height: 40),
             currentGrid: (width: 111, height: 35)
         ))
+
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(Self.blankFrame(columns: 8, rows: 40), clearingFirst: true)
+        let bytes = renderer.render(Self.blankFrame(columns: 8, rows: 35), clearingFirst: false)
+        let text = String(bytes: bytes, encoding: .utf8) ?? ""
+
+        // Rows 36..40 are the ones that used to be content and are now nothing.
+        // `0J` from the first row past the new height erases to the end of screen,
+        // which covers all of them without a full-screen erase.
+        #expect(text.contains("\u{1B}[36;1H"), "the rows below the new height were not cleared")
+        #expect(text.contains("\u{1B}[0J"), "the clear was not an erase-to-end")
+        #expect(!text.contains("\u{1B}[2J"), "a full-screen erase is what the drag could not afford")
+        #expect(!text.contains("\u{1B}[3J"), "the scrollback must not be thrown away for a resize")
     }
 
     /// A restarted delta stream refers to a baseline that no longer exists, so it
@@ -446,4 +477,13 @@ struct ScreenResetScopeTests {
             currentGrid: grid
         ))
     }
+    /// A frame of blank cells, sized exactly. Enough to drive the renderer: the
+    /// assertions are about which escape sequences come out, not the glyphs.
+    static func blankFrame(columns: UInt16, rows: UInt16) -> FrameData {
+        let count = Int(columns) * Int(rows)
+        let buffer = CellBuffer(Array(repeating: .blank, count: count), width: Int(columns))
+        return FrameData(buffer: buffer, width: columns, height: rows,
+                         cursor: nil, hyperlinks: [], graphics: Data())
+    }
+
 }

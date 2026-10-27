@@ -101,9 +101,9 @@ public struct SurfaceANSIRenderer {
         //                threw away a frame that left bad rows behind.
         //   sync       — never a question. Every frame is wrapped.
         let firstFrame = previous == nil
-        let repaintAll = firstFrame
-            || previous?.width != frame.width
-            || previous?.height != frame.height
+        let widthChanged = previous?.width != frame.width
+        let heightChanged = previous?.height != frame.height
+        let repaintAll = firstFrame || widthChanged || heightChanged
         // A caller asking for an erase has already thrown the baseline away, so
         // this frame is a full repaint whatever `previous` says. Cheap to state
         // and it removes an ordering footgun: `clearingFirst` with a stale
@@ -143,6 +143,23 @@ public struct SurfaceANSIRenderer {
         let rows = repaintEverything ? Array(0 ..< Int(frame.height)) : changedRows(frame)
         for row in rows {
             appendRow(row, frame: frame, stream: &stream, output: &output)
+        }
+
+        // Rows the previous frame occupied but this one does not.
+        //
+        // A pane gets shorter when a divider is dragged, and the renderer used to
+        // answer that with `clearingFirst` from the caller — a `2J 3J H` that wipes
+        // the screen and scrollback and then rewrites all of it. Measured on a live
+        // drag: 1139 of 1195 paints carried `erase=1`, ~6 KB each, up to 97 paints
+        // in one second. That is what made dragging feel heavy.
+        //
+        // It is not necessary. Rows above the new height keep their coordinates, so
+        // only the rows the frame no longer covers have to go. Written **after** the
+        // row loop: the clear runs to the end of the screen, and doing it first
+        // would just be erased content again — it has to be the last word on those
+        // rows.
+        if let previous, previous.width == frame.width, previous.height > frame.height {
+            output.appendUTF8("\u{1B}[\(Int(frame.height) + 1);1H\u{1B}[0J")
         }
 
         // Cursor. Three separate requirements, all from `render_ansi.rs:778`

@@ -817,9 +817,12 @@ public struct GhosttyPaneView: View {
                             // difference between one row and two. Printing the
                             // truncated value hid that (`536.5pt` reads as `536`,
                             // and 536pt is exactly where a row disappears).
-                            kraalLog("pane view: \(geometry.paneId) "
-                                + "size=\(proxy.size.width)x\(proxy.size.height)pt "
-                                + "cells=\(geometry.innerRect.width)x\(geometry.innerRect.height)")
+                            logPaneViewIfMismatched(
+                                paneId: geometry.paneId,
+                                size: proxy.size,
+                                cells: geometry.innerRect,
+                                grid: model.state.surfaceSize
+                            )
                         }
                 }
             }

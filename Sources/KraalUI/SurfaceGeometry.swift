@@ -203,8 +203,20 @@ public enum SurfaceGeometry {
     ) -> Bool {
         if deltaStreamRestarted { return true }
         guard let previousGrid else { return true }
+        // Only a **width** change needs a screen reset.
+        //
+        // A width change reflows every row: no cell keeps its coordinate, so the
+        // only trustworthy action is to throw the baseline away. A height change
+        // does not — a row is still at the same column, and rows above the old
+        // height are untouched. `SurfaceANSIRenderer` clears the rows the frame no
+        // longer covers and diffs the rest.
+        //
+        // This is the difference between a drag that feels heavy and one that does
+        // not. Measured on a live session: 1139 of 1195 paints during a drag went
+        // through the `clearingFirst` path at ~6 KB of ANSI each, up to 97 paints
+        // in one second, because every one-row height change was treated as a
+        // reset. Height changes dominate a vertical drag.
         return previousGrid.width != currentGrid.width
-            || previousGrid.height != currentGrid.height
     }
 
     /// Rough metrics for a 13 pt monospaced font, in points, used before any
