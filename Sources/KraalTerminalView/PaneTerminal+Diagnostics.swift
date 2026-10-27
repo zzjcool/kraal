@@ -262,3 +262,26 @@ extension PaneTerminalModel {
             + " now=\(frame.width)x\(frame.height)")
     }
 }
+
+extension PaneTerminalModel {
+    /// Repaints when SwiftUI has handed the terminal a new size.
+    ///
+    /// The repaint used to hang off `onChange(of: state.surfaceSize)` — the field
+    /// this workaround exists because it goes **stale**. Stale means no new value,
+    /// no `onChange`, no repaint: a pane that shrank stayed frozen at its old
+    /// contents and the rows it stopped covering showed as a blank band. Gating the
+    /// cure on the symptom is why three attempts looked right in the logs and
+    /// changed nothing on screen.
+    ///
+    /// A view's frame drives Ghostty's grid on its own path (`setFrameSize` →
+    /// `fitToSize`), independently of what `surface.size()` reports back, so this
+    /// size cannot go stale for this purpose.
+    ///
+    /// Cheap when nothing moved: only fires on an actual size change.
+    func layoutSettled(size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        guard size != lastLaidOutSize else { return }
+        lastLaidOutSize = size
+        reapplyAfterGridViewMoved()
+    }
+}

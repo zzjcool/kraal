@@ -552,4 +552,30 @@ struct ScreenResetScopeTests {
         ))
     }
 
+    /// `layoutSettled(size:)` must be driven by the size SwiftUI actually handed
+    /// the view, and must ignore the no-op case.
+    ///
+    /// The bug: the repaint was triggered only by `onChange(of:
+    /// state.surfaceSize)`. That field is the one this whole workaround exists
+    /// because it goes **stale** — so once it stopped moving, the repaint stopped
+    /// firing, and a pane that shrank kept its old contents under a blank band.
+    /// The trigger was gated on the very signal that fails.
+    @Test("layoutSettled only reacts to a real size change")
+    @MainActor
+    func layoutSettledIgnoresRepeats() {
+        let model = PaneTerminalModel(paneId: "wB:p14") { _ in }
+        #expect(model.lastLaidOutSize == nil)
+        model.layoutSettled(size: CGSize(width: 1071, height: 777))
+        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 777))
+        // A second identical layout is not a reason to repaint.
+        model.layoutSettled(size: CGSize(width: 1071, height: 777))
+        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 777))
+        // A degenerate proposal must not become the new baseline.
+        model.layoutSettled(size: .zero)
+        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 777))
+        // A real change does move it.
+        model.layoutSettled(size: CGSize(width: 1071, height: 129.5))
+        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 129.5))
+    }
+
 }

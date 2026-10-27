@@ -88,6 +88,8 @@ public final class PaneTerminalModel {
     /// when that branch was reduced to a bare `return`, which is how the stray
     /// background band reached a user twice.
     var gridOverride: TerminalGridMetrics?
+    /// The last size SwiftUI handed this pane; see `layoutSettled(size:)`.
+    var lastLaidOutSize: CGSize?
 
     /// How many times a screen reset has been applied. Test-observable because the
     /// reset and the image bytes race inside one `apply` call, and `parkedFrame`
@@ -818,10 +820,11 @@ public struct GhosttyPaneView: View {
                                 size: proxy.size,
                                 cells: geometry.innerRect,
                                 // `resolvedGrid`, not `surfaceSize`: the latter
-                                // is the field that goes stale, so printing it
-                                // reported a grid the pane was not painting in.
+                                // goes stale, so printing it reported a grid the
+                                // pane was not painting in.
                                 grid: model.resolvedGrid
                             )
+                            model.layoutSettled(size: proxy.size)
                         }
                 }
             }
@@ -875,11 +878,6 @@ public struct GhosttyPaneView: View {
             // re-rendered the tab at a new grid, the view is handed the new
             // surface, and nothing repaints it. That is why dragging a window
             // left the pane frozen at the old size.
-            //
-            // The revision cannot be relied on across a reconnect, but the grid
-            // can: `apply` already treats a changed frame grid as "repaint the
-            // whole frame", so keying the trigger on the pane's own grid closes
-            // the gap without adding a second notion of size.
             .onChange(of: geometry.innerRect) { _, _ in
                 model.apply(surface: surface)
             }
