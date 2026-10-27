@@ -66,4 +66,33 @@ struct ParkedFrameRetryTests {
             gridColumns: 127, gridRows: 43
         ))
     }
+
+    /// The rule `flushPendingFrame` actually uses: exact, or a grid the frame fits
+    /// inside.
+    ///
+    /// Waiting for exact equality was a real defect, not a conservative choice.
+    /// Ghostty measures its grid from the NSView's bounds, which SwiftUI applies
+    /// one layout pass after the frame that asked for it — so while a window is
+    /// being dragged the two stay one pass apart and equality never holds. The
+    /// park then aged out after twelve attempts, and the row the mismatch left
+    /// blank stayed on screen until the program next printed. That is what the
+    /// user described as "it fixes itself after a while".
+    @Test("a parked frame paints at an equal grid or a larger one")
+    func parkedFramePaintsWhenGridIsLargeEnough() {
+        // Equal: the ordinary case.
+        #expect(PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 30
+        ))
+        // Ghostty still one layout pass behind: 29 rows against a 30-row frame.
+        #expect(PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 31
+        ))
+        // Too small: every row would wrap, so this one must keep waiting.
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 29
+        ))
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 123, gridRows: 30
+        ))
+    }
 }

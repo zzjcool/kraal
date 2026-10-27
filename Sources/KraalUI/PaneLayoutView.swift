@@ -386,6 +386,43 @@ struct PaneLayoutView: View {
                     + "containerOrigin=\(containerOriginInWindow) "
                     + "panes=[\(panes.joined(separator: " "))] "
                     + "splits=[\(splitsLog)]")
+                // Exact sizes, unrounded, and only when they disagree with the
+                // grid the daemon asked for.
+                //
+                // Ghostty floors `viewPixels / cellPixels`, so a pane laid out at
+                // *exactly* `rows x cell` has zero slack: half a point lost turns
+                // `333px` into `332px` and a whole row disappears. `Int()` in the
+                // line above hides that (`166.5` prints as `166`, and 166pt is
+                // precisely where a row is lost). Logged only on a disagreement so a
+                // steady layout stays quiet; see docs/ENVIRONMENT.md §8.14.
+                if let surface {
+                    let cellPixels = max(pointsPerCell.height * displayScale, 1)
+                    let mismatched = surface.panes.compactMap { pane -> String? in
+                        let box = rect(
+                            for: pane.innerRect,
+                            grid: grid,
+                            in: proxy.size,
+                            cellSize: pointsPerCell
+                        )
+                        let rows = Int(box.height * displayScale / cellPixels)
+                        guard rows != Int(pane.innerRect.height) else { return nil }
+                        let outer = rect(
+                            for: pane.rect,
+                            grid: grid,
+                            in: proxy.size,
+                            cellSize: pointsPerCell
+                        )
+                        return "\(pane.paneId) inner=\(pane.innerRect.width)x\(pane.innerRect.height)"
+                            + "=\(box.height)pt(\(box.height * displayScale)px)"
+                            + " floorRows=\(rows)"
+                            + " rect=\(pane.rect.width)x\(pane.rect.height)=\(outer.height)pt"
+                    }
+                    if !mismatched.isEmpty {
+                        kraalLog("layout exact: container=\(proxy.size.width)x\(proxy.size.height)pt "
+                            + "cellPx=\(cellPixels) "
+                            + "panes=[\(mismatched.joined(separator: " "))]")
+                    }
+                }
             }
         }
     }
@@ -810,6 +847,22 @@ private struct PaneFrameReporter: NSViewRepresentable {
             // that the next `layout()` pass overwrites it, which is exactly what
             // should happen.
             guard PaneFrameMath.isUsableForHitTesting(bounds) else { return }
+            // The reporter's own bounds against the rectangle the layout asked
+            // for. These are the only two numbers that can say whether SwiftUI
+            // honoured `.frame`/`.position`: Ghostty reads its NSView's `bounds`,
+            // so a disagreement here is exactly a pane measured at the wrong size
+            // (docs/ENVIRONMENT.md §8.14 — observed as `inner +/- 1 row`, both
+            // signs, summing to zero).
+            // Deliberately not compared against `paneFrame.size` here: this view
+            // is hosted in a container that `.frame`/`.position` do not move (see
+            // below), so its bounds are the *container's*, not the pane's. Measured
+            // `host=1071x988` against a `wanted` of `1054x499.5` on a three-pane
+            // layout — the two are different rectangles by construction, which is
+            // why the pane's offset is added by hand just below.
+            //
+            // The question that matters — "is the pane's NSView the size the layout
+            // asked for?" — is answered by `grid mismatch`'s `px` field instead,
+            // because that one comes from Ghostty's own `bounds`.
             // SwiftUI hosts this view in a container that is not moved by
             // `.frame`/`.position`, so the host's own rect is always the pane
             // container. The container's rect plus the pane's offset inside it is

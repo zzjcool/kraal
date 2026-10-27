@@ -1383,3 +1383,37 @@ A/B 实测：删掉这两行，`swift test` **741 tests 仍全绿**。按 §0.3�
 - 三种候选机制里哪一条（或哪几条叠加）是用户实际看到的，**未确定**。
 - `frameGrid` 与 `renderer.previous` 不一致会产生什么具体画面，**未验证**。
 - 只在 gruvbox 下观察。`terminal`（`surface_dim = 0x444444`）未测。
+
+#### 8.14.1 根因：`apply` 跑在 SwiftUI 应用布局之前，而 mismatch 分支「画交集」
+
+2026-10-27 定位，**已修**。一条带完整时序的日志（`repro-fastdrag`，VM）：
+
+```
+09:54:17.447  grid mismatch: pane=w1:p1 ghostty=118x36 frame=121x39
+09:54:19.467  grid mismatch: pane=w1:p1 ghostty=118x36 frame=116x16   ← 分屏那一刻
+09:54:19.484  paint: ... bytes=2018                                   ← 17ms 后全量重画
+```
+
+`apply(surface:)` 由 daemon 的帧驱动，而 grid 来自 Ghostty 读自己的 NSView
+`bounds`。SwiftUI 应用新布局比那个帧**晚一个布局周期**——实测 10ms
+（`surface` 到 `.651`，`apply` 在 `.658` 跑，NSView 到 `.668` 才拿到新尺寸）。
+
+于是分屏瞬间每个 pane 都被按**上一个尺寸**测量。旧代码在这种情况下画
+`bridgeFrame`（frame 与 grid 的交集）：16 行的 frame 对 36 行的 grid，前 16 行
+写成新内容，**剩下 20 行保留上一个布局的画面**。那就是用户报的「快速拖完一大片
+空行」；它自己不会消失，因为后续没有重画。
+
+修法两条，缺一不可：
+
+1. **mismatch 时不画任何东西**（删掉 `paintOverlap` / `bridgeFrame` 那条路径）。
+   画交集必错：对上的行迟早要在真 grid 上重画，没对上的行无论如何画不出。
+2. **grid 追上来时重新 `apply`**（`reapplyAfterGridViewMoved`）。只做第 1 条会让
+   pane 一直空白——`apply` 拒画之后，如果程序不再输出，没有任何东西会再画一次。
+
+`bridgeFrame`/`cropped` 本身仍留在 `PaneFrameCrop.swift` 里给 `paintOverlap`
+以外的用途（`PaneTerminalModel.bridgeFrame` 有单测钉住裁剪规则）。
+
+**A/B（§0.3）**：把 `bridgeFrame` 的绘制加回 mismatch 分支 →
+`✘ a mismatched grid paints nothing and parks the frame` 立刻变红；恢复后绿。
+这条测试原本叫 `a mismatched grid still reaches the terminal`，断言的正是
+「必须画」——方向反了，已连同理由一起改写。

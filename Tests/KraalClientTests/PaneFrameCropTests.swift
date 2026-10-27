@@ -123,15 +123,25 @@ struct PaneFrameCropTests {
         #expect(PaneTerminalModel.bridgeFrame(frame(width: 4, height: 4), gridColumns: 0, gridRows: 0) == nil)
     }
 
-    /// **The real path**: drive `apply(surface:)` with a grid that lags the frame and
-    /// assert it actually writes something.
+    /// **The real path**: drive `apply(surface:)` with a grid that lags the frame.
     ///
-    /// This is the assertion the whole change exists for. Written after the fact:
-    /// deleting the paint from the mismatch branch — the exact defect — left every
-    /// other test green, including the pure-function ones, because they only checked
-    /// how a frame is cropped and never that `apply` crops at all.
-    @Test("a mismatched grid still reaches the terminal")
-    func applyPaintsUnderMismatch() {
+    /// This deliberately asserts that **nothing** is painted, which is the opposite
+    /// of what an earlier version of this test required. That version was written
+    /// when the defect was "a mismatch paints nothing and the rows past the grid
+    /// show the terminal's background", and painting the intersection fixed that.
+    ///
+    /// It then caused a worse one. The grid comes from Ghostty's `bounds`, which
+    /// SwiftUI updates one layout pass *after* the frame that asked for it. On a
+    /// split, a pane was briefly measured at its previous height — measured
+    /// `ghostty=118x36 frame=116x16` — so the intersection covered 16 of 36 rows
+    /// and the other twenty kept the *previous layout's* content. That is the
+    /// reported "drag fast and a lot of empty rows appear at the bottom", and it
+    /// persisted until something else repainted.
+    ///
+    /// So the rule is now: at a grid the frame does not fit, paint nothing and wait.
+    /// `reapplyAfterGridViewMoved` is what guarantees the wait ends.
+    @Test("a mismatched grid paints nothing and parks the frame")
+    func applyDeclinesToPaintUnderMismatch() {
         let model = PaneTerminalModel(paneId: "w1:p1") { _ in }
         // The pane's view has 19 rows; Ghostty is still reporting 18.
         model.gridOverride = TerminalGridMetrics(
@@ -141,10 +151,34 @@ struct PaneFrameCropTests {
         )
         let before = model.paintCount
         model.apply(surface: surface(rows: 19))
-        #expect(model.paintCount > before,
-                "a mismatch painted nothing; the rows past the grid show the terminal background")
-        // And the full frame is still parked, so the grid catching up repaints it all.
+        #expect(model.paintCount == before,
+                "a mismatch painted the intersection; the rows past it keep the old layout")
+        // The full frame is parked, so the grid catching up repaints it all.
         #expect(model.parkedFrame?.height == 19)
+    }
+
+    /// The wait must end by itself, or refusing to paint would leave a blank pane.
+    @Test("re-applying after the grid catches up paints the whole frame")
+    func reapplyPaintsOnceGridMatches() {
+        let model = PaneTerminalModel(paneId: "w1:p1") { _ in }
+        model.gridOverride = TerminalGridMetrics(
+            columns: 112, rows: 18,
+            widthPixels: 1904, heightPixels: 666,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        let surface = surface(rows: 19)
+        model.apply(surface: surface)
+        #expect(model.paintCount == 0)
+
+        // The view caught up: same surface, grid now matching.
+        model.gridOverride = TerminalGridMetrics(
+            columns: 112, rows: 19,
+            widthPixels: 1904, heightPixels: 703,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        model.reapplyAfterGridViewMoved()
+        #expect(model.paintCount > 0,
+                "the grid caught up but nothing was painted; the pane would stay blank")
     }
 
     @Test("graphics are dropped from a crop, because placements address surface cells")
