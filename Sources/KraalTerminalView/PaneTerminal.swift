@@ -294,27 +294,19 @@ public final class PaneTerminalModel {
             projectionChanged: projectionChanged, geometry: geometry
         )
         let eraseBeforePaint = decision.erase
-        // A first frame still has to forget the graphics cache: `GraphicsEncoder` is
-        // stateful, and a cache believing the image is already on screen encodes to
-        // zero bytes. That is separate from *erasing*, which concerns cells that were
-        // never painted — conflating the two is how "no previous grid" came to mean
-        // "erase".
+        // Before `paneFrame`: `GraphicsEncoder` is stateful, and a cache that
+        // believes the image is on screen encodes to zero bytes, after which the
+        // erase takes the picture with nothing to put it back (#101).
+        //
+        // The first frame needs the same forget without erasing — which is how "no
+        // previous grid" once came to look like a reason to wipe the screen.
         if eraseBeforePaint || frameGrid == nil {
             resetSurfaces()
         }
         if eraseBeforePaint {
             screenResetCount += 1
-            // Runs **before** `paneFrame` below for every path that erases, not
-            // just the `resetNeeded` one. `GraphicsEncoder` is stateful: encoding
-            // against a cache that still believes the image is on screen yields
-            // zero bytes, and the erase that follows then takes the picture with
-            // nothing to put it back. That is #101 review's "gone permanently".
-            resetSurfaces()
         }
         let frame = paneFrame(from: surface, geometry: geometry)
-        // A different projection means the screen this renderer built its
-        // baseline from is gone, whatever the numbers say. It has to be taken as
-        // a whole frame, not diffed against cells that came from somewhere else.
         lastProjection = projection
 
         // A pane's content revision only moves when its *content* changes, so the
@@ -340,7 +332,11 @@ public final class PaneTerminalModel {
             // covers are not part of the daemon's cell buffer. Comparing cells alone
             // dropped those frames, freezing the picture at its old position (#105).
             graphicsDiffer: frameGrid?.graphics != frame.graphics
-        ) else { return }
+        ) else {
+            logSkippedFrame(paneId: paneId, revision: geometry.contentRevision,
+                            frame: frame, previous: frameGrid)
+            return
+        }
         // Printed only when the cells alone decided a repaint — the revision and the
         // grid both said "nothing changed" and the frame's contents said otherwise.
         // That is exactly a scroll, and it is what the GUI case asserts on. Kept

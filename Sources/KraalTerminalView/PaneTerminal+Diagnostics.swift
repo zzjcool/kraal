@@ -386,3 +386,27 @@ extension PaneTerminalModel {
         return decision
     }
 }
+
+extension PaneTerminalModel {
+    /// Says why a frame was dropped without being painted.
+    ///
+    /// The `guard` above has five reasons and the log had none of them, so a pane
+    /// that stopped updating was indistinguishable from one that had nothing to
+    /// update. Measured on a live drag: `surfaceRevision` advanced 65 → 69 while
+    /// `wB:p16` produced no `paint:` line at all, and there was no way to tell
+    /// whether `apply` was refusing the frame or never receiving it.
+    ///
+    /// Written only on the drop path, so a working pane stays silent.
+    func logSkippedFrame(
+        paneId: String,
+        revision: UInt64,
+        frame: FrameData,
+        previous: FrameData?
+    ) {
+        kraalLog("frame skipped: pane=\(paneId) rev=\(lastRevision)->\(revision)"
+            + " frame=\(frame.width)x\(frame.height)"
+            + " previous=\(previous.map { "\($0.width)x\($0.height)" } ?? "nil")"
+            + " cellsDiffer=\(previous.map { $0.buffer != frame.buffer } ?? false)"
+            + " graphicsDiffer=\(previous.map { $0.graphics != frame.graphics } ?? false)")
+    }
+}
