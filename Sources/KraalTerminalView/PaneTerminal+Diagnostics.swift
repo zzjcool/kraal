@@ -306,6 +306,9 @@ extension PaneTerminalModel {
         guard size.width > 0, size.height > 0 else { return }
         guard size != lastLaidOutSize else { return }
         lastLaidOutSize = size
+        if let view = state.attachedPlatformView {
+            enforceEngineLayerFrame(view: view)
+        }
         // Report the cell size on **every** settled layout, not just from `apply`.
         //
         // `reportCellMetrics` ran inside `apply` and read `state.surfaceSize`, which
@@ -479,7 +482,6 @@ extension PaneTerminalModel {
             + " frame=\(frame.width)x\(frame.height)"
             + " grid=\(grid.map { "\($0.columns)x\($0.rows)" } ?? "nil")")
     }
-
 }
 
 /// Reports a pane whose terminal view is not the size SwiftUI allocated to it.
@@ -504,4 +506,50 @@ func logAllocationGap(
     guard abs(gap) > 0.5 else { return }
     kraalLog("allocation gap: pane=\(paneId) allocated=\(allocated.height)pt"
         + " view=\(view.height)pt gap=\(gap)pt rows=\(rows)")
+}
+
+/// Forces the engine's own `IOSurfaceLayer` to cover the view it is inside.
+///
+/// Ghostty renders through a layer it creates itself (`src/renderer/metal/
+/// IOSurfaceLayer.zig`), not through `view.layer`, and that layer carries its own
+/// `frame` and `contentsScale`. Neither is rebuilt synchronously by
+/// `surface.setSize` — the coordinator's own notes say so:
+///
+/// > When `synchronizeMetrics` sends a new pixel size to ghostty via `setSize`, the
+/// > underlying IOSurface is not rebuilt synchronously. Until the next full render
+/// > pass ghostty still uses the **old** IOSurface, so it derives an incorrect
+/// > `contentsScale` for the IOSurfaceLayer (e.g. old-pixel-height / new-point-height
+/// > → 4.62 instead of the expected 3.0).
+///
+/// and, for the host's obligation:
+///
+/// > Platform views use this hook to silently enforce the correct `contentsScale`
+/// > **and `frame`** on sublayers after each render.
+///
+/// The AppKit side does half of that: `enforceMetalLayerScale` adjusts
+/// `contentsScale` only. So a layer sized for the previous pane height keeps that
+/// height, is stretched by its new contentsScale, and covers less than the view — the
+/// rest shows the `ZStack` background. That is the reported band, it survives the end
+/// of a drag, and no cell- or grid-level assertion can see it because the cells are
+/// all correct.
+///
+/// Called from `layoutSettled`, i.e. once per settled layout, not per frame.
+func enforceEngineLayerFrame(view: NSView) {
+    let bounds = view.bounds
+    guard bounds.width > 0, bounds.height > 0 else { return }
+    // The engine's layer is a sublayer of the host's; the host's own layer is either
+    // the CAMetalLayer (fresh) or an IOSurfaceLayer (after the engine took over).
+    let candidates = [view.layer] + (view.layer?.sublayers ?? [])
+    for layer in candidates.compactMap({ $0 }) {
+        guard abs(layer.frame.width - bounds.width) > 0.5
+            || abs(layer.frame.height - bounds.height) > 0.5
+            || !layer.frame.origin.equalTo(.zero)
+        else { continue }
+        let className = String(describing: type(of: layer))
+        kraalLog("layer frame: \(className) \(layer.frame.size) -> \(bounds.size)")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.frame = bounds
+        CATransaction.commit()
+    }
 }
