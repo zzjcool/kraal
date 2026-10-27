@@ -309,16 +309,10 @@ public final class PaneTerminalModel {
         let frame = paneFrame(from: surface, geometry: geometry)
         lastProjection = projection
 
-        // A pane's content revision only moves when its *content* changes, so the
-        // same revision is normal for a pane that merely got a new grid: going
-        // from a split to full width changes every row's width but not one cell
-        // of text. Skipping those frames on the revision alone left the pane blank
-        // until it printed something. The grid is what decides whether the frame
-        // already on screen is still valid.
-        //
-        // The projection is a third reason to repaint, and the one that covers a
-        // workspace or machine switch: the same cells have to be re-taken whole
-        // rather than diffed onto a baseline from another projection.
+        // The revision alone is not enough: a pane that merely got a new grid keeps
+        // its cells, so the frame must still be taken. The projection is a third
+        // reason — same cells, different workspace or machine, so they have to be
+        // re-taken whole rather than diffed onto another projection's baseline.
         guard projectionChanged || SurfaceGeometry.needsRepaint(
             contentRevisionChanged: geometry.contentRevision != lastRevision,
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
@@ -812,6 +806,13 @@ public struct GhosttyPaneView: View {
                             // difference between one row and two. Printing the
                             // truncated value hid that (`536.5pt` reads as `536`,
                             // and 536pt is exactly where a row disappears).
+                            // Allocation vs view; see `logAllocationGap`.
+                            logAllocationGap(
+                                paneId: geometry.paneId,
+                                allocated: proxy.size,
+                                view: model.state.attachedPlatformView?.bounds.size,
+                                rows: geometry.innerRect.height
+                            )
                             logPaneViewIfMismatched(
                                 paneId: geometry.paneId,
                                 size: proxy.size,

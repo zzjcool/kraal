@@ -440,8 +440,12 @@ extension PaneTerminalModel {
             // "no CAMetalLayer" and stopping hid the numbers that matter, so describe
             // whatever layer is actually attached.
             let attached = view.layer
+            // `type(of:)` on an optional prints `Optional<CALayer>`, which says nothing:
+            // what matters is the concrete class behind it (the pipeline swaps the
+            // layer for IOSurface-backed compositing).
+            let layerName = attached.map { String(describing: type(of: $0)) } ?? "nil"
             kraalLog("surface extent: pane=\(paneId)"
-                + " layer=\(type(of: attached as Any))"
+                + " layer=\(layerName)"
                 + " bounds=\(bounds.width)x\(bounds.height)pt"
                 + " contentsScale=\(attached?.contentsScale ?? -1)"
                 + " frame=\(attached?.frame.size.width ?? -1)x\(attached?.frame.size.height ?? -1)"
@@ -475,4 +479,29 @@ extension PaneTerminalModel {
             + " frame=\(frame.width)x\(frame.height)"
             + " grid=\(grid.map { "\($0.columns)x\($0.rows)" } ?? "nil")")
     }
+
+}
+
+/// Reports a pane whose terminal view is not the size SwiftUI allocated to it.
+///
+/// The decisive comparison, and the one every earlier diagnostic missed. `apply`
+/// compares the frame against the **view's own** bounds, so a view that is too small
+/// agrees with itself perfectly: `rows * cellHeight == bounds.height` holds, the grid
+/// matches, and 44 rows of content are written — into a rectangle shorter than the
+/// space the pane occupies. What shows through is the `ZStack`'s background, which is
+/// why it reads as a blank band and why no cell-level check ever saw it.
+///
+/// Only printed on a real gap, so a correct pane stays quiet.
+@MainActor
+func logAllocationGap(
+    paneId: String,
+    allocated: CGSize,
+    view: CGSize?,
+    rows: UInt16
+) {
+    guard let view, allocated.height > 0, view.height > 0 else { return }
+    let gap = allocated.height - view.height
+    guard abs(gap) > 0.5 else { return }
+    kraalLog("allocation gap: pane=\(paneId) allocated=\(allocated.height)pt"
+        + " view=\(view.height)pt gap=\(gap)pt rows=\(rows)")
 }
