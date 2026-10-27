@@ -159,11 +159,17 @@ func logPaneViewIfMismatched(
     paneId: String,
     size: CGSize,
     cells: SurfaceRect,
-    grid: TerminalGridMetrics?
+    grid: TerminalGridMetrics?,
+    viewSize: String
 ) {
     guard let grid, Int(grid.rows) != Int(cells.height) else { return }
+    // `nsview` is the number that decides the argument: the grid comes from
+    // `view.bounds`, so a mismatch between `size` (what SwiftUI was asked for) and
+    // `nsview` (what the view got) says whether this is a layout problem or a
+    // measurement one. Without it the two explanations print identically.
     kraalLog("pane view: \(paneId) size=\(size.width)x\(size.height)pt "
-        + "cells=\(cells.width)x\(cells.height) ghostty=\(grid.columns)x\(grid.rows)")
+        + "cells=\(cells.width)x\(cells.height) ghostty=\(grid.columns)x\(grid.rows)"
+        + " nsview=\(viewSize)")
 }
 
 extension PaneTerminalModel {

@@ -822,7 +822,9 @@ public struct GhosttyPaneView: View {
                                 // `resolvedGrid`, not `surfaceSize`: the latter
                                 // goes stale, so printing it reported a grid the
                                 // pane was not painting in.
-                                grid: model.resolvedGrid
+                                grid: model.resolvedGrid,
+                                viewSize: model.state.attachedPlatformView
+                                    .map { "\($0.bounds.width)x\($0.bounds.height)pt" } ?? "none"
                             )
                             model.layoutSettled(size: proxy.size)
                         }
