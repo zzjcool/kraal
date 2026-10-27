@@ -144,7 +144,9 @@ struct PaneLayoutView: View {
                 // opinion, which leaves the line above exactly as it was.
                 palette.paneGapColor
 
-                if let surface {                    // Cover each pane's border cell; see `PaneBorderCells`.
+                if let surface {
+                    // Cover each pane's border cell: the daemon's rectangle that no
+                    // view drew. See `PaneBorderCells`.
                     PaneBorderCells(
                         panes: surface.panes,
                         grid: grid,
