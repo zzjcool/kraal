@@ -370,10 +370,8 @@ public final class PaneTerminalModel {
 
         reportCellMetrics()
 
-        // If the terminal's grid disagrees with the frame, writing this frame
-        // would wrap every row and push the overflow into scrollback, leaving a
-        // permanently skewed screen. Repaint from a clean slate in that case and
-        // let the next apply land on a grid that matches.
+        // A grid that disagrees with the frame would wrap every row and push the
+        // overflow into scrollback: a permanently skewed screen.
         // No surface yet: the view has been mounted but Ghostty has not finished
         // attaching, so `surfaceSize` is nil and anything written is queued
         // without a grid to lay it out in. Remember the frame and paint it when
@@ -442,6 +440,7 @@ public final class PaneTerminalModel {
         }
 
         needsCleanRepaint = false
+        logPaintGridIfMoved(paneId: paneId, from: frameGrid, to: frame)
         let painted = renderer.render(
             frame,
             clearingFirst: eraseBeforePaint,
@@ -818,7 +817,10 @@ public struct GhosttyPaneView: View {
                                 paneId: geometry.paneId,
                                 size: proxy.size,
                                 cells: geometry.innerRect,
-                                grid: model.state.surfaceSize
+                                // `resolvedGrid`, not `surfaceSize`: the latter
+                                // is the field that goes stale, so printing it
+                                // reported a grid the pane was not painting in.
+                                grid: model.resolvedGrid
                             )
                         }
                 }

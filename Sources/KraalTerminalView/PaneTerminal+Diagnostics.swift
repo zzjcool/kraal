@@ -130,7 +130,6 @@ extension PaneTerminalModel {
         guard let previous else { return true }
         return previous.width != frame.width
     }
-
 }
 
 /// Logs a pane whose view disagrees with the grid the daemon asked for.
@@ -246,5 +245,20 @@ extension PaneTerminalModel {
         guard let previous else { return true }
         return Int(previous.width) != Int(frame.width)
             || Int(previous.height) != Int(frame.height)
+    }
+}
+
+extension PaneTerminalModel {
+    /// Records the grid a frame was actually laid out in, when it moved.
+    ///
+    /// `logPaneViewIfMismatched` reports `surfaceSize`, which is the field this
+    /// workaround exists because it goes stale — so the log said `ghostty=126x41`
+    /// while frames were being laid out at 42. A diagnostic built on a value the
+    /// code already distrusts describes a screen nobody drew, and reading it cost
+    /// two rounds of chasing the wrong row.
+    func logPaintGridIfMoved(paneId: String, from previous: FrameData?, to frame: FrameData) {
+        guard let previous, Self.gridMoved(from: previous, to: frame) else { return }
+        kraalLog("paint grid: pane=\(paneId) was=\(previous.width)x\(previous.height)"
+            + " now=\(frame.width)x\(frame.height)")
     }
 }
