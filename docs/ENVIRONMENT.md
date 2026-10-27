@@ -1446,3 +1446,56 @@ mismatch 必拒画，如果没人在 grid 追上时重投一帧，pane 会一直
 **教训（§0.3 的正确用法）**：上一轮的 A/B 只证明了「改回 `==` 会让某条测试变红」，
 没有证明「`>=` 在真实场景下是对的」。注入缺陷能证明代码被覆盖，不能证明方向正确
 ——方向要靠真实日志。
+
+
+### 8.15 退出时必崩：`isReleasedWhenClosed` 与那个被 ARC 骗过的 `NSWindow?`
+
+2026-10-27 实测。**与 §8.14 无关的独立缺陷**，但它让每一次「关掉最后一个窗口」
+都变成一次 SIGSEGV。
+
+现象：`~/Library/Logs/DiagnosticReports/` 里同一晚六份崩溃报告，栈逐帧一致：
+
+```
+EXC_BAD_ACCESS (SIGSEGV, KERN_INVALID_ADDRESS at 0x…)
+  libobjc.A.dylib  objc_retain
+  KraalMac-bin     KraalAppDelegate.saveFrame()
+  KraalMac-bin     KraalAppDelegate.applicationWillTerminate(_:)
+  AppKit           -[NSApplication terminate:]
+  AppKit           _scheduleCheckForTerminateAfterLastWindowClosed   ← 关最后一个窗口
+```
+
+根因：`KraalAppDelegate` 用 `private var window: NSWindow?` 持有窗口，而 `NSWindow`
+的 `isReleasedWhenClosed` **默认是 `true`**。窗口关闭时 AppKit 会发一次
+`release`，ARC 并不知道这件事 —— 于是那个强引用变成了悬垂指针。
+`applicationWillTerminate` 里 `saveFrame()` 读它，`objc_retain` 就崩。
+
+**15 行复现**（`/tmp/w2.swift` 去掉那行 flag 即崩）：
+
+```swift
+final class D: NSObject, NSApplicationDelegate {
+    var w: NSWindow?
+    func applicationDidFinishLaunching(_ n: Notification) {
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.isReleasedWhenClosed = false        // ← 去掉这一行就 SIGSEGV
+        w = win
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            win.close()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { NSApp.terminate(nil) }
+        }
+    }
+    func applicationWillTerminate(_ n: Notification) {
+        guard let w else { return }
+        print("frame=\(w.frame)")             // 有 flag 时正常打印；没有时崩在这一行
+    }
+}
+```
+
+修法就是那行 flag。**不能用「在 `close()` 时置 nil」代替**：`NSWindowDelegate` 的
+`windowWillClose` 能拿到通知，但那要求每个窗口都设 delegate，而这里的窗口由
+`makeWindow` 造、delegate 挂在 app delegate 上；一个 flag 是更小的改动面。
+
+**未验证**：Kraal 产品本身的构建在无人值守环境里拿不到窗口（`AX` 报告
+`window_count=0`），所以无法在 CI/VM 里走完整关窗路径复现。证据是用户机器上六份
+一致的崩溃栈 + 上面的独立复现程序。GUI 门禁不覆盖退出路径，这一条目前只能靠
+崩溃报告回归。

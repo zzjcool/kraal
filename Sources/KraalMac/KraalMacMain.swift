@@ -368,6 +368,22 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        // Keeps the window object alive across `close()`.
+        //
+        // AppKit's default (`isReleasedWhenClosed = true`) sends a `release` on
+        // close that ARC does not know about, so the `NSWindow?` held by the
+        // delegate becomes a dangling reference the moment the user closes the
+        // window. `applicationWillTerminate` then reads it — closing the last
+        // window is what triggers termination — and crashes on the retain:
+        //
+        //   EXC_BAD_ACCESS (SIGSEGV, KERN_INVALID_ADDRESS) in objc_retain
+        //   -> KraalAppDelegate.saveFrame()
+        //   -> KraalAppDelegate.applicationWillTerminate(_:)
+        //
+        // Reproduced six times in one evening, always on quit, and again in a
+        // fifteen-line AppKit program before touching this file. With this flag
+        // set the same program prints the frame instead of segfaulting.
+        window.isReleasedWhenClosed = false
         window.title = DevSession.title(name: DevSession.name, background: runsInBackground)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
