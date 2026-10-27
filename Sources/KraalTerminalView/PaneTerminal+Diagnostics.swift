@@ -347,7 +347,13 @@ extension PaneTerminalModel {
             incomingRevision: geometry.contentRevision
         )
         let currentGrid = Self.paneGrid(geometry)
-        let widthMoved = frameGrid.map { Int($0.width) != currentGrid.width } ?? true
+        // `nil` means "nothing painted yet", which is **not** evidence that the
+        // width moved. Reading it as `true` was a self-sustaining loop: the
+        // width-mismatch branch below sets `frameGrid = nil` *and*
+        // `needsCleanRepaint = true`, so every following frame saw "width moved",
+        // erased, and set the flag again. Measured during one startup, eight erases
+        // in 53 ms with the daemon grid constant at 120x40 the whole time.
+        let widthMoved = frameGrid.map { Int($0.width) != currentGrid.width } ?? false
         // A width change reflows every row, so the baseline is worthless and the
         // scrollback is already meaningless. A **height** change does not: the rows
         // keep their columns, and the renderer clears the rows the frame no longer

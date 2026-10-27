@@ -213,14 +213,22 @@ struct PaneFrameCropTests {
                 "a height mismatch marked the screen dirty; every later paint then erases it")
 
         // A width mismatch is the opposite: the baseline really is untrustworthy.
+        //
+        // The baseline is what has to go, and clearing `frameGrid` is how: the frame
+        // that finally paints is then taken whole because `gridMoved` sees `nil`.
+        // `needsCleanRepaint` is *not* the mechanism — it means "the screen has
+        // something on it that must be scrubbed", and a mismatched frame paints
+        // nothing at all, so arming it made every mismatch in a burst erase.
         model.gridOverride = TerminalGridMetrics(
             columns: 120, rows: 19,
             widthPixels: 2040, heightPixels: 703,
             cellWidthPixels: 17, cellHeightPixels: 37
         )
         model.apply(surface: surface(rows: 19))
-        #expect(model.needsCleanRepaint,
+        #expect(model.frameGrid == nil,
                 "a width mismatch left the old baseline in place")
+        #expect(!model.needsCleanRepaint,
+                "a frame that paints nothing has no screen to clean")
     }
 
     /// The decision itself: a projection change with a constant width must repaint
@@ -248,6 +256,33 @@ struct PaneFrameCropTests {
         model.apply(surface: reprojected)
         #expect(model.screenResetCount == 1,
                 "a projection change with an unchanged width must not erase the screen")
+    }
+
+    /// A settled pane must not erase on every frame.
+    ///
+    /// The failure this guards: `frameGrid == nil` was read as "the width moved"
+    /// (`?? true`). The width-mismatch branch sets `frameGrid = nil` *and*
+    /// `needsCleanRepaint = true`, so each frame erased and re-armed the flag for the
+    /// next one. Measured on one startup: eight erases in 53 ms with the daemon's
+    /// grid constant at 120x40 the whole time.
+    @Test("a settled pane stops erasing once the dirty frame has been paid")
+    func settledPaneStopsErasing() {
+        let model = PaneTerminalModel(paneId: "w1:p1") { _ in }
+        model.gridOverride = TerminalGridMetrics(
+            columns: 112, rows: 19,
+            widthPixels: 1904, heightPixels: 703,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        let surface = surface(rows: 19)
+        // Apply the same settled frame repeatedly, as the view does at 60 Hz.
+        var erases = 0
+        for _ in 0 ..< 6 {
+            let before = model.screenResetCount
+            model.apply(surface: surface)
+            if model.screenResetCount > before { erases += 1 }
+        }
+        // The first establishes the screen; nothing after it has a reason.
+        #expect(erases == 1, "a settled pane erased \(erases) times, expected 1")
     }
 
 }

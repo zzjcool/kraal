@@ -383,18 +383,13 @@ public final class PaneTerminalModel {
 
         if grid.columns != frame.width || grid.rows != frame.height {
             logGridMismatch(grid: grid, frame: frame, surface: surface)
-            // Only a width mismatch makes the baseline untrustworthy.
-            //
-            // A height mismatch means the view has not taken its new size yet; the
-            // rows on screen are still at the right columns, and the frame that
-            // eventually paints will clear the rows it no longer covers. Marking it
-            // dirty threw the baseline away, which turned every later paint during a
-            // drag into a full-screen rebuild — measured 509 of 565 paints carrying
-            // `erase=1` with the width constant at 126 the whole time.
-            if grid.columns != frame.width {
-                needsCleanRepaint = true
-                frameGrid = nil
-            }
+            // Nothing is painted here, so nothing needs cleaning up. Clearing the
+            // baseline is enough: the frame that eventually paints is taken whole
+            // (`gridMoved` sees `frameGrid == nil` and repaints every row), and
+            // arming `needsCleanRepaint` as well made each mismatch in a burst erase
+            // the screen — measured 8 erases in 53 ms while the daemon's grid held
+            // constant at 120x40 and only this check was failing.
+            frameGrid = nil
             lastRevision = 0
             // Keep the frame instead of dropping it. Resizing a window re-renders
             // the tab at a new grid, but Ghostty's own surface still reports the
