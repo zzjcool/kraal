@@ -392,9 +392,10 @@ PR 正文和提交信息同样要求**证据**：不只是「修好了」，而�
 | `docs/AUTOMATION.md` | GUI 验证闭环：方案、实测数据、未验证项 |
 | `docs/DEBUGGING.md` | **怎么验证一件事是真的**（排查教训） |
 | `docs/PERFORMANCE.md` | **怎么量出一件事有多贵**（基准方法学 + 实测数据） |
+| `docs/IOS-PORT.md` | **iOS 移植做到哪一步了**：实测编译矩阵、阻塞项优先级、最小改动配方 |
 | `AGENTS.md`（本文件） | agent 的行为约定：跑什么、验证到什么程度算完 |
 
 新发现的排查教训进 `DEBUGGING.md`；性能方法与实测数字进 `PERFORMANCE.md`；
-新发现的环境事实进 `ENVIRONMENT.md`；
+新发现的环境事实进 `ENVIRONMENT.md`；iOS 移植的进度/阻塞/实测矩阵进 `IOS-PORT.md`；
 新的操作步骤（装什么、跑什么、怎么迁移）进 `RUNNING.md`。
 都写明**实测日期**和**未验证的部分**。
