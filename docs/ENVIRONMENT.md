@@ -1280,3 +1280,106 @@ pane 的 view 已经变成新的行数，Ghostty 还是旧 grid，差额那条�
   grid 已经稳定，注入“不画”仍然通过。行为由单测钉住（`paintCount` 增加），
   但“真的少了那条带子”只有用户在真机上确认。
 - 只测了 gruvbox。`terminal` 主题（`surface_dim = 0x444444`）的观感未截图确认。
+
+### 8.14 拖动/缩放时那条带子：三种机制被同时观察到（2026-10-27 实测，**未修复**）
+
+用户报的现象（三种几何，同一个症状）：
+
+| 几何 | 现象 |
+| --- | --- |
+| 上下两格 | 往上拖，下面 pane 出现空行；往下拖，上面出现空行 |
+| 三窗格（上 1 下 2） | 分隔带读成 2 cell，hairline 在**第二格**中心 |
+| **单 pane** | 最下面一行渲染两次，或出现空行；TUI 与非 TUI 都能复现 |
+
+单 pane 也能复现这一条是决定性的：**与分隔条无关**。此前两轮（§8.11 的颜色、
+§8.12 的边框 cell）都只覆盖了 split 的几何，都不是这个缺陷。
+
+#### 实测：`grid mismatch` 双向且不对称（30 条样本）
+
+```text
+ghostty > frame : 22
+frame > ghostty :  8
+```
+
+单向 1 行差的连续序列（单 pane `w5:p3`，拖动窗口）：
+
+```text
+g17 f34      ← 起始差异大
+g34 f33      ← 之后每一步 Ghostty 落后 1 行
+g33 f32
+g32 f31
+...
+g21 f22      ← 反向
+g22 f23
+g23 f24
+```
+
+每一对只出现 2 次，随后收敛。**收敛那一刻的 paint 是 `erase=1` 全量重画**，
+所以「收敛后的稳态」在日志上是正确的 —— 但用户看到带子留着，说明**收敛前那一帧
+的残留没有被后续帧覆盖掉**。
+
+#### 三种候选机制（都已定位到代码，但**都未用 A/B 证明是用户看到的那一条**）
+
+1. **`bridgeFrame` 只降不升**（`PaneFrameCrop.swift:9-12`）
+   `height = min(gridRows, frame.height)`。`ghostty > frame` 时返回整个 frame，
+   Ghostty 多出的行无人绘制，保留终端自己的背景。占 22/30 的多数方向。
+
+2. **居中余量**（`PaneLayoutView.swift:646-647`）
+   `originY = max((container − grid×cell) / 2, 0)`。实测单 pane
+   `container=993x459` vs `grid 116x24 → 986x444`，上下各留 7.5pt。
+   两份余量不属于任何 pane，由容器底色承担。**这条路径在 gruvbox 下不可见**：
+   `paneGapColor = surfaceDim = #282828` = 终端背景 = `panelBackground`，三者同色。
+
+3. **周期性 erase**（独立缺陷，实测）
+   ```text
+   15:58:43.037  erase=1 bytes=3003 resets=36
+   15:58:52.482  erase=1 bytes=3003 resets=37
+   ```
+   每 ~10 秒擦屏并全量重画**完全相同**的 3003 字节 —— 无谓重绘，也是「偶尔闪一下」的来源。
+
+#### 已撤销的错误修复（记下来避免再做一次）
+
+`paintOverlap` 里加 `frameGrid = bridge` + `needsCleanRepaint = true` 是**冗余**：
+`grid mismatch` 分支在调用它之前已经设了 `frameGrid = nil` 与
+`needsCleanRepaint = true`（`PaneTerminal.swift:409-411`）。
+
+A/B 实测：删掉这两行，`swift test` **741 tests 仍全绿**。按 §0.3，删掉修复仍绿
+等于该修复没有作用。已 `git checkout` 撤销。
+
+同轮还发现 `Palette.paneSurfaceColor`（`Palette.swift:265`）**零引用** —— 它是
+§8.12 attempt 1 回滚后留下的孤儿 token。
+
+#### 侦察得到的 daemon 侧事实（二进制逆向，herdr 0.9.5）
+
+`/private/tmp/herdr-gpui` 是空壳（0 文件 / 643 目录），源码不可读。改从
+`/Users/zzj/.local/bin/herdr`（daemon+CLI）与 `/Applications/Herdr.app`（GPUI）
+的符号表反推：
+
+- 布局几何算在**服务端**（`herdr::layout::collect_panes`），GPUI 只画 rect：
+  `extent = fcvtau(ratio × parent_extent)` —— **truncate，不是 round**；`fcvtas`/
+  `fcvtns` 计数为 0。余量 `parent − extent`，负值钳 0。这解释了两个方向都会差 1 行。
+- 矩形是 `u16 × 4`，wire 上打包成 `u64`；所有加法 `csel …, 65535` 钳位。
+- `apply_pane_chrome` 用 `ratatui Block::inner()` 从 `rect` 抠出 `inner_rect`。
+- `pane_geometry_matches` 逐字段比 7×u16 + 2×u32，**任一不等就全量重传**。
+- 用户配置实测：`~/.config/herdr/config.toml` 里 `pane_gaps = false`、
+  `pane_outer_borders = false`、`pane_borders` 未写（默认 `"auto"`）。
+  `pane_gaps = false` = **相邻 pane 共享一条 divider 边框**，这正是「VM 里
+  `hit=119x2`、用户机器上 `hit=135x1`」的差异来源 —— `hitRect` 的厚度不固定。
+
+#### 两套基线（结构性隐患，未修）
+
+- `renderer` 内部自己的 `previous`（`SurfaceANSIRenderer.swift:201`）
+- `PaneTerminalModel.frameGrid`
+
+两者独立维护，`paintOverlap` 只经手后者。任何「一方更新、另一方没更新」的路径
+都会让 diff 与屏幕实际内容脱节。
+
+#### 未验证
+
+- **没有一个动作能在 VM 里复现用户的带子。** `split-down` / `drag-divider` /
+  `repro-band` 三例在 VM 中截图都干净（`hit=119x2`、hairline 居中、无留白）。
+  用户机器是 `hit=135x1`。这是当前最大的阻塞：没有可复现环境，就无法做 §0.3 的
+  A/B。
+- 三种候选机制里哪一条（或哪几条叠加）是用户实际看到的，**未确定**。
+- `frameGrid` 与 `renderer.previous` 不一致会产生什么具体画面，**未验证**。
+- 只在 gruvbox 下观察。`terminal`（`surface_dim = 0x444444`）未测。
