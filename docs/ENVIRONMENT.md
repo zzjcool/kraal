@@ -1499,3 +1499,58 @@ final class D: NSObject, NSApplicationDelegate {
 `window_count=0`），所以无法在 CI/VM 里走完整关窗路径复现。证据是用户机器上六份
 一致的崩溃栈 + 上面的独立复现程序。GUI 门禁不覆盖退出路径，这一条目前只能靠
 崩溃报告回归。
+
+
+### 8.16 拖动不丝滑：每次高度变化都在擦屏（2026-10-27 实测，已修）
+
+用户描述是「拖动很不丝滑，herdr-gpui 可丝滑了，都不会有窗口抖动」。量出来的
+东西和「渲染慢」无关，是**每秒几十次 `2J 3J H` 加整屏重写**。
+
+一次纵向拖动（`~/Library/Logs/Kraal-live.log`）的实测：
+
+```
+拖动 20 秒：883 次 set_split_ratio → 609 个新 surface → 1152 次 paint
+其中 1139 次带 erase=1，每次约 6 KB ANSI，最高一秒 97 次
+同一秒客户端还要跑 31 次 layout + 28 次同步写日志
+
+77.322 MISS  ghostty=29 frame=30
+77.358 PAINT erase=1 bytes=8862
+77.360 MISS  ghostty=30 frame=33
+77.379 PAINT erase=1 bytes=9472
+77.381 MISS  ghostty=33 frame=35
+77.395 PAINT erase=1 bytes=10111
+… resets 计数 0.7 秒内从 653 涨到 704（51 次）
+```
+
+**整段拖动宽度始终是 126**，只有高度在变。而 `needsScreenReset` 把「grid 变了」
+一律当成重置——纵向拖动每移动一个鼠标事件就跨一行，于是每一行都擦一次屏。
+`3J` 还会清掉滚动历史，所以每次不只是重画，是把历史也扔了。
+
+三处改动：
+
+1. `needsScreenReset` 只看**宽度**。宽度变化每行都重排，没有一个 cell 保持原坐标；
+   高度变化行还在原列，旧高度以上根本没动。
+2. `SurfaceANSIRenderer` 在「同宽、变矮」时，于**行循环之后**从新高度的下一行做一次
+   `0J`（清到屏末），把失去的那几行擦掉。顺序是要害：`0J` 清到屏末，先清就等于把
+   内容写在空白上又被擦掉。
+3. `flushPendingFrame` 的 `clearingFirst` 从硬编码 `true` 改成同样的宽度判断——
+   那是拖动路径的第二个调用点，两处都改才覆盖住。
+
+顺带：`pane view:` 日志改成只在视图与 daemon 的 grid 不一致时写。原来每次尺寸
+变化一行，一次拖动 562 行，每行一次同步 `open/seek/write`——诊断本身成了负载。
+
+**A/B**：
+
+| 注入 | 结果 |
+|---|---|
+| 去掉渲染器的 `0J` 清行 | `✘ a height-only change does not reset, but clears the rows it lost`（`36;1H` 与 `0J` 断言双双失败） |
+| 把 height 加回 `needsScreenReset` | 同一条测试的 `!needsScreenReset` 断言变红 |
+| `flushPendingFrame` 的 `wipe` 改回 `true` | 无单测覆盖（该路径依赖 `state.surfaceSize`，测试无注入点） |
+
+**GUI 用例 `drag-divider-vertical` 是护栏，不是证据。** 诚实记录：把它撤销后的
+版本跑同一条用例仍然通过（`0 screen resets`），因为合成的 20 步拖动被系统合并成
+8 次 layout / 12 次 paint，缺陷所在的「逐行」路径根本没进去。它挡住的是**未来**
+有人把这行为改成无条件擦屏。
+
+**未验证**：真实拖动的丝滑程度只能在用户的机器上看。VM 无法给出「流畅」的判断，
+只能给出计数。

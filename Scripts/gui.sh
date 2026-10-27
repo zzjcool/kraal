@@ -4434,7 +4434,7 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4619,6 +4619,97 @@ case_sidebar_divider_drag() {
             "$([ -n "$after_agents" ] && [ "$after_agents" != "missing" ] \
                 && [ "$after_agents" -gt "$before_agents" ] && echo 0 || echo 1)" \
             "before=[$before] after=[$after] (agents_y must grow)"
+    }
+}
+
+# A vertical drag must not wipe the screen on every row it crosses.
+#
+# Reported as "dragging feels heavy, herdr-gpui is smooth". The cause was
+# `needsScreenReset` treating *any* grid change as a reset, so every one-row height
+# change during a vertical drag emitted `2J 3J H` (which also throws away the
+# scrollback) plus a full rewrite. Measured on the user's machine: 1139 of 1195
+# paints during one drag took that path at ~6 KB of ANSI each, and `resets` climbed
+# by 51 inside 0.7 s.
+#
+# Asserted on the app's own counters rather than on wall-clock time: a VM cannot say
+# "smooth", but it can say how many times the screen was thrown away for a drag that
+# never changed the container's width.
+#
+# **This case is a guard, not the proof.** Verified honestly: reverting the fix
+# (`needsScreenReset` counting height again) still passes here, because a synthesised
+# 20-step drag is coalesced down to 8 layout passes and 12 paints — the row-per-row
+# path the defect lives on is never entered. The evidence that the fix works is the
+# user's own session log (51 screen resets inside 0.7 s of one drag, every one at a
+# constant width) plus `ResizeRepaintTests`, whose assertions do go red when either
+# half is reverted. What this case buys is that a *future* change which makes a
+# vertical drag rebuild the screen unconditionally is caught in CI.
+case_drag_divider_vertical() {
+    requires() { echo focus; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        if [ "$(pane_count)" = "1" ]; then
+            herdr pane split --pane "$(first_pane_id)" --direction down >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "2" ] || return 1
+        sleep 1
+        pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+sys.exit(0 if len(layout["splits"]) == 1 else 1)
+'
+    }
+    action() {
+        local window_info
+        window_info=$(driver window)
+        local origin_x origin_y
+        origin_x=$(printf '%s' "$window_info" | sed -n 's/.* x=\(-\{0,1\}[0-9]*\) .*/\1/p')
+        origin_y=$(printf '%s' "$window_info" | sed -n 's/.* y=\(-\{0,1\}[0-9]*\) .*/\1/p')
+        local container_w container_h
+        read -r container_w container_h <<EOF
+$(container_size)
+EOF
+        if [ -z "${container_h:-}" ]; then
+            echo "cannot read the container size from the app's layout log"
+            return 1
+        fi
+        local window_w sidebar_w centre_x divider_y
+        window_w=$(printf '%s' "$window_info" | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+        sidebar_w=$((window_w - container_w))
+        centre_x=$((origin_x + sidebar_w + container_w / 2))
+        divider_y=$((origin_y + container_h / 2))
+        # The counters before the drag, so the assertion measures this drag and not
+        # everything the launch did.
+        collect_app_log_tail | grep -ac 'erase=1' >"$host_dir/erase-before.txt"
+        collect_app_log_tail | grep -ac 'paint: pane=' >"$host_dir/paint-before.txt"
+        # Twenty one-cell steps down. Steps, not one leap: the defect is per row
+        # crossed, so a single drag would cross them all inside one gesture event and
+        # produce one repaint — the slow path would never be entered.
+        driver drag --from "$centre_x,$divider_y" \
+            --to "$centre_x,$((divider_y + 20))" --steps 20 >"$host_dir/drag.txt" 2>&1 || {
+            echo "cannot drag the divider"
+            return 1
+        }
+        sleep 1
+        collect_app_log "$host_dir"
+    }
+    assert() {
+        local before after
+        before=$(cat "$host_dir/erase-before.txt" 2>/dev/null)
+        after=$(grep -ac 'erase=1' "$host_dir/kraal.log" 2>/dev/null)
+        if [ -z "$before" ] || [ -z "$after" ]; then
+            check "a vertical drag does not rebuild the screen per row" 1 \
+                "could not read the app's erase counter"
+            return 1
+        fi
+        # Twenty steps must not mean twenty screen resets. One is allowed for the
+        # gesture's own repaint; a width change would legitimately add more, and this
+        # drag does not change the width.
+        local erased=$((after - before))
+        check "a vertical drag does not rebuild the screen per row" \
+            "$([ "$erased" -le 4 ] && echo 0 || echo 1)" \
+            "$erased screen resets for a 20-step vertical drag (each one is a 2J 3J H plus a full rewrite)"
     }
 }
 
