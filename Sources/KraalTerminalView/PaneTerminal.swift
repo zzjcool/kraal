@@ -119,7 +119,7 @@ public final class PaneTerminalModel {
     /// it. The stale rows are still in the terminal's scrollback, and an
     /// incremental repaint only touches rows that changed — so the skew survives
     /// every later update until the screen is explicitly cleared.
-    private var needsCleanRepaint = false
+    private(set) var needsCleanRepaint = false
     /// Paints a popup's own grid.
     ///
     /// A popup carries a complete `FrameData` of its own — it is a separate terminal
@@ -393,9 +393,19 @@ public final class PaneTerminalModel {
 
         if grid.columns != frame.width || grid.rows != frame.height {
             logGridMismatch(grid: grid, frame: frame, surface: surface)
-            needsCleanRepaint = true
+            // Only a width mismatch makes the baseline untrustworthy.
+            //
+            // A height mismatch means the view has not taken its new size yet; the
+            // rows on screen are still at the right columns, and the frame that
+            // eventually paints will clear the rows it no longer covers. Marking it
+            // dirty threw the baseline away, which turned every later paint during a
+            // drag into a full-screen rebuild — measured 509 of 565 paints carrying
+            // `erase=1` with the width constant at 126 the whole time.
+            if grid.columns != frame.width {
+                needsCleanRepaint = true
+                frameGrid = nil
+            }
             lastRevision = 0
-            frameGrid = nil
             // Keep the frame instead of dropping it. Resizing a window re-renders
             // the tab at a new grid, but Ghostty's own surface still reports the
             // *previous* grid for a moment, so this check fails on the frame that
@@ -446,29 +456,16 @@ public final class PaneTerminalModel {
         deliver(painted)
     }
 
-    /// Hands one painted frame to the terminal, and records that it was one write.
-    ///
-    /// Split out of `apply(surface:)` only to keep that function within
-    /// swiftlint's body limit; the accounting and the log line belong together.
-    ///
-    /// The one place a painted buffer reaches the terminal.
-    ///
-    /// Every classification the GUI case reads is derived from **the bytes actually
-    /// written**, not from a caller-supplied flag. That is deliberate: it is what
-    /// makes the assertion able to catch the defect it was written for. An earlier
-    /// version took `erasing:` from the caller, so a regression that wrote the erase
-    /// as its own `session.receive` — the exact shape of the flash — still logged
-    /// `erase=0, eraseWrites>0, paints>eraseWrites`, and a "no erase escaped its
-    /// repaint" check passed on it. Verified by injection: routing the erase back
-    /// outside gives `erases=0` here and the case goes red.
-
     /// Reports the renderer's measured cell size, in device pixels.
     ///
     /// Called before the grid check in `apply`, not after it: the check bails out
-    /// while the grid is wrong, and if reporting lived past that bail-out the
-    /// size used for layout could never be corrected — a one-way trap where the
-    /// grid stays wrong because it was never measured, and never measured
-    /// because it was wrong.
+    /// while the grid is wrong, and if reporting lived past that bail-out the size
+    /// used for layout could never be corrected — a one-way trap where the grid stays
+    /// wrong because it was never measured, and never measured because it was wrong.
+    ///
+    /// (The doc block above `deliver` used to be a duplicate of this one, left behind
+    /// by a move. Two doc comments on one declaration is not a compile error, so it
+    /// survived review.)
     /// Hands one painted frame to the terminal, and records that it was one write.
     ///
     /// Every classification the GUI case reads comes from the **bytes actually
@@ -512,16 +509,20 @@ public final class PaneTerminalModel {
         guard exact else { return }
         pendingFrame = nil
         lastRevision = 0
+        // Read the baseline **before** clearing it. The first version of this
+        // assigned `frameGrid = nil` above and then asked whether it was nil, so the
+        // answer was always yes and `wipe` was always true — the optimisation read
+        // as present and did nothing. Caught by the live log still showing 509 of 565
+        // paints with `erase=1` at a constant width.
+        let widthMoved = Self.widthMoved(from: frameGrid, to: frame)
         frameGrid = nil
         resetSurfaces()
-        // One flush, erase inside the synchronized block — the same reasoning as
-        // `apply(surface:)`. A parked frame is routinely the one that carries a new
-        // grid (that is why it was parked), so this is the resize path too.
-        // Erase only when the width moved, like `needsScreenReset`. A vertical drag
-        // is one height change per mouse move, each a `2J 3J H` plus a full rewrite
-        // (8-10 KB of ANSI): measured 51 resets inside 0.7 s of one drag.
-        let wipe = (frameGrid?.width ?? 0) != frame.width || frameGrid == nil
-        let painted = renderer.render(frame, clearingFirst: wipe)
+        // A parked frame is routinely the one that carries a new grid, so this is
+        // the resize path too. Erase only when the width moved: a vertical drag is
+        // one height change per mouse move, and each erase is a `2J 3J H` plus a
+        // full rewrite (8-10 KB of ANSI). The renderer clears the rows this frame
+        // stopped covering by itself.
+        let painted = renderer.render(frame, clearingFirst: widthMoved)
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: 0, placements: 0)
         deliver(painted)

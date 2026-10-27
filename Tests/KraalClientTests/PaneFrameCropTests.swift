@@ -186,4 +186,41 @@ struct PaneFrameCropTests {
         let cropped = PaneTerminalModel.cropped(frame(width: 4, height: 4), toColumns: 2, rows: 2)
         #expect(cropped.graphics.isEmpty)
     }
+    /// A **height** mismatch must not mark the screen dirty for later frames.
+    ///
+    /// This is the drag path. The grid catches up one layout pass late, so a height
+    /// mismatch is the normal condition while a divider moves — and the mismatch
+    /// branch used to set `needsCleanRepaint` unconditionally. Combined with the
+    /// parked-repaint path, that made every later paint during a drag a full-screen
+    /// erase: measured 509 of 565 paints with `erase=1` while the surface width never
+    /// left 126.
+    @Test("a height mismatch does not dirty the screen for what follows")
+    func heightMismatchKeepsBaseline() {
+        let model = PaneTerminalModel(paneId: "w1:p1") { _ in }
+        // Paint one good frame at 18 rows so there is a baseline.
+        model.gridOverride = TerminalGridMetrics(
+            columns: 112, rows: 18,
+            widthPixels: 1904, heightPixels: 666,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        model.apply(surface: surface(rows: 18))
+        let resetsBefore = model.screenResetCount
+        #expect(resetsBefore >= 1, "the first frame has nothing to diff against")
+
+        // Now a frame whose height the grid has not caught up with. Same width.
+        model.apply(surface: surface(rows: 19))
+        #expect(!model.needsCleanRepaint,
+                "a height mismatch marked the screen dirty; every later paint then erases it")
+
+        // A width mismatch is the opposite: the baseline really is untrustworthy.
+        model.gridOverride = TerminalGridMetrics(
+            columns: 120, rows: 19,
+            widthPixels: 2040, heightPixels: 703,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        model.apply(surface: surface(rows: 19))
+        #expect(model.needsCleanRepaint,
+                "a width mismatch left the old baseline in place")
+    }
+
 }

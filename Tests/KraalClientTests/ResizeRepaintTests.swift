@@ -486,4 +486,28 @@ struct ScreenResetScopeTests {
                          cursor: nil, hyperlinks: [], graphics: Data())
     }
 
+    /// Re-painting a parked frame must not erase the screen unless the width moved.
+    ///
+    /// This decision shipped broken: the caller cleared `frameGrid` and then asked
+    /// whether it was nil, so the answer was always yes and every parked repaint was
+    /// a full-screen erase. It read fine and every test passed, because nothing
+    /// called it — the live log is what caught it, still showing 509 of 565 paints
+    /// with `erase=1` while the surface width never left 126.
+    @Test("a parked repaint erases only when the width moved")
+    func parkedRepaintErasesOnlyOnWidthChange() {
+        let wide = Self.blankFrame(columns: 126, rows: 26)
+        let tall = Self.blankFrame(columns: 126, rows: 30)
+
+        // Height-only: the rows are still at the right columns, so no erase.
+        #expect(!PaneTerminalModel.widthMoved(from: wide, to: tall),
+                "a height change erased the screen; that is the whole drag cost")
+        // Width: every row reflows, so the screen has to go.
+        #expect(PaneTerminalModel.widthMoved(
+            from: Self.blankFrame(columns: 120, rows: 26),
+            to: wide
+        ))
+        // No baseline at all: nothing on screen is trustworthy.
+        #expect(PaneTerminalModel.widthMoved(from: nil, to: wide))
+    }
+
 }

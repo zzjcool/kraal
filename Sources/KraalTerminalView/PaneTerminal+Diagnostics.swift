@@ -113,6 +113,23 @@ extension PaneTerminalModel {
             height: CGFloat(grid.cellHeightPixels)
         ))
     }
+
+    /// Whether painting `frame` needs the screen thrown away first.
+    ///
+    /// Only when the width moved, because a width change reflows every row. A
+    /// height change keeps every row's coordinates, and the renderer clears the rows
+    /// the new frame no longer covers on its own.
+    ///
+    /// Static and separate because the caller used to clear the baseline and then
+    /// ask whether it was clear: `frameGrid = nil` followed by
+    /// `frameGrid == nil ? true : ...` made this always true, so the erase it was
+    /// meant to skip happened anyway. That read as correct code and passed every
+    /// test, because nothing covered this decision.
+    nonisolated static func widthMoved(from previous: FrameData?, to frame: FrameData) -> Bool {
+        guard let previous else { return true }
+        return previous.width != frame.width
+    }
+
 }
 
 /// Logs a pane whose view disagrees with the grid the daemon asked for.
