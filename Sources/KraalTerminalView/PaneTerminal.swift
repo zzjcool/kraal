@@ -255,6 +255,8 @@ public final class PaneTerminalModel {
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
+        // See `ProbeTerminalView`: panes drifting one row off after a drag.
+        state.makePlatformView = { ProbeTerminalView(frame: .zero) }
     }
 
     /// Feeds a pane's cells to the terminal, skipping redundant revisions.

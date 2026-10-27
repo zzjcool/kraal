@@ -304,7 +304,22 @@ extension PaneTerminalModel {
     /// Cheap when nothing moved: only fires on an actual size change.
     func layoutSettled(size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
-        guard size != lastLaidOutSize else { return }
+        // The guard used to be `size != lastLaidOutSize` alone, which is why a pane whose
+        // view never took its allocation stayed wrong for good: `proxy.size` reached its
+        // final value, so no later layout pass re-entered this function, and the view
+        // kept the previous pane's rectangle. Measured on a settled drag, both panes one
+        // row out in opposite directions, totals conserved:
+        //
+        //     p16 allocated=592.0pt view=573.5pt gap=+18.5pt
+        //     p14 allocated=314.5pt view=333.0pt gap=-18.5pt
+        //
+        // The stale view is inside the pane, so the band it leaves is drawn by Ghostty,
+        // not by the ZStack — which is why colouring the ZStack magenta changed nothing.
+        let viewSize = state.attachedPlatformView?.bounds.size
+        let viewOff = viewSize.map {
+            abs($0.height - size.height) > 0.5 || abs($0.width - size.width) > 0.5
+        } ?? false
+        guard size != lastLaidOutSize || viewOff else { return }
         lastLaidOutSize = size
         if let view = state.attachedPlatformView {
             enforceEngineLayerFrame(view: view)
