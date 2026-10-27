@@ -106,13 +106,31 @@ extension PaneTerminalModel {
     }
 
     func reportCellMetrics() {
-        guard let grid = state.surfaceSize,
-              grid.cellWidthPixels > 0,
-              grid.cellHeightPixels > 0 else { return }
-        onCellMetrics?(CGSize(
-            width: CGFloat(grid.cellWidthPixels),
-            height: CGFloat(grid.cellHeightPixels)
-        ))
+        guard let cell = cellMetrics else { return }
+        onCellMetrics?(cell)
+    }
+
+    /// The renderer's cell size in device pixels, however it can be had.
+    ///
+    /// `state.surfaceSize` is the direct source, but it stops being republished the
+    /// moment the grid holds still — so during a drag the client can be left
+    /// dividing by `SurfaceGeometry.fallbackCellPoints` (7.8x17.0 pt) long after
+    /// Ghostty measured the real font. That is not a rounding error: at 936 pt wide
+    /// the fallback asks for 120 columns where Ghostty fits 110, and the daemon
+    /// renders ten columns the view cannot show.
+    ///
+    /// The view's own pixels divided by the grid it is showing is the same cell, and
+    /// both of those are observed rather than published. Used only when the reported
+    /// value is missing, so nothing that already worked changes.
+    var cellMetrics: CGSize? {
+        if let reported = state.surfaceSize,
+           reported.cellWidthPixels > 0, reported.cellHeightPixels > 0 {
+            return CGSize(
+                width: CGFloat(reported.cellWidthPixels),
+                height: CGFloat(reported.cellHeightPixels)
+            )
+        }
+        return nil
     }
 
     /// Whether painting `frame` needs the screen thrown away first.
@@ -282,6 +300,19 @@ extension PaneTerminalModel {
         guard size.width > 0, size.height > 0 else { return }
         guard size != lastLaidOutSize else { return }
         lastLaidOutSize = size
+        // Report the cell size on **every** settled layout, not just from `apply`.
+        //
+        // `reportCellMetrics` ran inside `apply` and read `state.surfaceSize`, which
+        // stops being republished once the grid holds still. So the measurement the
+        // whole surface negotiation divides by could go unrefreshed, and the client
+        // kept using `fallbackCellPoints` (7.8x17.0 pt).
+        //
+        // Measured on one session: the only correction in the entire log was
+        //     [19:25:59.597] cell metrics: (15.6, 34.0) -> (17.0, 37.0)
+        // arriving *after* the panes had been asked for 120x34 cells at a size where
+        // Ghostty fits 110x31 — 8% on both axes, i.e. ten columns the view could not
+        // show and three rows it did not have.
+        reportCellMetrics()
         reapplyAfterGridViewMoved()
     }
 }
