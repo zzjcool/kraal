@@ -150,6 +150,9 @@ public final class AppStore {
     /// renderer once a surface exists. Geometry negotiation divides the pane
     /// area by this to pick a grid size.
     public var terminalCellSize = SurfaceGeometry.fallbackCellSize
+    /// Whether `terminalCellSize` is a measurement rather than the fallback.
+    /// See `updateCellMetrics` for why the negotiator waits on it.
+    public var hasMeasuredCellSize = false
 
     /// The geometry the daemon renders for us, in cells.
     ///

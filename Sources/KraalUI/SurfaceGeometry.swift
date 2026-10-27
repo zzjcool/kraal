@@ -357,6 +357,16 @@ private struct SurfaceGeometryReader: ViewModifier {
         lastScheduled = size
         pendingSize = size
 
+        // Do not ask the daemon for a grid computed from a guess. The fallback is a
+        // 13 pt estimate and the real font is wider, so the first negotiation used to
+        // request 137 columns where 126 fit — panes 93 pt wider than the window, then
+        // a second and third negotiation to correct it. Each one is a new projection,
+        // i.e. a full wipe and repaint of every pane.
+        //
+        // `updateCellMetrics` sets `needsGeometryReeval` on the first measurement, and
+        // that path forces a release, so nothing is lost by waiting here.
+        guard store.hasMeasuredCellSize || force else { return }
+
         let now = Date()
         if ResizePacing.releasesImmediately(
             sinceLastRelease: now.timeIntervalSince(lastReleasedAt),

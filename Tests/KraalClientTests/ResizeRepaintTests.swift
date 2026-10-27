@@ -578,4 +578,51 @@ struct ScreenResetScopeTests {
         #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 129.5))
     }
 
+    /// The first grid negotiation must not run on the fallback cell estimate.
+    ///
+    /// Measured on a live start, before this guard existed:
+    ///
+    ///     19:41:43.131  geometry: 120x40 -> 137x54      (fallback 7.8x17)
+    ///     19:41:43.217  layout: grid=137x54  rect=1164pt  (container is 1071)
+    ///     19:41:43.268  layout: grid=126x50  rect=1071pt  (real 8.5x18.5)
+    ///
+    /// 137 columns at 8.5 pt is 1164.5 pt: 93.5 pt of pane outside the window, and
+    /// every transition is a new projection, so both panes were wiped and repainted
+    /// twice before anything was touched.
+    @Test("the fallback cell size is wider than the real font, so it cannot size a surface")
+    func fallbackWouldOverflowTheContainer() {
+        let container = CGSize(width: 1071, height: 930)
+        let fallback = SurfaceGeometry.cells(
+            for: container, cellSize: SurfaceGeometry.fallbackCellSize, scale: 2
+        )
+        let real = SurfaceGeometry.cells(
+            for: container, cellSize: CGSize(width: 17, height: 37), scale: 2
+        )
+        // The fallback asks for the same grid the live log showed: 137x54.
+        #expect(fallback.cols == 137)
+        #expect(real.cols == 126)
+        // And that grid does not fit: 137 columns of the real font measure more
+        // than the container, which is the pane-outside-the-window symptom.
+        #expect(CGFloat(fallback.cols) * 8.5 > container.width)
+        #expect(CGFloat(real.cols) * 8.5 <= container.width)
+    }
+
+    /// The negotiation must refuse to release a grid computed from the fallback.
+    @Test("a surface is not sized from the fallback cell estimate")
+    @MainActor
+    func negotiationWaitsForAMeasurement() {
+        let store = AppStore()
+        #expect(!store.hasMeasuredCellSize, "a fresh store has only the fallback")
+        #expect(store.terminalCellSize == SurfaceGeometry.fallbackCellSize)
+        // The first real measurement flips it, and asks for a re-evaluation.
+        store.updateCellMetrics(CGSize(width: 17, height: 37))
+        #expect(store.hasMeasuredCellSize)
+        #expect(store.needsGeometryReeval)
+        // A measurement that happens to land within the threshold still counts,
+        // because it is what unblocks the negotiator.
+        let second = AppStore()
+        second.updateCellMetrics(CGSize(width: 17.1, height: 37.1))
+        #expect(second.hasMeasuredCellSize)
+    }
+
 }
