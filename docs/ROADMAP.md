@@ -129,6 +129,12 @@ token 样式与 `rules`（`equals`/`contains`/`starts_with`/`gt`/`lt`，含 ASCI
 
 协议层、侧边栏引擎、`AppStore` 已与平台无关，可整体复用。
 
+> **工作量与阻塞项实测见 [IOS-PORT.md](IOS-PORT.md)（2026-10-27）。**
+> 一句话结论：`KraalProtocol` 到 `KraalSidebar` 四个 target 加 3 处条件编译即可
+> 编过 iOS；真正的缺口是 SSH 传输（`Process` 不可用）和约 4300 行 AppKit UI。
+> 上面这份清单**没有算** SSH 凭据界面与 Machines 面板的替代方案，那两项是
+> 产品级工作。
+
 ---
 
 ## 3. 工程约定
