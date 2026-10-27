@@ -1251,77 +1251,110 @@ check_border_rows() {
             "screenshot failed: $(cat "$host_dir/shot-border.txt")"
         return 1
     fi
-    local container_w container_h window_w sidebar_w band_w
+    local container_w container_h window_w
     read -r container_w container_h <<EOF
 $(container_size)
 EOF
-    [ -n "${container_h:-}" ] || {
-        check "no unpainted border row above or below the panes" 1 "cannot read the container size"
+    if [ -z "${container_h:-}" ]; then
+        check "no unpainted border row above or below the panes" 1 \
+            "cannot read the container size"
         return 1
-    }
+    fi
     window_w=$(driver window | sed -n 's/.* w=\([0-9]*\).*/\1/p')
-    sidebar_w=$((window_w - container_w))
-    band_w=$((container_w - 120))
-    # Sweep every row of the container and collect the rows that are entirely the
-    # container's gap colour. Before the fix that set is exactly {row 0, row 35}; after
-    # it, empty.
-    # The container's own rows, in the screenshot's coordinates. `driver shot` captures
-    # the *window*, and the app reports where the container starts inside it
-    # (`containerOrigin=X,Y` in the `layout:` line), so the sweep has to start there —
-    # otherwise the tab bar above it is measured too, and the tab bar legitimately *is*
-    # the gap colour. That off-by-a-region made the first run report 92 rows.
     local layout container_oy
     layout=$(grep -o 'layout: container=.*' "$host_dir/kraal.log" 2>/dev/null | tail -1)
     container_oy=$(printf '%s' "$layout" | sed -n 's/.*containerOrigin=-*[0-9]*,\(-*[0-9]*\).*/\1/p')
-    [ -n "$container_oy" ] || {
-        check "no unpainted border row above or below the panes" 1 "cannot read the container origin"
+    if [ -z "${container_oy:-}" ]; then
+        check "no unpainted border row above or below the panes" 1 \
+            "cannot read the container origin"
         return 1
-    }
-    # Sweep the container's rows and record which ones are *entirely* the gap
-    # colour. Before the fix the answer is "every strip outside the grid": the top
-    # and bottom edges (the centred grid leaves ~8pt each) plus each pane's border
-    # cell. After it, the only such rows are the divider's own band.
-    local gap_rows="" y
-    for ((y = container_oy + 2; y < container_oy + container_h - 2; y++)); do
-        out=$(driver pixels --in "$shot" --rect "$((sidebar_w + 40)) $y $band_w 1" \
-            --match "$DIVIDER_MATCH" 2>&1)
-        local n
-        n=$(printf '%s' "$out" | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
-        [ -z "$n" ] && continue
-        [ "$n" -ge "$((band_w * 19 / 20))" ] && gap_rows="$gap_rows $y"
-    done
-    local verdict
-    verdict=$(python3 - "$gap_rows" "$container_h" <<'PY_BORDER'
-import sys
-rows = [int(v) for v in sys.argv[1].split()]
-# The divider is a band with a 1pt hairline down its middle, so the band itself
-# arrives as two runs separated by that line. Treat gaps of up to 2 rows as the
-# same band rather than as an unpainted strip.
-RIDGE = 2
-# The divider's band is the one run of gap-coloured rows that is allowed to exist,
-# and it is a single contiguous run. Anything else is an unpainted strip: the
-# container's own background showing through where neither a pane nor the divider
-# has a view.
-runs, start, prev = [], None, None
-for r in rows:
-    if start is None:
-        start = prev = r
-    elif r - prev <= 1 + RIDGE:
-        prev = r
-    else:
-        runs.append((start, prev))
-        start = prev = r
-if start is not None:
-    runs.append((start, prev))
-longest = max((b - a + 1 for a, b in runs), default=0)
-stray = [r for a, b in runs if b - a + 1 != longest for r in (a, b)]
-if len(runs) > 1 or longest < 2:
-    print(
-        f"{len(runs)} gap-coloured band(s) {[(a, b) for a, b in runs]}; "
-        "only the divider's own band may be unpainted"
-    )
+    fi
+    # What an unpainted row looks like: libghostty's own default background, which no
+    # Kraal theme uses. `alabaster` `#F7F7F7` on light appearance, `afterglow`
+    # `#212121` on dark. Any other colour in that row was drawn by someone.
+    #
+    # Deliberately not "the row equals the gap colour": once the terminals are themed
+    # the pane content and the gap can be the same RGB, so that test cannot tell a
+    # covered row from an uncovered one. Measured that collapse — with the background
+    # configured the whole pane area read `(40,40,40)` and the gap test reported two
+    # "unpainted" bands on a correct layout.
+    #
+    # Rows, not pixels: a bordered row is *mostly* default background, while glyph
+    # antialiasing contributes a handful of stray pixels. The threshold is per row.
+    local band_start_y band_h rows_json
+    band_start_y=$((container_oy + 1))
+    band_h=$((container_h - 2))
+    rows_json=$(driver rowscan --in "$shot" \
+        --x "$((window_w - container_w + 40))" --width "$((container_w - 120))" \
+        --y "$band_start_y" --height "$band_h" 2>&1)
+    if [ -z "${rows_json:-}" ]; then
+        check "no unpainted border row above or below the panes" 1 "rowscan produced nothing"
+        return 1
+    fi
+    # The terminals must be on the theme's background, not libghostty's.
+    #
+    # This is the half that is directly testable here, and it is the half the user
+    # saw: with no background configured, libghostty painted `#F7F7F7` (alabaster, on
+    # light appearance) anywhere a pane's frame was taller than its grid — a band
+    # between two `(17,20,25)` panes on a gruvbox client. Asserting the colour is on
+    # the theme is stronger than asserting no band appeared, because a band can only
+    # appear at all while the colour is wrong.
+    local theme_bg
+    theme_bg=$(printf '%s' "$layout" | sed -n 's/.*//p')
+    theme_bg=$(grep -o 'terminal background: [0-9A-F]*' "$host_dir/kraal.log" 2>/dev/null | tail -1 \
+        | sed 's/terminal background: //')
+    if [ -z "${theme_bg:-}" ]; then
+        check "the terminals use the theme's background" 1 \
+            "no 'terminal background:' line in the log"
+        return 1
+    fi
+    local want_rgb
+    want_rgb=$(python3 -c "
+h='$theme_bg'
+print(int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))")
+    read -r wr wg wb <<EOF
+$want_rgb
+EOF
+    local on_theme
+    on_theme=$(driver pixels --in "$shot" \
+        --rect "$((window_w - container_w + 40)) $((container_oy + 1)) $((container_w - 120)) $((container_h - 2))" \
+        --match "r=$wr,g=$wg,b=$wb" 2>&1 | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+    local default_px
+    default_px=$(driver pixels --in "$shot" \
+        --rect "$((window_w - container_w + 40)) $((container_oy + 1)) $((container_w - 120)) $((container_h - 2))" \
+        --match "r>243,r<251,g>243,g<251,b>243,b<251" 2>&1 \
+        | sed -n 's/^pixels matched=\([0-9]*\).*/\1/p')
+    if [ -z "${on_theme:-}" ] || [ -z "${default_px:-}" ]; then
+        check "the terminals use the theme's background" 1 "pixel counts unparseable"
+        return 1
+    fi
+    if [ "$default_px" -gt $((container_w)) ]; then
+        check "the terminals use the theme's background" 1 \
+            "$default_px px are still libghostty's default (#F7F7F7); theme is #$theme_bg"
+        return 1
+    fi
+    check "the terminals use the theme's background" 0 \
+        "theme #$theme_bg covers ${on_theme}px, default-background pixels=${default_px}"
+
+    verdict=$(python3 - "$rows_json" <<'PY_BORDER'
+import json, sys
+try:
+    scan = json.loads(sys.argv[1])
+except json.JSONDecodeError as error:
+    print(f"rowscan did not return JSON: {error}")
     raise SystemExit(1)
-print(f"one gap-coloured band at rows {runs[0][0]}..{runs[0][1]} (the divider)")
+DEFAULTS = {(0xF7, 0xF7, 0xF7), (0x21, 0x21, 0x21)}
+bad = []
+for row in scan["rows"]:
+    dominant = tuple(row["dominant"])
+    if dominant in DEFAULTS and row["share"] >= 0.9:
+        bad.append(row["y"])
+if bad:
+    # One contiguous run is still only a bug if it is not the divider, but the divider
+    # is the *gap* colour, never a libghostty default, so any hit is unpainted.
+    print(f"{len(bad)} row(s) are libghostty's default background: {bad[:8]}")
+    raise SystemExit(1)
+print(f"{len(scan['rows'])} rows scanned, none left unpainted")
 PY_BORDER
 )
     check "no unpainted border row above or below the panes" "$?" "$verdict"

@@ -107,24 +107,6 @@ struct PaneLayoutView: View {
     /// builds a second `PaneTerminalModel` rather than reusing a pane's.
     let popupContent: (ClientShellPopupSurface, PopupGeometry) -> AnyView
 
-    /// The colour behind a pane's border cell, or `nil` for the palette's own.
-    ///
-    /// The border belongs to the pane, not to the seam beside it, so it has to be the
-    /// terminal's own background — a colour that lives on the Ghostty surface, which
-    /// this file must not know about. `nil` (previews, tests) falls back to
-    /// `palette.paneSurfaceColor`.
-    let paneBorderColor: (@MainActor (String) -> Color?)?
-
-    init(
-        paneContent: @escaping (String, PaneSurfacePane) -> AnyView,
-        popupContent: @escaping (ClientShellPopupSurface, PopupGeometry) -> AnyView,
-        paneBorderColor: (@MainActor (String) -> Color?)? = nil
-    ) {
-        self.paneContent = paneContent
-        self.popupContent = popupContent
-        self.paneBorderColor = paneBorderColor
-    }
-
     var body: some View {
         GeometryReader { proxy in
             let surface = store.surface
@@ -144,16 +126,7 @@ struct PaneLayoutView: View {
                 // opinion, which leaves the line above exactly as it was.
                 palette.paneGapColor
 
-                if let surface {                    // Cover each pane's border cell; see `PaneBorderCells`.
-                    PaneBorderCells(
-                        panes: surface.panes,
-                        grid: grid,
-                        container: proxy.size,
-                        cellSize: pointsPerCell,
-                        colour: { paneBorderColor?($0) ?? palette.paneSurfaceColor },
-                        rect: rect
-                    )
-
+                if let surface {
                     ForEach(surface.panes, id: \.paneId) { pane in
                         let frame = rect(
                             for: pane.innerRect,

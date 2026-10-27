@@ -31,12 +31,7 @@ public final class PaneTerminalModel {
     /// 450 pt / 8.5 pt = 52 columns of text, but padding eats a few, and the
     /// renderer then reflows every row we send. The pane is already inset by the
     /// daemon's own border rects, so the padding must be zero here.
-    public let state = TerminalViewState(
-        terminalConfiguration: TerminalConfiguration { builder in
-            builder.withWindowPaddingX(0)
-            builder.withWindowPaddingY(0)
-        }
-    )
+    public let state: TerminalViewState
     private var renderer = SurfaceANSIRenderer()
     /// Turns the daemon's graphics scene into kitty bytes (issue #105, parent #37).
     ///
@@ -83,6 +78,15 @@ public final class PaneTerminalModel {
     /// parking is the observable seam. It is also the *real* path — `apply` is what
     /// the view calls — so a test on it cannot pass while the wiring is cut.
     var parkedFrame: FrameData? { pendingFrame }
+
+    /// Overrides the grid `apply` compares against, for tests only.
+    ///
+    /// `state.surfaceSize` is `internal(set)` and has no injection point, so the
+    /// grid-mismatch branch — the one that decides whether a pane paints anything
+    /// while the grid lags — was unreachable from a test. Every unit test stayed green
+    /// when that branch was reduced to a bare `return`, which is how the stray
+    /// background band reached a user twice.
+    var gridOverride: TerminalGridMetrics?
 
     /// How many times a screen reset has been applied. Test-observable because the
     /// reset and the image bytes race inside one `apply` call, and `parkedFrame`
@@ -191,11 +195,49 @@ public final class PaneTerminalModel {
         paneId: String,
         machine: String = "",
         isPopup: Bool = false,
+        /// The theme's terminal background as `RRGGBB`, or `nil` to keep libghostty's
+        /// own default.
+        ///
+        /// It has to be set here rather than left to the platform default. Those
+        /// defaults are `alabaster` (`#F7F7F7`) on light and `afterglow` (`#212121`) on
+        /// dark, so a dark theme on a light Mac got a `(247,247,247)` band wherever the
+        /// terminal painted its own background — measured between two `(17,20,25)`
+        /// panes. The theme never crosses the wire, so this is the only place that
+        /// colour can come from.
+        background: String? = nil,
         onInput: @escaping @Sendable (Data) -> Void
     ) {
         self.paneId = paneId
         self.machine = machine
         self.isPopup = isPopup
+        // The background has to go in `theme`, not `terminalConfiguration`.
+        //
+        // `GhosttyConfigRenderer.render` emits `configuration` first and `theme`
+        // second (`Configuration/GhosttyConfigRenderer.swift:23-29`), so the theme wins
+        // on any key both set — and `TerminalTheme.default` sets `background` on both
+        // its arms (`alabaster` `F7F7F7`, `afterglow` `212121`). Put in
+        // `terminalConfiguration`, this colour was silently overridden by libghostty's
+        // own default, which is exactly the bug: measured `background: 282828` in the
+        // log while the screen still painted `#F7F7F7`.
+        //
+        // Both arms get the same value: the theme is Kraal's, not the platform's, so
+        // the terminal must not change colour when macOS switches appearance.
+        let theme: TerminalTheme
+        if let background {
+            let arm = TerminalConfiguration { builder in
+                builder.withBackground(background)
+            }
+            theme = TerminalTheme(light: arm, dark: arm)
+        } else {
+            theme = .default
+        }
+        state = TerminalViewState(
+            theme: theme,
+            terminalConfiguration: TerminalConfiguration { builder in
+                builder.withWindowPaddingX(0)
+                builder.withWindowPaddingY(0)
+            }
+        )
         session = InMemoryTerminalSession(
             write: { data in
                 // Ghostty -> daemon: key bytes, paste payloads, replies to queries.
@@ -333,7 +375,7 @@ public final class PaneTerminalModel {
         // without a grid to lay it out in. Remember the frame and paint it when
         // the surface reports a size; writing now both wastes the frame and
         // leaves the pane blank even though the terminal later becomes ready.
-        guard let grid = state.surfaceSize else {
+        guard let grid = gridOverride ?? state.surfaceSize else {
             pendingFrame = frame
             lastRevision = 0
             frameGrid = nil
@@ -370,6 +412,8 @@ public final class PaneTerminalModel {
             // the grid does catch up, it just does it after the last event any
             // observer is watching for.
             schedulePendingRetry()
+
+            paintOverlap(frame, grid: grid, clearingFirst: eraseBeforePaint)
             return
         }
 
@@ -403,6 +447,42 @@ public final class PaneTerminalModel {
     /// `erase=0, eraseWrites>0, paints>eraseWrites`, and a "no erase escaped its
     /// repaint" check passed on it. Verified by injection: routing the erase back
     /// outside gives `erases=0` here and the case goes red.
+
+    /// Reports the renderer's measured cell size, in device pixels.
+    ///
+    /// Called before the grid check in `apply`, not after it: the check bails out
+    /// while the grid is wrong, and if reporting lived past that bail-out the
+    /// size used for layout could never be corrected — a one-way trap where the
+    /// grid stays wrong because it was never measured, and never measured
+    /// because it was wrong.
+    /// Hands one painted frame to the terminal, and records that it was one write.
+    ///
+    /// Every classification the GUI case reads comes from the **bytes actually
+    /// written**, never a caller flag — that is what lets the assertion catch the
+    /// defect it was written for (an `erasing:` flag let a two-write erase log
+    /// `erase=0` and pass). Verified by injection; see `docs/ENVIRONMENT.md` §8.11.
+    /// Paints what fits while the grid is still the previous size.
+    ///
+    /// Returning from the mismatch branch without painting left the pane's view taller
+    /// than the grid Ghostty had, and the difference shows the terminal's own
+    /// background — a one-cell band, measured `(247,247,247)` between `(17,20,25)`
+    /// panes on a gruvbox client with light appearance (libghostty's `alabaster`;
+    /// `#212121` on dark). It appeared on every drag step and every window resize,
+    /// which is exactly when the grid lags the view.
+    ///
+    /// The cells past the current grid cannot be shown anyway, so painting the
+    /// intersection loses nothing that was visible and removes the band.
+    private func paintOverlap(
+        _ frame: FrameData,
+        grid: TerminalGridMetrics,
+        clearingFirst: Bool
+    ) {
+        guard let bridge = Self.bridgeFrame(
+            frame, gridColumns: grid.columns, gridRows: grid.rows
+        ) else { return }
+        deliver(renderer.render(bridge, clearingFirst: clearingFirst))
+    }
+
     private func deliver(_ painted: Data) {
         paintCount += 1
         // The clear pair this app erases with: `ED2` + `ED3` + cursor home.
@@ -423,13 +503,6 @@ public final class PaneTerminalModel {
         session.receive(painted)
     }
 
-    /// Reports the renderer's measured cell size, in device pixels.
-    ///
-    /// Called before the grid check in `apply`, not after it: the check bails out
-    /// while the grid is wrong, and if reporting lived past that bail-out the
-    /// size used for layout could never be corrected — a one-way trap where the
-    /// grid stays wrong because it was never measured, and never measured
-    /// because it was wrong.
     private func reportCellMetrics() {
         guard let grid = state.surfaceSize,
               grid.cellWidthPixels > 0,
@@ -579,105 +652,6 @@ public final class PaneTerminalModel {
         frameGrid = nil
     }
 
-    /// Crops the composited tab surface down to this pane's content area.
-    ///
-    /// The terminal only ever knows about its own pane, so the surrounding
-    /// borders and sibling panes must not be fed to it — otherwise a patch in a
-    /// neighbouring pane would repaint ours.
-    ///
-    /// Rows are handed to the frame already chunked (`CellBuffer(rows:width:)`)
-    /// rather than flattened into one array and re-split. The flatten-then-chunk
-    /// shape copied the pane twice — once into `[CellData]`, once per row by
-    /// `Array(slice)` inside `CellBuffer.init(_:width:)`, which does not share
-    /// storage with the slice it comes from. The storage step alone is what that
-    /// removes, and it is the reproducible part: 200x50, 37.5 us -> 0.033 us
-    /// (docs/PERFORMANCE.md, "`paneFrame`：本次改动自己制造、又自己还回去的那笔
-    /// 存储拷贝"). The whole-path timings this comment used to quote could not be
-    /// reproduced independently and were dropped — do not reintroduce them.
-    private func paneFrame(
-        from surface: PaneSurfaceFrame,
-        geometry: PaneSurfacePane
-    ) -> FrameData {
-        // Encode *here*, once per frame, so every path that paints this frame —
-        // including the parked-frame retries below — carries the graphics without
-        // each one having to remember. The encoder diffs against what it already
-        // sent, so a frame with unchanged images contributes no bytes.
-        //
-        // The scene is in **surface** coordinates: a placement's `cellX`/`cellY`
-        // address the whole tab, while this terminal only knows its own pane. The
-        // cells below are cropped by `innerRect` for exactly that reason, and the
-        // placements have to be shifted the same way or an image in a split pane is
-        // drawn at the wrong column. Upstream does the same addition in reverse
-        // (`client_host_piece`, `kitty_graphics/surface.rs:1032`: `origin.0 +
-        // placement.x`), so subtracting the origin here restores pane-local space.
-        let paneOrigin = (x: Int(geometry.innerRect.originX), y: Int(geometry.innerRect.originY))
-        let paneSize = (
-            width: Int(geometry.innerRect.width),
-            height: Int(geometry.innerRect.height)
-        )
-        let graphics = graphicsEncoder.encode(
-            scene: sceneInPaneSpace(surface.graphics, origin: paneOrigin, paneSize: paneSize),
-            scope: graphicsScope
-        )
-        let area = geometry.innerRect
-        let width = Int(area.width)
-        let height = Int(area.height)
-        let frameWidth = Int(surface.frame.width)
-        var rows: [[CellData]] = []
-        rows.reserveCapacity(height)
-
-        // Row at a time: a row of the surface is one array, so this is one retain
-        // per row instead of one per cell. The bounds check is per cell because a
-        // malformed frame's last row can be shorter than the grid says; a cell the
-        // surface does not cover is filled blank, exactly as `surface.frame[c, r]`
-        // returning nil used to do.
-        for row in 0 ..< height {
-            let sourceRow = Int(area.originY) + row
-            let rowCells = surface.frame.buffer.row(sourceRow)
-            let available = rowCells.count
-            var cropped: [CellData] = []
-            cropped.reserveCapacity(width)
-            for column in 0 ..< width {
-                let sourceColumn = Int(area.originX) + column
-                if sourceColumn < frameWidth, sourceColumn < available {
-                    cropped.append(rowCells[rowCells.startIndex + sourceColumn])
-                } else {
-                    cropped.append(.blank)
-                }
-            }
-            rows.append(cropped)
-        }
-
-        var cursor: CursorState?
-        if let surfaceCursor = surface.frame.cursor,
-           Int(surfaceCursor.column) >= Int(area.originX),
-           Int(surfaceCursor.column) < Int(area.originX) + width,
-           Int(surfaceCursor.row) >= Int(area.originY),
-           Int(surfaceCursor.row) < Int(area.originY) + height {
-            cursor = CursorState(
-                column: surfaceCursor.column - area.originX,
-                row: surfaceCursor.row - area.originY,
-                visible: surfaceCursor.visible,
-                shape: surfaceCursor.shape
-            )
-        }
-
-        return FrameData(
-            buffer: CellBuffer(rows: rows, width: width),
-            width: UInt16(width),
-            height: UInt16(height),
-            cursor: cursor,
-            hyperlinks: surface.frame.hyperlinks,
-            // The encoder's output, not `surface.frame.graphics`. Kitty graphics do
-            // not live in the cell frame: the daemon sends them as a *scene*
-            // (`surface.graphics`) and the client encodes it. Reading
-            // `surface.frame.graphics` here — what this used to do — reads the ANSI
-            // path's field, which the daemon leaves empty for semantic clients, so
-            // an image was decoded, laid out against the grid, and thrown away
-            // (issues #37, #105).
-            graphics: graphics
-        )
-    }
 }
 
 /// Hosts the pane models for one window and keeps them in sync with the store.
@@ -717,8 +691,27 @@ public final class PaneTerminalPool {
     /// them alive is how the previous machine's screen state leaked into the next.
     private var machine: String?
 
-    public init(onInput: @escaping @Sendable (String, Data) -> Void) {
+    /// The theme's terminal background, as `RRGGBB`, applied to every terminal this
+    /// pool builds.
+    ///
+    /// Setting it retires the existing models: the colour is a construction-time
+    /// configuration command in libghostty, so a theme change has to rebuild the
+    /// surfaces rather than mutate them. Themes change rarely (a config reload or a
+    /// light/dark switch) and a rebuild is what `selectMachine` already does on the
+    /// same scale.
+    public var background: String? {
+        didSet {
+            guard background != oldValue else { return }
+            models.removeAll()
+        }
+    }
+
+    public init(
+        onInput: @escaping @Sendable (String, Data) -> Void,
+        background: String? = nil
+    ) {
         self.onInput = onInput
+        self.background = background
     }
 
     /// Points the pool at the machine whose panes it is about to be asked for.
@@ -749,7 +742,8 @@ public final class PaneTerminalPool {
         let model = PaneTerminalModel(
             paneId: paneId,
             machine: key.machine,
-            isPopup: isPopup
+            isPopup: isPopup,
+            background: background
         ) { [weak self] data in
             self?.onInput(paneId, data)
         }

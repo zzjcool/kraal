@@ -77,27 +77,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         return candidate == real ? "This Mac" : "sandbox"
     }
 
-    /// The colour behind a pane's border cell: the terminal's own background.
-    ///
-    /// The daemon reserves one cell of border around each pane and the border belongs
-    /// to the pane, not to the seam beside it, so it must match the ghostty surface
-    /// inside that pane. That colour only exists on the surface, which is why it is
-    /// resolved here rather than inside `PaneLayoutView`.
-    private static func paneBorderColour(
-        store: AppStore,
-        paneId: String,
-        pool: PaneTerminalPool
-    ) -> Color? {
-        guard let surface = store.surface else { return nil }
-        pool.selectMachine(surface.bootId)
-        let colour = pool.model(for: paneId).state.backgroundColor
-        return Color(
-            red: Double(colour.red) / 255,
-            green: Double(colour.green) / 255,
-            blue: Double(colour.blue) / 255
-        )
-    }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         // An accessory launch has no Dock tile and never activates, which is what
         // keeps a second copy from pulling focus away from the first. It still
@@ -113,13 +92,10 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
 
-        let pool = PaneTerminalPool { [weak self] target, data in
-            self?.routeInput(target: target, data: data)
-        }
+        let theme = makeThemeStore()
+        let pool = makeTerminalPool(theme: theme)
 
         let copyController = makeCopyModeController(store: store)
-
-        let theme = makeThemeStore()
 
         let root = RootView(
             store: store,
@@ -151,8 +127,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             )
         } popupPaneContent: { store, popup, _ in
             self.popupView(store: store, popup: popup, pool: pool)
-        } paneBorderColor: { store, paneId in
-            Self.paneBorderColour(store: store, paneId: paneId, pool: pool)
         }
         // Injected on the view rather than on the hosting view, so sheets and
         // popovers inherit it too.
@@ -337,6 +311,42 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// Split out of `applicationDidFinishLaunching`, which is at swiftlint's body
     /// limit: the launch path already carries activation policy, log rotation, the
     /// connection and the effect wiring.
+    /// Builds the terminal pool, on the theme's background.
+    ///
+    /// The colour has to be settled before any surface exists, because it is a
+    /// construction-time configuration command in libghostty. Left unset, libghostty
+    /// uses its own themes — `alabaster` `#F7F7F7` on light appearance, `afterglow`
+    /// `#212121` on dark — so a gruvbox client on a light Mac painted a
+    /// `(247,247,247)` band between two `(17,20,25)` panes wherever a terminal drew
+    /// its own background. The theme never crosses the wire, so this is the only
+    /// thing that can set it.
+    private func makeTerminalPool(theme: ThemeStore) -> PaneTerminalPool {
+        let pool = PaneTerminalPool(
+            onInput: { [weak self] target, data in
+                self?.routeInput(target: target, data: data)
+            },
+            background: theme.palette.terminalBackgroundHex
+        )
+        // Logged because it is the only evidence a GUI case can assert on: whether the
+        // terminals took the theme's background or libghostty's default is not visible
+        // in any view hierarchy, only in the pixels. Same reasoning as the `layout:`
+        // and `paint:` lines.
+        logTerminalBackground(theme.palette)
+        // The pool retires its models when this changes, so a theme reload or an
+        // appearance switch re-colours the terminals instead of leaving them on the
+        // previous build's background.
+        theme.onPaletteChange = { [weak self, weak pool] palette in
+            self?.logTerminalBackground(palette)
+            pool?.background = palette.terminalBackgroundHex
+        }
+        return pool
+    }
+
+    /// Records the colour the terminals were built with, for the GUI gate.
+    private func logTerminalBackground(_ palette: Palette) {
+        kraalLog("terminal background: \(palette.terminalBackgroundHex ?? "nil")")
+    }
+
     private func makeThemeStore() -> ThemeStore {
         // Read once, here. Doing it in a view body would mean file I/O per frame, and
         // doing it in several places would give "which theme am I on" several answers.

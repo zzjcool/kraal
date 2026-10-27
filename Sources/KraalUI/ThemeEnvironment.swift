@@ -50,6 +50,13 @@ public final class ThemeStore {
     /// The appearance the current palette was chosen for.
     public private(set) var appearance: HostAppearance
 
+    /// Called after every palette swap, for owners that need a colour outside SwiftUI.
+    ///
+    /// The terminals are the one such owner: Ghostty takes its background as a
+    /// construction-time configuration command, so it cannot read the environment
+    /// palette and has to be rebuilt instead.
+    public var onPaletteChange: ((Palette) -> Void)?
+
     @ObservationIgnored private var appearanceObserver: NSKeyValueObservation?
 
     /// Builds a store from the user's `config.toml`.
@@ -103,6 +110,7 @@ public final class ThemeStore {
         palette = resolved.palette
         themeName = resolved.name
         kraalLog("theme: applied \(resolved.name) (appearance=\(appearance.rawValue))")
+        onPaletteChange?(palette)
     }
 
     /// Re-reads `config.toml` from disk.

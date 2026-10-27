@@ -41,27 +41,19 @@ public struct RootView: View {
     /// stays free of the Ghostty dependency.
     private let popupPaneContent: (AppStore, ClientShellPopupSurface, PopupGeometry) -> AnyView
 
-    /// The colour behind a pane's border cell, or `nil` for the palette's own.
-    ///
-    /// Same reason as `paneContent` being injected: the value comes from a live
-    /// Ghostty surface, which this file must not know about.
-    private let paneBorderColor: (AppStore, String) -> Color?
-
     public init(
         store: AppStore,
         windowActions: WindowActions? = nil,
         copyModeBanner: CopyModeBanner? = nil,
         paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView,
         popupPaneContent: @escaping (AppStore, ClientShellPopupSurface, PopupGeometry) -> AnyView
-            = { _, _, _ in AnyView(Color(nsColor: .textBackgroundColor)) },
-        paneBorderColor: @escaping (AppStore, String) -> Color? = { _, _ in nil }
+            = { _, _, _ in AnyView(Color(nsColor: .textBackgroundColor)) }
     ) {
         _store = State(initialValue: store)
         self.windowActions = windowActions ?? WindowActions()
         self.copyModeBanner = copyModeBanner
         self.paneContent = paneContent
         self.popupPaneContent = popupPaneContent
-        self.paneBorderColor = paneBorderColor
     }
 
     private var content: some View {
@@ -96,9 +88,6 @@ public struct RootView: View {
                         },
                         popupContent: { popup, geometry in
                             popupPaneContent(store, popup, geometry)
-                        },
-                        paneBorderColor: { paneId in
-                            paneBorderColor(store, paneId)
                         }
                     )
                     .environment(store)

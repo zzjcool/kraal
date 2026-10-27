@@ -1210,3 +1210,73 @@ floor 除 cell 尺寸来定 grid，宽一格就会重排、每行都折行（同
   border 断言；几何上走的是同一段代码。
 - 只在 gruvbox 上验证。`terminal` 主题（`surfaceDim = 0x444444`）下边框和缝隙
   颜色不同，视觉上是否可接受没有截图确认。
+
+### 8.13 pane 之间那条空白带：终端背景从没被主题化（2026-10-27 实测并修复）
+
+用户第二次报“上下拖动分隔条还会有空白行，改窗口大小也能复现”，并补充
+**深色外观下这条带子的颜色也会变**。这两句话把范围锁死了：颜色会跟系统外观变，
+说明它不是任何主题色，而是终端库自己的默认值。
+
+#### 实测：颜色就是 libghostty 的默认主题
+
+`TerminalTheme.default` = `light: .alabaster` / `dark: .afterglow`
+（`Configuration/TerminalTheme+Defaults.swift:8-11`），而
+
+```text
+alabaster  builder.withBackground("F7F7F7")   -> (247,247,247)
+afterglow  builder.withBackground("212121")   -> (33,33,33)
+```
+
+用户截图里那条带子量出来是 `(247,247,247)`，**逐像素等于 `#F7F7F7`**。深色外观
+下变成 `#212121`，与用户的描述一致。
+
+根因：`PaneTerminalModel` 只给 Ghostty 设了 padding（`PaneTerminal.swift:34-39`），
+**从没设过任何颜色**。而 Kraal 的主题不在协议里（`docs`/`Decoder.swift` 对
+theme/color 零命中），所以 Ghostty 永远不知道自己是 gruvbox。
+
+#### 修法 A：把主题的终端背景告诉 Ghostty
+
+`Palette.terminalBackgroundHex`（`terminalBackground` → `surface_dim` → `nil`），
+由 app 层传给 `PaneTerminalPool.background`，再进 `PaneTerminalModel`。
+
+**必须放 `theme`，不能放 `terminalConfiguration`。**
+`GhosttyConfigRenderer.render` 先渲染 `configuration`、后渲染 `theme`
+（`Configuration/GhosttyConfigRenderer.swift:23-29`），同一个 key 上后者覆盖前者，
+而 `TerminalTheme.default` 两个 arm 都设了 `background`。放错的症状是：日志里
+`terminal background: 282828` 打得好好的，屏幕上仍然铺 `#F7F7F7`。
+
+#### 修法 B：grid 落后于 view 时，画能画的那部分
+
+`apply(surface:)` 在 grid mismatch 时原本只 park 帧然后 `return`，一帧都不画。
+pane 的 view 已经变成新的行数，Ghostty 还是旧 grid，差额那条就露出终端背景 ——
+这正是那 1 个 cell（37px）。改成 `paintOverlap(...)`：把帧裁到当前 grid 先画出来。
+
+裁掉的单元格本来就显示不了（grid 没长到那儿），所以这一步不损失任何原本可见的
+内容，只是把空白带消掉。完整帧仍然 park，grid 追上后照常重画。
+
+#### 三条“检查通过但其实没查”（本轮又踩到的）
+
+| 做法 | 结果 |
+|---|---|
+| 断言「没有 gap 色的行」 | 终端主题化之后 pane 内容和缝隙可同色（都 `#282828`），这条判据直接失去分辨力 |
+| 只测 `cropped()` / `bridgeFrame()` 纯函数 | 把 mismatch 分支整个删成裸 `return`，**733 个测试全绿** —— 没有一个测试碰 `apply` 的那个分支 |
+| 扫描整个容器高度 | 容器是点、截图是像素，扫进了窗口底部状态条，其背景也是 `#F7F7F7`，静默多算 959 px/行 |
+
+第三条的修法是 `kraal-gui rowscan`：逐行输出主色与占比，判据变成“这一行 90%
+以上是 libghostty 的默认色”，文字抗锯齿的零星像素不再干扰。
+
+#### 注入验证
+
+| 断言 | 注入 | 结果 |
+|---|---|---|
+| `the terminals use the theme's background` | `background: nil` | `479256 px are still libghostty's default (#F7F7F7); theme is #282828` → exit 1 |
+| `a mismatched grid still reaches the terminal` | 删掉 `paintOverlap` 调用 | `paintCount > before` 失败 → exit 1 |
+| `cropped()` 的尺寸 | 裁到 frame 而非 grid | 4 条单测红 |
+| `terminalBackgroundHex` | 去掉 `surface_dim` 回落 | 2 条单测红 |
+
+#### 未验证
+
+- `paintOverlap` 的**像素级**效果没有 GUI 断言：VM 里的 `split-down` 在截图时
+  grid 已经稳定，注入“不画”仍然通过。行为由单测钉住（`paintCount` 增加），
+  但“真的少了那条带子”只有用户在真机上确认。
+- 只测了 gruvbox。`terminal` 主题（`surface_dim = 0x444444`）的观感未截图确认。
