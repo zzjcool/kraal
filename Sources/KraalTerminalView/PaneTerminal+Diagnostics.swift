@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 zzjcool
 
+import AppKit
 import Foundation
 import GhosttyTerminal
 import KraalProtocol
@@ -146,4 +147,87 @@ func logPaneViewIfMismatched(
     guard let grid, Int(grid.rows) != Int(cells.height) else { return }
     kraalLog("pane view: \(paneId) size=\(size.width)x\(size.height)pt "
         + "cells=\(cells.width)x\(cells.height) ghostty=\(grid.columns)x\(grid.rows)")
+}
+
+extension PaneTerminalModel {
+    /// The grid to lay a frame out in: the view's own measurement where possible.
+    ///
+    /// `state.surfaceSize` alone is not trustworthy. Ghostty computes the grid in
+    /// `surface.setSize` and reports it back through `surface.size()`, which the
+    /// engine's IO thread fills in *after* the resize is queued. When a pane's height
+    /// settles just as the last of a drag's resizes lands, the coordinator's
+    /// `metrics != lastMetrics` guard sees the previous size, logs `sync unchanged`,
+    /// and returns without publishing the new one (`TerminalSurfaceCoordinator.swift:
+    /// 395-402`). The published value then stays stale indefinitely.
+    ///
+    /// Measured on a live session: the view settled at `832.5pt`, which at
+    /// `cellHeightPixels = 37` is exactly 45 rows, while `surfaceSize` stayed at the
+    /// 36 rows reported a moment earlier — and never moved again. `apply` then
+    /// refused every frame (each one needed 45), so the pane kept whatever the last
+    /// good paint left: the blank area at the bottom, permanent.
+    ///
+    /// The cell size inside `surfaceSize` is still right — it is a property of the
+    /// font, not of the resize — so the honest grid is the view's own pixels divided
+    /// by it. That is the same arithmetic Ghostty does, from the same inputs, minus
+    /// the round trip that can go stale.
+    ///
+    /// Falls back to the reported value whenever the view cannot answer, so nothing
+    /// that worked before changes behaviour.
+    var resolvedGrid: TerminalGridMetrics? {
+        if let override = gridOverride { return override }
+        guard let reported = state.surfaceSize else { return nil }
+        guard let view = state.attachedPlatformView else { return reported }
+        let scale = view.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixelsWide = Int((view.bounds.width * scale).rounded(.down))
+        let pixelsHigh = Int((view.bounds.height * scale).rounded(.down))
+        guard pixelsWide > 0, pixelsHigh > 0,
+              reported.cellWidthPixels > 0, reported.cellHeightPixels > 0
+        else { return reported }
+        guard let derived = Self.grid(
+            forViewPixelsWide: pixelsWide, high: pixelsHigh, cell: reported
+        ), derived.columns != reported.columns || derived.rows != reported.rows
+        else { return reported }
+        // Worth a line: this is the case where the reported grid has gone stale, and
+        // it is the only evidence that the workaround was needed at all. Throttled by
+        // the fact that it can only fire on a change of the derived value.
+        // Once per distinct correction, not once per call: `resolvedGrid` is read on
+        // every frame, and a stale grid during a drag would otherwise re-log at mouse
+        // speed — the same mistake the `pane view:` line made.
+        // Logged only when the corrected size differs from what was on screen, which
+        // is a change the pane cannot otherwise explain from the numbers it prints.
+        if frameGrid.map({ Int($0.height) != Int(derived.rows) }) ?? true {
+            kraalLog("grid from view: pane=\(paneId) reported=\(reported.columns)x\(reported.rows)"
+                + " view=\(derived.columns)x\(derived.rows) px=\(pixelsWide)x\(pixelsHigh)")
+        }
+        return derived
+    }
+
+    /// The grid a view of this pixel size implies, given the cell metrics.
+    ///
+    /// Split out from `resolvedGrid` so the arithmetic is testable without an
+    /// `NSView`. It is the same division Ghostty performs; the only thing being
+    /// replaced is *where the number comes from*.
+    ///
+    /// Returns `nil` for a degenerate input rather than a zero grid, so the caller
+    /// keeps whatever it had.
+    static func grid(
+        forViewPixelsWide pixelsWide: Int,
+        high pixelsHigh: Int,
+        cell: TerminalGridMetrics
+    ) -> TerminalGridMetrics? {
+        guard pixelsWide > 0, pixelsHigh > 0,
+              cell.cellWidthPixels > 0, cell.cellHeightPixels > 0
+        else { return nil }
+        let columns = UInt16(clamping: pixelsWide / Int(cell.cellWidthPixels))
+        let rows = UInt16(clamping: pixelsHigh / Int(cell.cellHeightPixels))
+        guard columns > 0, rows > 0 else { return nil }
+        return TerminalGridMetrics(
+            columns: columns, rows: rows,
+            widthPixels: UInt32(clamping: pixelsWide),
+            heightPixels: UInt32(clamping: pixelsHigh),
+            cellWidthPixels: cell.cellWidthPixels,
+            cellHeightPixels: cell.cellHeightPixels
+        )
+    }
 }

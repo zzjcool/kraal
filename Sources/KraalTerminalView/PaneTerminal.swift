@@ -51,7 +51,7 @@ public final class PaneTerminalModel {
     let isPopup: Bool
     private var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
-    private var frameGrid: FrameData?
+    private(set) var frameGrid: FrameData?
     /// The projection the renderer's baseline belongs to.
     ///
     /// Nothing else the pane compares can see a workspace or machine switch.
@@ -379,7 +379,7 @@ public final class PaneTerminalModel {
         // without a grid to lay it out in. Remember the frame and paint it when
         // the surface reports a size; writing now both wastes the frame and
         // leaves the pane blank even though the terminal later becomes ready.
-        guard let grid = gridOverride ?? state.surfaceSize else {
+        guard let grid = resolvedGrid else {
             pendingFrame = frame
             lastRevision = 0
             frameGrid = nil
@@ -499,7 +499,7 @@ public final class PaneTerminalModel {
     /// because the only frame for that tab was dropped while the view was still
     /// being attached.
     func flushPendingFrame() {
-        guard let frame = pendingFrame, let grid = state.surfaceSize else { return }
+        guard let frame = pendingFrame, let grid = resolvedGrid else { return }
         let exact = Self.parkedFrameFits(
             frameWidth: Int(frame.width),
             frameHeight: Int(frame.height),

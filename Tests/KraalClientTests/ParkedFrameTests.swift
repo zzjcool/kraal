@@ -28,6 +28,8 @@
 import CoreGraphics
 import Testing
 
+import GhosttyTerminal
+
 @testable import KraalTerminalView
 
 @Suite("Parked frame retry")
@@ -106,4 +108,41 @@ struct ParkedFrameRetryTests {
             frameWidth: 124, frameHeight: 30, gridColumns: 123, gridRows: 30
         ))
     }
+
+    /// The grid has to be re-derived from the view, because the reported one can
+    /// freeze.
+    ///
+    /// The live numbers this is written against: a pane settled at `832.5 pt` with a
+    /// `37 px` cell, so exactly 45 rows, while `surfaceSize` still said 36 and never
+    /// moved again. `apply` refused every frame that needed 45, and the pane kept the
+    /// rows the last good paint left behind.
+    @Test("a view's own pixels decide the grid, not the last reported size")
+    func gridDerivedFromViewPixels() {
+        let cell = TerminalGridMetrics(
+            columns: 126, rows: 36,
+            widthPixels: 2142, heightPixels: 1332,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        // 832.5 pt at 2x is 1665 px, and 1665 / 37 is 45 exactly.
+        let settled = PaneTerminalModel.grid(
+            forViewPixelsWide: 2142, high: 1665, cell: cell
+        )
+        #expect(settled?.columns == 126)
+        #expect(settled?.rows == 45,
+                "the view is 45 rows tall; reporting 36 is what left the pane blank")
+
+        // A view too small for one cell is unusable, not a zero-size grid.
+        #expect(PaneTerminalModel.grid(
+            forViewPixelsWide: 2142, high: 10, cell: cell
+        ) == nil)
+        // Degenerate cell metrics are what the caller must not divide by.
+        let empty = TerminalGridMetrics(
+            columns: 0, rows: 0, widthPixels: 0, heightPixels: 0,
+            cellWidthPixels: 0, cellHeightPixels: 0
+        )
+        #expect(PaneTerminalModel.grid(
+            forViewPixelsWide: 2142, high: 1665, cell: empty
+        ) == nil)
+    }
+
 }
