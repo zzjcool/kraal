@@ -434,7 +434,35 @@ extension PaneTerminalModel {
         // Only when they disagree: a correct pane stays quiet, and a mismatch prints
         // the numbers that would otherwise have to be inferred.
         guard let layerSize else {
-            kraalLog("surface extent: pane=\(paneId) no CAMetalLayer bounds=\(bounds)")
+            // `view.layer` is not always a `CAMetalLayer`: the render pipeline swaps it
+            // for an IOSurfaceLayer when it composites through IOSurface, and the
+            // cached `metalLayer` ivar is then detached from the view tree. Reporting
+            // "no CAMetalLayer" and stopping hid the numbers that matter, so describe
+            // whatever layer is actually attached.
+            let attached = view.layer
+            kraalLog("surface extent: pane=\(paneId)"
+                + " layer=\(type(of: attached as Any))"
+                + " bounds=\(bounds.width)x\(bounds.height)pt"
+                + " contentsScale=\(attached?.contentsScale ?? -1)"
+                + " frame=\(attached?.frame.size.width ?? -1)x\(attached?.frame.size.height ?? -1)"
+                + " wants=\(wanted.width)x\(wanted.height)px")
+            return
+        }
+        // The grid says how many cells to paint; it says nothing about how much of the
+        // view those cells cover. A pane covering `rows * cellHeight` while its own
+        // bounds are taller leaves the difference showing whatever is underneath —
+        // identical to an empty row, invisible to every cell-level assertion. Reported
+        // even when the layer agrees, because this is the one comparison that does not
+        // need the layer at all.
+        let covered = CGFloat(frame.height) * CGFloat(grid?.cellHeightPixels ?? 0) / scale
+        let gap = bounds.height - covered
+        if gap > 0.5 {
+            kraalLog("surface extent: pane=\(paneId) short by \(gap)pt"
+                + " bounds=\(bounds.width)x\(bounds.height)pt"
+                + " covered=\(covered)pt rows=\(frame.height)"
+                + " cell=\(grid?.cellWidthPixels ?? 0)x\(grid?.cellHeightPixels ?? 0)px"
+                + " drawable=\(layerSize.width)x\(layerSize.height)px"
+                + " wants=\(wanted.width)x\(wanted.height)px")
             return
         }
         let short = abs(layerSize.width - wanted.width) > 1
