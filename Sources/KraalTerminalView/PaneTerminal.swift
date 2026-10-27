@@ -49,7 +49,7 @@ public final class PaneTerminalModel {
     /// image ids hash from. A popup's `terminalId` can coincide with a pane id, so
     /// the kind cannot be inferred from the id alone.
     let isPopup: Bool
-    private var lastRevision: UInt64 = 0
+    private(set) var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
     private(set) var frameGrid: FrameData?
     /// The projection the renderer's baseline belongs to.
@@ -62,7 +62,7 @@ public final class PaneTerminalModel {
     /// judged "nothing to do", and leave the previous machine's picture on
     /// screen. `bootId` is stamped at daemon boot and never shared, which is the
     /// one field that separates them.
-    private var lastProjection: SurfaceGeometry.ProjectionIdentity?
+    private(set) var lastProjection: SurfaceGeometry.ProjectionIdentity?
     /// A frame that arrived before Ghostty's surface existed, or before its grid
     /// caught up with the frame's size.
     private var pendingFrame: FrameData?
@@ -288,20 +288,9 @@ public final class PaneTerminalModel {
             previous: lastProjection,
             current: projection
         )
-        let resetNeeded = projectionChanged || SurfaceGeometry.needsScreenReset(
-            deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
-                previousRevision: lastRevision,
-                incomingRevision: geometry.contentRevision
-            ),
-            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
-            // The pane's grid, not the surface's — see `paneGrid`.
-            currentGrid: Self.paneGrid(geometry)
+        let eraseBeforePaint = eraseDecision(
+            projectionChanged: projectionChanged, geometry: geometry
         )
-        // A clean repaint was requested by an earlier frame that could not be
-        // painted at a trustworthy grid. It is a reset for the same reason a
-        // changed grid is: the rows on screen were written at the wrong width.
-        let cleanRepaint = needsCleanRepaint
-        let eraseBeforePaint = resetNeeded || cleanRepaint
         if eraseBeforePaint {
             screenResetCount += 1
             // Runs **before** `paneFrame` below for every path that erases, not

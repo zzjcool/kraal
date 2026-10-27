@@ -322,3 +322,41 @@ extension PaneTerminalModel {
         reapplyAfterGridViewMoved()
     }
 }
+
+extension PaneTerminalModel {
+    /// Says which condition asked for the screen erase.
+    ///
+    /// Four unrelated conditions all reach `eraseBeforePaint`, and from the log they
+    /// look identical: `paint: erase=1` with a constant width. That is why the flash
+    /// during a vertical drag survived three attempts — each one removed a reason
+    /// and the line did not change, because a different reason was firing.
+    func eraseDecision(
+        projectionChanged: Bool,
+        geometry: PaneSurfacePane
+    ) -> Bool {
+        let restart = SurfaceGeometry.deltaStreamRestarted(
+            previousRevision: lastRevision,
+            incomingRevision: geometry.contentRevision
+        )
+        let currentGrid = Self.paneGrid(geometry)
+        let widthMoved = frameGrid.map { Int($0.width) != currentGrid.width } ?? true
+        let reset = projectionChanged || SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: restart,
+            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
+            currentGrid: currentGrid
+        )
+        // A clean repaint was requested by an earlier frame that could not be painted
+        // at a trustworthy grid. It is a reset for the same reason a changed grid is:
+        // the rows on screen were written at the wrong width.
+        let erase = reset || needsCleanRepaint
+        if erase {
+            // Named, because four unrelated conditions all reach the same line and
+            // from the log they look identical: `paint: erase=1` with a constant
+            // width. Three attempts removed one reason each and the line did not
+            // change, because a different reason was firing.
+            kraalLog("erase why: \(paneId) projection=\(projectionChanged) restart=\(restart)"
+                + " widthMoved=\(widthMoved) clean=\(needsCleanRepaint)")
+        }
+        return erase
+    }
+}
