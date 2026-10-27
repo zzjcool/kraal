@@ -404,22 +404,18 @@ public final class PaneTerminalModel {
             // program prints, so a still screen stayed frozen at the old size
             // forever. Parking it lets the grid arriving below repaint it.
             pendingFrame = frame
-            // Parking alone is not enough: this frame is only ever painted again
-            // by a *later* trigger, and after the window stops moving there are no
-            // more grid changes to trigger it. The daemon has already rendered the
-            // final grid, so nothing else will arrive. Schedule our own retry —
-            // the grid does catch up, it just does it after the last event any
-            // observer is watching for.
+            // Parking alone is not enough: after the window stops moving there are
+            // no more grid changes to trigger a repaint, and the daemon has already
+            // rendered the final grid. Retry on our own timer.
             schedulePendingRetry()
 
             // Deliberately paints **nothing**.
             //
-            // The grid is read from Ghostty's `bounds`, which SwiftUI updates in a
-            // layout pass *after* the frame that asked for it. Measured on a live
-            // session: the surface arrived at `.651`, `apply` ran at `.658` against
-            // the old grid, and the NSView only took its new size at `.668` — a
-            // 10 ms window in which every pane is briefly measured at its previous
-            // size.
+            // The grid comes from Ghostty's `bounds`, which SwiftUI updates one
+            // layout pass *after* the frame that asked for it: measured, the surface
+            // arrived at `.651`, `apply` ran at `.658` against the old grid, and the
+            // NSView took its new size at `.668`. Ten milliseconds in which every
+            // pane is measured at its previous size.
             //
             // Painting the intersection (what this used to do) put real cells in the
             // rows that agreed and left the rest showing whatever was there before:
@@ -521,7 +517,11 @@ public final class PaneTerminalModel {
         // One flush, erase inside the synchronized block — the same reasoning as
         // `apply(surface:)`. A parked frame is routinely the one that carries a new
         // grid (that is why it was parked), so this is the resize path too.
-        let painted = renderer.render(frame, clearingFirst: true)
+        // Erase only when the width moved, like `needsScreenReset`. A vertical drag
+        // is one height change per mouse move, each a `2J 3J H` plus a full rewrite
+        // (8-10 KB of ANSI): measured 51 resets inside 0.7 s of one drag.
+        let wipe = (frameGrid?.width ?? 0) != frame.width || frameGrid == nil
+        let painted = renderer.render(frame, clearingFirst: wipe)
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: 0, placements: 0)
         deliver(painted)
@@ -531,17 +531,16 @@ public final class PaneTerminalModel {
 
     /// How many times a parked frame is retried, and how far apart.
     ///
-    /// Read by the tests as the contract for how long a park may live: long
-    /// enough to outlast the launch grid burst, short enough that a pane whose
-    /// grid genuinely disagrees is not repainted into the wrong width.
+    /// The tests pin this as the contract for how long a park may live: long enough
+    /// to outlast the launch grid burst, short enough that a genuinely wrong grid is
+    /// not repainted at the wrong width.
     static let pendingRetryAttempts = 12
     static let pendingRetryIntervalMilliseconds = 80
 
     /// Whether a parked frame can be painted at the grid the terminal reports.
     ///
-    /// Split out so the rule is testable without a Ghostty surface: painting at
-    /// a different width wraps every row and pushes the overflow into
-    /// scrollback, which is worse than staying blank for one more turn.
+    /// Split out so the rule is testable without a Ghostty surface: a different
+    /// width wraps every row and pushes overflow into scrollback.
     static func gridMatches(
         frameWidth: Int, frameHeight: Int,
         gridColumns: UInt16, gridRows: UInt16
