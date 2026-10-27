@@ -446,6 +446,7 @@ public final class PaneTerminalModel {
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: surface.graphics.assets.count,
                     placements: surface.graphics.placements.count)
+        logSurfaceExtent(paneId: paneId, grid: grid, frame: frame)
         deliver(painted)
     }
 

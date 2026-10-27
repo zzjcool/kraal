@@ -410,3 +410,41 @@ extension PaneTerminalModel {
             + " graphicsDiffer=\(previous.map { $0.graphics != frame.graphics } ?? false)")
     }
 }
+
+extension PaneTerminalModel {
+    /// Compares the three sizes that have to agree for the picture to fill the pane.
+    ///
+    /// Every diagnostic so far compared the *grid* to the frame, and the grid has been
+    /// right while the pane still showed a band of background. The grid says how many
+    /// cells to paint; it says nothing about how much of the view the renderer is
+    /// allowed to cover. `CAMetalLayer.drawableSize` is that second number, and it is
+    /// written in two different places: `updateMetalLayerMetrics` (from
+    /// `setFrameSize`/`layout`) and `enforceMetalLayerScale`, which runs on every
+    /// post-render and only touches `contentsScale`.
+    ///
+    /// So a layer whose `drawableSize` is a frame behind its `bounds` renders the old
+    /// rectangle and leaves the rest showing the colour underneath — which looks
+    /// exactly like empty rows, and which no cell-level assertion can see.
+    func logSurfaceExtent(paneId: String, grid: TerminalGridMetrics?, frame: FrameData) {
+        guard let view = state.attachedPlatformView else { return }
+        let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let bounds = view.bounds.size
+        let layerSize = (view.layer as? CAMetalLayer)?.drawableSize
+        let wanted = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        // Only when they disagree: a correct pane stays quiet, and a mismatch prints
+        // the numbers that would otherwise have to be inferred.
+        guard let layerSize else {
+            kraalLog("surface extent: pane=\(paneId) no CAMetalLayer bounds=\(bounds)")
+            return
+        }
+        let short = abs(layerSize.width - wanted.width) > 1
+            || abs(layerSize.height - wanted.height) > 1
+        guard short else { return }
+        kraalLog("surface extent: pane=\(paneId)"
+            + " bounds=\(bounds.width)x\(bounds.height)pt"
+            + " drawable=\(layerSize.width)x\(layerSize.height)px"
+            + " wants=\(wanted.width)x\(wanted.height)px"
+            + " frame=\(frame.width)x\(frame.height)"
+            + " grid=\(grid.map { "\($0.columns)x\($0.rows)" } ?? "nil")")
+    }
+}
