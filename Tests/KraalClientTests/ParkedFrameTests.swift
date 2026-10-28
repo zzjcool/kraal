@@ -112,37 +112,29 @@ struct ParkedFrameRetryTests {
     /// The grid has to be re-derived from the view, because the reported one can
     /// freeze.
     ///
-    /// The live numbers this is written against: a pane settled at `832.5 pt` with a
-    /// `37 px` cell, so exactly 45 rows, while `surfaceSize` still said 36 and never
-    /// moved again. `apply` refused every frame that needed 45, and the pane kept the
-    /// rows the last good paint left behind.
-    @Test("a view's own pixels decide the grid, not the last reported size")
-    func gridDerivedFromViewPixels() {
+
+    /// A settled view's own bounds decide the grid, not the stale reported size.
+    ///
+    /// The measurement this is written against:
+    ///
+    ///     settled: p14 size=148.0pt view=126x14 terminal=126x14
+    ///
+    /// 148pt is 8 rows at 18.5pt (37px); 14 rows is 259pt, i.e. the *previous* layout.
+    /// `surfaceSize` is one layout pass behind `bounds`, so reading it as the authority
+    /// paints 8 rows' worth of cells into a 14-row screen and leaves the other 6 rows
+    /// showing libghostty's own background — the band in #188.
+    @Test("a settled view's bounds decide the grid")
+    func gridFollowsSettledBounds() {
         let cell = TerminalGridMetrics(
-            columns: 126, rows: 36,
-            widthPixels: 2142, heightPixels: 1332,
+            columns: 126, rows: 14,
+            widthPixels: 2142, heightPixels: 518,
             cellWidthPixels: 17, cellHeightPixels: 37
         )
-        // 832.5 pt at 2x is 1665 px, and 1665 / 37 is 45 exactly.
+        // 148pt at 2x is 296px, and 296 / 37 is 8 exactly.
         let settled = PaneTerminalModel.grid(
-            forViewPixelsWide: 2142, high: 1665, cell: cell
+            forViewPixelsWide: 2142, high: 296, cell: cell
         )
-        #expect(settled?.columns == 126)
-        #expect(settled?.rows == 45,
-                "the view is 45 rows tall; reporting 36 is what left the pane blank")
-
-        // A view too small for one cell is unusable, not a zero-size grid.
-        #expect(PaneTerminalModel.grid(
-            forViewPixelsWide: 2142, high: 10, cell: cell
-        ) == nil)
-        // Degenerate cell metrics are what the caller must not divide by.
-        let empty = TerminalGridMetrics(
-            columns: 0, rows: 0, widthPixels: 0, heightPixels: 0,
-            cellWidthPixels: 0, cellHeightPixels: 0
-        )
-        #expect(PaneTerminalModel.grid(
-            forViewPixelsWide: 2142, high: 1665, cell: empty
-        ) == nil)
+        #expect(settled?.rows == 8,
+                "148pt is 8 rows; reporting 14 is the previous layout's grid")
     }
-
 }

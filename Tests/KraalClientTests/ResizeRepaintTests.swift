@@ -583,30 +583,32 @@ struct ScreenResetScopeTests {
         ))
     }
 
-    /// `layoutSettled(size:)` must be driven by the size SwiftUI actually handed
-    /// the view, and must ignore the no-op case.
+    /// `viewDidSettle(size:)` records the size the view actually has.
     ///
-    /// The bug: the repaint was triggered only by `onChange(of:
-    /// state.surfaceSize)`. That field is the one this whole workaround exists
-    /// because it goes **stale** — so once it stopped moving, the repaint stopped
-    /// firing, and a pane that shrank kept its old contents under a blank band.
-    /// The trigger was gated on the very signal that fails.
-    @Test("layoutSettled only reacts to a real size change")
+    /// The bug it replaces: the repaint was driven by `GeometryReader`'s proposal, which
+    /// is one layout pass **ahead** of the view tree. Measured with the view-chain
+    /// diagnostic, every entry read `terminal == super1` while both trailed the
+    /// allocation by one step:
+    ///
+    ///     allocated=148.0  terminal=74.0
+    ///     allocated=203.5  terminal=148.0
+    ///     allocated=444.0  terminal=203.5
+    ///
+    /// So the NSView was never disobedient — the trigger was reading a rectangle the
+    /// view did not have yet, and when the drag stopped no further pass came.
+    @Test("viewDidSettle records the view's own size")
     @MainActor
-    func layoutSettledIgnoresRepeats() {
+    func viewDidSettleRecordsSize() {
         let model = PaneTerminalModel(paneId: "wB:p14") { _ in }
-        #expect(model.lastLaidOutSize == nil)
-        model.layoutSettled(size: CGSize(width: 1071, height: 777))
-        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 777))
-        // A second identical layout is not a reason to repaint.
-        model.layoutSettled(size: CGSize(width: 1071, height: 777))
-        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 777))
-        // A degenerate proposal must not become the new baseline.
-        model.layoutSettled(size: .zero)
-        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 777))
+        #expect(model.lastAllocatedSize == nil)
+        model.viewDidSettle(size: CGSize(width: 1071, height: 777))
+        #expect(model.lastAllocatedSize == CGSize(width: 1071, height: 777))
+        // A degenerate size is not the new baseline.
+        model.viewDidSettle(size: .zero)
+        #expect(model.lastAllocatedSize == CGSize(width: 1071, height: 777))
         // A real change does move it.
-        model.layoutSettled(size: CGSize(width: 1071, height: 129.5))
-        #expect(model.lastLaidOutSize == CGSize(width: 1071, height: 129.5))
+        model.viewDidSettle(size: CGSize(width: 1071, height: 129.5))
+        #expect(model.lastAllocatedSize == CGSize(width: 1071, height: 129.5))
     }
 
     /// The first grid negotiation must not run on the fallback cell estimate.
@@ -683,6 +685,56 @@ struct ScreenResetScopeTests {
         // And the screen — hence the scrollback — survives.
         #expect(!text.contains("\u{1B}[2J"), "a projection change must not erase")
         #expect(!text.contains("\u{1B}[3J"), "a projection change must not drop scrollback")
+    }
+
+    /// A rebuilt surface starts empty, so the baseline must not outlive it.
+    ///
+    /// This is the "everything went magenta" failure. Ghostty replaces its surface on
+    /// ordinary events (a reattach, a rebuild after the zero-size guard, a config
+    /// change) and the replacement has no cells. The baseline survived, so every later
+    /// frame compared equal to cells that existed nowhere and was skipped forever:
+    ///
+    ///     frame skipped: pane=wB:p16 rev=20348->20348 frame=126x44 \
+    ///                    previous=126x44 cellsDiffer=false graphicsDiffer=false
+    ///
+    /// Forcing the terminal background to magenta then showed the whole pane magenta:
+    /// the erase had already taken the previous frame and nothing put cells back.
+    @Test("a replaced surface invalidates the painted baseline")
+    func replacedSurfaceInvalidatesBaseline() {
+        let first = NSObject()
+        let second = NSObject()
+        #expect(
+            PaneTerminalModel.surfaceWasReplaced(
+                seenBefore: true, previous: first, current: second
+            ),
+            "a different surface instance must count as a replacement"
+        )
+    }
+
+    /// Recording the same surface twice is not a replacement.
+    ///
+    /// Without this, every frame would clear the baseline and repaint every row.
+    @Test("the same surface keeps the baseline")
+    func sameSurfaceKeepsBaseline() {
+        let surface = NSObject()
+        #expect(
+            !PaneTerminalModel.surfaceWasReplaced(
+                seenBefore: true, previous: surface, current: surface
+            )
+        )
+    }
+
+    /// Nothing painted yet means nothing to invalidate.
+    ///
+    /// The first frame on a fresh surface must not be treated as a replacement: it is
+    /// the ordinary first paint, already handled by the renderer's own clear.
+    @Test("an unrecorded surface is not a replacement")
+    func unrecordedSurfaceIsNotAReplacement() {
+        #expect(
+            !PaneTerminalModel.surfaceWasReplaced(
+                seenBefore: false, previous: nil, current: NSObject()
+            )
+        )
     }
 
 }

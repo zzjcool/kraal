@@ -90,6 +90,8 @@ public protocol DaemonConnection: AnyObject, Sendable {
     func stop() async
     nonisolated func abort()
     func sendResize(to size: ClientSurfaceSize) async throws
+    /// Corrects the cell size announced in the handshake; see `updateCellSize` below.
+    func updateCellSize(width: UInt32, height: UInt32) async
     func sendPaneInput(_ paneId: String, events: [ClientPaneInputEvent]) async throws
     func sendPopupInput(_ terminalId: String, events: [ClientPaneInputEvent]) async throws
     func request(_ method: String, params: [String: Any]) async throws -> Data
@@ -101,7 +103,8 @@ public actor EndpointConnection: DaemonConnection {
     /// one in the hello. Tracked so a resize that matches it is not re-sent: the
     /// daemon would re-render a whole surface for nothing.
     public private(set) var surfaceSize: ClientSurfaceSize
-    private let cellSize: (width: UInt32, height: UInt32)
+    /// The cell size the daemon divides pixel rects by, plus whether it outran the hello.
+    private var cell = CellSizeState()
     private let surfaceActive: Bool
     /// How long the handshake may take, including any single blocked read.
     ///
@@ -156,7 +159,7 @@ public actor EndpointConnection: DaemonConnection {
     ) {
         self.target = target
         self.surfaceSize = surfaceSize
-        self.cellSize = cellSize
+        cell = CellSizeState(width: cellSize.width, height: cellSize.height)
         self.surfaceActive = surfaceActive
         self.handshakeTimeout = handshakeTimeout
         self.eventHandler = eventHandler
@@ -191,8 +194,8 @@ public actor EndpointConnection: DaemonConnection {
         let hello = EndpointClientHello(
             cols: surfaceSize.cols,
             rows: surfaceSize.rows,
-            cellWidthPx: cellSize.width,
-            cellHeightPx: cellSize.height,
+            cellWidthPx: cell.width,
+            cellHeightPx: cell.height,
             surfaceActive: surfaceActive
         )
         let helloJSON = String(bytes: try JSONEncoder().encode(hello), encoding: .utf8) ?? ""
@@ -314,16 +317,18 @@ public actor EndpointConnection: DaemonConnection {
     /// lever was a new handshake, which is why a window drag used to tear the
     /// surface down on every step and could never settle.
     public func sendResize(to size: ClientSurfaceSize) throws {
-        guard size != surfaceSize else { return }
+        guard size != surfaceSize || cell.stale else { return }
         surfaceSize = size
+        cell.stale = false
         try send(.clientShellResize(
-            cellWidthPx: cellSize.width,
-            cellHeightPx: cellSize.height,
+            cellWidthPx: cell.width,
+            cellHeightPx: cell.height,
             surfaceSize: size,
             pixelMouse: false
         ))
     }
 
+    /// Exposes the resend flag so the early-return path is testable without a socket.
     /// Issues an endpoint API call and returns the reassembled response body.
     ///
     /// Responses may arrive in several chunks; they are accumulated here and
@@ -787,5 +792,45 @@ extension EndpointConnection {
         }
         self.stream = stream
         return true
+    }
+}
+
+/// The cell size a connection tells the daemon, and whether the last correction still
+/// owes a send.
+///
+/// Extracted from `EndpointConnection` so the correction rule lives in one place: the
+/// daemon divides every pane's pixel rect by this value, the handshake can only carry a
+/// default, and `sendResize` early-returns on an unchanged grid — which is exactly the
+/// case a correction arrives in.
+struct CellSizeState: Equatable, Sendable {
+    var width: UInt32 = 10
+    var height: UInt32 = 20
+    /// A corrected value that has not reached the wire yet.
+    var stale = false
+
+    /// Records a measured size. False when it is not a change worth sending.
+    mutating func correct(width newWidth: UInt32, height newHeight: UInt32) -> Bool {
+        guard newWidth > 0, newHeight > 0 else { return false }
+        guard newWidth != width || newHeight != height else { return false }
+        width = newWidth
+        height = newHeight
+        stale = true
+        return true
+    }
+}
+
+extension EndpointConnection {
+    /// Whether a corrected cell size is still waiting to reach the wire.
+    ///
+    /// In an extension, not the actor body: the body is at its lint budget, and this is
+    /// the one piece of the cell-size logic that is only useful to the tests.
+    var needsCellSizeResendForTesting: Bool { cell.stale }
+
+    /// Reports the measured cell size in device pixels, marking it for resend.
+    ///
+    /// The daemon divides every pane's pixel rect by it, and the hello could only carry
+    /// the `(10, 20)` default. See `CellSizeState`.
+    public func updateCellSize(width: UInt32, height: UInt32) {
+        cell.correct(width: width, height: height)
     }
 }

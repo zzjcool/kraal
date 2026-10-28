@@ -1554,3 +1554,112 @@ final class D: NSObject, NSApplicationDelegate {
 
 **未验证**：真实拖动的丝滑程度只能在用户的机器上看。VM 无法给出「流畅」的判断，
 只能给出计数。
+### 8.17 拖动后 pane 底部的空白：写入先于引擎采用新网格（2026-10-28 实测，已修）
+
+§8.14 到 §8.16 之间修了二十多处，每一处都是「读代码推出一个原因，改，用户说还有」。
+原因是**没有一个能复现的环境**：`swift test` 里所有测试用 `gridOverride` 替换了
+Ghostty，屏幕错了也能全绿；VM 的最终几何总是对的。这一节换了方法——**在进程内跑
+真引擎**（`Tests/KraalClientTests/LiveGhosttyDragTests.swift`：真 SwiftUI、真
+`GhosttyPaneView`、真 `PaneSurfaceHostView`、真 libghostty），读引擎自己的屏幕。
+
+#### 复现
+
+字母轮转的内容（`alphabet[(row + generation) % 26]`），使过期、错位、被钳的屏幕
+不会碰巧正确。**对照组（不拖动）必须绿**——这个 rig 第一版什么都没画（嵌套 run loop
+让主队列的 `surfaceSize` 发布块跑不起来），所有拖动「失败」，失败毫无意义。
+
+修复前，同一批用例：
+
+```text
+grow 20 -> 24   want BCDEFGHIJKLMNOPQRSTUVWXY  got BCDEFGHIJKLMNOPQRSTY....
+grow 20 -> 27   want BCDEFGHIJKLMNOPQRSTUVWXYZAB  got BCDEFGHIJKLMNOPQRSTB.......
+grow 20 -> 33   want …                           got BCDEFGHIJKLMNOPQRSTH.............
+control（不拖动）  want ABCDEFGHIJKLMNOPQRST  got ACEGIKMOPQRST.......
+```
+
+**签名**：前 K 行对，第 K+1 行是帧**最后一行**的字母，其后全空。这与用户的症状一致：
+放大的那个 pane 底部空白；慢拖空行少（2–3），快拖空行多（实测到 7）。
+
+#### 机制（有时间线）
+
+`TerminalDebugLog` 的时间线，一次失败的拖动（最终 38 行）：
+
+```text
+引擎 receive resize rows=33   @7979.7 ms
+引擎 receive resize rows=34   @8013.4
+引擎 receive resize rows=38   @8066.4
+38 行整帧 (bytes≈4500) 写入  @8055.1 / 8056.6 / 8058.5    ← 比引擎采用 38 行早约 8 ms
+```
+
+Ghostty 的 IO 线程把 resize 合并在 25 ms 定时器之后才真正作用于屏幕
+（`termio/Thread.zig`，`Coalesce.min_ms = 25`），而 `ghostty_surface_size`、`surfaceSize`、
+由 `bounds` 推出的网格**都在更早**就变了。写入立刻作用于旧屏幕：
+
+1. 超出旧屏高度的行被 CUP 钳到最后一行（后写覆盖先写）；
+2. 引擎随后采用更大的网格，底部露出空行；放大时若有 scrollback，旧行还会被拉回顶部，
+   已画内容整体下移；
+3. 渲染器的基线认为这些行已在屏上，之后相同的帧一行也不再写。
+
+`ghostty_surface_size`/`readViewportText` 的行数始终正确（直挂 12/12 随机游走行数全对）——
+**错的是屏上内容的位置，不是行数**。此前所有「行数从哪来」的改动（`resolvedGrid`、
+`viewRows`、`surfaceSize`）都在追一个并不错的数。
+
+#### 修法
+
+引擎有一个**在屏幕真正 resize 之后**才发的信号：DEC 模式 2048（in-band size report）。
+`Termio.resize` 在同一把锁里先 `terminal.resize` 再 `sizeReportLocked`，所以收到报告时
+屏幕已经是新尺寸。`InMemoryTerminalSession` 的 `resize:` 回调**不是**这个信号——它在
+`terminal.resize` 之前触发（`HostManaged.resize` → `notifyResize`），此前把它接上的
+尝试因此没有任何效果。
+
+- 每个 surface 首次画之前发 `CSI ? 2048 h`（`requestEngineScreenIfNeeded`）
+- 引擎写回的 `ESC[48;rows;cols;hPx;wPx t` 在 write 回调里被识别并**截下**，不转发给
+  daemon（否则会被当作键盘输入敲进 shell）。整块都是报告才算报告，粘贴内容里碰巧
+  含这串字节的不动
+- 报告经 `EngineReportRelay` 回到主线程，**成批、不合并**（34→38→34 这种往返也要
+  看到）；网格变了就把整帧重写一遍（`engineScreenMoved` → `needsRepaint` 的
+  `viewSizeChanged` + 渲染器 `invalidateBaseline`）
+
+实测：`engineAnnouncesItsRealScreen` 对 5 组 (行,列) 全部与引擎真实屏幕一致，且 daemon
+一侧没有收到 `[48;`。
+
+#### A/B（用 rig 裁判）
+
+| 版本 | control | grow | fast ×6 | slow ×4 | quick-daemon ×6 |
+| --- | --- | --- | --- | --- | --- |
+| 修复前 | ✘ | ✘ | ✘ | ✘ | ✘ |
+| 只请求报告、不触发重写 | ✘ | ✘ | ✘ | ✘ | ✘ |
+| **完整** | ✔ | ✔ | ✔ | ✔ | ✔ |
+
+完整版本连跑多轮全绿（9 条，约 65 s）。11 条单元测试（`EngineScreenReportTests`）另外
+对解析、变化检测、重写决策各注入了缺陷，六处都变红。
+
+#### 走过、证明无效的路（别再走）
+
+- **按「引擎已采用的网格」排版**（`paintGrid`）：做了，A/B 不红，回退。公告本身与写入
+  竞争，预测它的改动无法消除竞争。留下的只有「公告到了就整帧重写」。
+- **`enforceLayerFrame`**：真引擎下对 540 个采样（快速 resize）逐个比较各层 frame 与
+  视图 bounds，**零处不一致**；禁用后依然零。不是这个。`PaneSurfaceHostView` 里的那份已删，
+  `enforceEngineLayerFrame`（`viewDidSettle` 里）保留作为「用户机器是否和测试 rig 不同」的探测——
+  真实日志里 `layer frame:` 从未出现（扫了 `~/Library/Logs` 下当时全部 61 份，都是本次修复之前的构建写的），可以删。
+- **`surface replaced`**：同样那 61 份日志里零次。`ObjectIdentifier` 改成对象身份比较，
+  但这只是防御，没有证据它曾发生。
+
+#### 代价
+
+快拖每次约多 ~20% 的写入（3 次拖动：259 → 310 次 paint；平均 68.5 KB → 86.1 KB）。每次
+引擎网格变化多一次整帧，是这个方案的固有成本，没有优化过。
+
+#### 未验证 / 局限
+
+- **没有在用户的真实窗口里验证**。rig 是进程内的，窗口是不可见的，daemon 用固定字母帧
+  代替。证据强度：真引擎 + 真 SwiftUI + 真视图链路的 A/B 红→绿，不是真实使用。
+- **日志污染**：跑 `swift test` 不带 `KRAAL_LOG=0`，测试里的模型会经 `kraalLog` 往 `~/Library/Logs/Kraal.log` 追加（本节写作时就被自己污染过一次：里面出现了 `engine screen:` 行，但那是测试写的）。App 每次启动会删掉该文件重来，所以让用户贴日志前先**重启 App 再复现**。
+- 用户的症状里「页面空的不止一行」「往下拖和往上拖各一个 pane」与机制吻合，但没有
+  新的用户日志可以对照。需要用户贴 `grep "engine screen:" ~/Library/Logs/Kraal*.log`。
+- VM 里 `split-right` / `drag-divider` / `drag-divider-vertical` / `scroll` 通过，日志里能看到
+  `engine screen:` 行；这几条**本来就不会因这个缺陷变红**（见 §8.14 对 `drag-divider-vertical`
+  空洞通过的记录），只说明没有回归。
+- 模式 2048 只被 Ghostty 一家实现。换引擎需要换这个信号。
+- `LiveGhosttyDragTests` 要窗口服务器：SSH 或裸 CI 里 `CGSessionCopyCurrentDictionary()`
+  为 nil，自动跳过；`KRAAL_SKIP_LIVE=1` 手动跳过。

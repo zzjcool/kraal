@@ -144,9 +144,18 @@ public enum SurfaceGeometry {
         previousGrid: (width: Int, height: Int)?,
         currentGrid: (width: Int, height: Int),
         cellsDiffer: @autoclosure () -> Bool = false,
-        graphicsDiffer: @autoclosure () -> Bool = false
+        graphicsDiffer: @autoclosure () -> Bool = false,
+        viewSizeChanged: Bool = false
     ) -> Bool {
         if contentRevisionChanged { return true }
+        // The pane's own size, which none of the reasons below can express. A pane that
+        // grows keeps its frame — same projection, revision, cells and grid — because
+        // the daemon renders at the grid it was last told about and that has not caught
+        // up. Every other check says "unchanged", the frame is skipped, and the rows the
+        // view just gained are never written: they keep libghostty's background. That is
+        // the band, and its width is how many rows were added, i.e. how far the divider
+        // moved — which is why a fast drag leaves a wider one.
+        if viewSizeChanged { return true }
         guard let previousGrid else { return true }
         if previousGrid.width != currentGrid.width
             || previousGrid.height != currentGrid.height { return true }

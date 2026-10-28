@@ -39,6 +39,7 @@ final class DaemonConnectionRecorder: DaemonConnection, @unchecked Sendable {
     /// Requests the store made, in order.
     private(set) var requests: [(method: String, params: [String: Any])] = []
     /// Every resize the store asked for, in order.
+    private(set) var cellSizes: [(width: UInt32, height: UInt32)] = []
     private(set) var resizes: [ClientSurfaceSize] = []
     /// Pane input batches, in order.
     private(set) var paneInputs: [(paneId: String, events: [ClientPaneInputEvent])] = []
@@ -65,6 +66,12 @@ final class DaemonConnectionRecorder: DaemonConnection, @unchecked Sendable {
 
     func sendResize(to size: ClientSurfaceSize) async throws {
         resizes.append(size)
+    }
+
+    /// Cell-size corrections, in order. The daemon divides pane pixel rects by this, so a
+    /// connection that never hears the measured size keeps using the handshake's guess.
+    func updateCellSize(width: UInt32, height: UInt32) async {
+        cellSizes.append((width, height))
     }
 
     func sendPaneInput(_ paneId: String, events: [ClientPaneInputEvent]) async throws {

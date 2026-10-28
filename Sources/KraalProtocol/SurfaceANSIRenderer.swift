@@ -26,6 +26,8 @@ import Foundation
 public struct SurfaceANSIRenderer {
     /// Cells from the previous frame, for diffing. Empty until the first render.
     private var previous: FrameData?
+    /// Rows written by the last `render`, for the caller's log line.
+    public private(set) var lastWroteRows = 0
     /// Where the cursor was last *shown*.
     ///
     /// A frame with no cursor, or with a hidden one, still has to put the host
@@ -109,9 +111,17 @@ public struct SurfaceANSIRenderer {
     public mutating func render(
         _ frame: FrameData,
         clearingFirst: Bool,
-        invalidateBaseline: Bool
+        invalidateBaseline: Bool,
+        viewRows: Int? = nil
     ) -> Data {
-        var output = Data()        // Three separate questions, deliberately kept separate. Collapsing them
+        // The pane's own height, when the caller knows it. See `rowsBelowFrame`.
+        let rowsBelowFrame = (viewRows ?? 0) > Int(frame.height)
+        var output = Data()
+        // Rows this call actually wrote, for the `paint:` line. A count of row writes is
+        // the only thing that separates "nothing was drawn" from "drawn where it cannot
+        // be seen", and the two look identical in every other number in that line.
+        lastWroteRows = 0
+        // Three separate questions, deliberately kept separate. Collapsing them
         // into one flag is what made a resize clear the scrollback.
         //
         //   repaintAll — is the diff trustworthy? A different grid size means no
@@ -165,6 +175,7 @@ public struct SurfaceANSIRenderer {
         for row in rows {
             appendRow(row, frame: frame, stream: &stream, output: &output)
         }
+        lastWroteRows = rows.count
 
         // Rows the previous frame occupied but this one does not.
         //
@@ -180,6 +191,21 @@ public struct SurfaceANSIRenderer {
         // would just be erased content again — it has to be the last word on those
         // rows.
         if let previous, previous.width == frame.width, previous.height > frame.height {
+            output.appendUTF8("\u{1B}[\(Int(frame.height) + 1);1H\u{1B}[0J")
+        } else if rowsBelowFrame {
+            // The view is taller than the frame, so the rows past `frame.height` were
+            // never written by this renderer at all — they hold whatever the terminal
+            // had there before, which for a fresh surface is libghostty's own theme
+            // background rather than the pane's.
+            //
+            // Only comparing `previous.height > frame.height` misses it: when the
+            // daemon keeps sending 26 rows and the view stays 33, `previous` and
+            // `frame` agree forever and the clear never goes out. Measured in #188:
+            // 7 rows x 37px = 259px of `#1E1E1E` under a pane whose own cells were
+            // `#0E1014` — the band.
+            //
+            // `0J` erases from the cursor to the end of the screen and touches no
+            // scrollback, so rung once per frame that needs it is cheap and safe.
             output.appendUTF8("\u{1B}[\(Int(frame.height) + 1);1H\u{1B}[0J")
         }
 

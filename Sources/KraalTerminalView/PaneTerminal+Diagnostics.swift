@@ -200,6 +200,17 @@ extension PaneTerminalModel {
         if let override = gridOverride { return override }
         guard let reported = state.surfaceSize else { return nil }
         guard let view = state.attachedPlatformView else { return reported }
+        // `surfaceSize` is one layout pass behind `bounds`: measured
+        //
+        //     settled: p14 size=148.0pt view=126x14 terminal=126x14
+        //
+        // where 148pt is 8 rows at 18.5pt and 14 rows is 259pt — the *previous* layout.
+        // Reading it as the authority means painting 8 rows' worth of cells into a
+        // 14-row screen, leaving 6 rows of libghostty's own background underneath.
+        //
+        // The division below is the same one Ghostty performs (`size.zig` floors
+        // `viewPixels / cellPixels`), so it agrees with the terminal as soon as the
+        // view has its settled bounds — no round trip, no stale field.
         let scale = view.window?.backingScaleFactor
             ?? NSScreen.main?.backingScaleFactor ?? 2
         let pixelsWide = Int((view.bounds.width * scale).rounded(.down))
@@ -209,20 +220,7 @@ extension PaneTerminalModel {
         else { return reported }
         guard let derived = Self.grid(
             forViewPixelsWide: pixelsWide, high: pixelsHigh, cell: reported
-        ), derived.columns != reported.columns || derived.rows != reported.rows
-        else { return reported }
-        // Worth a line: this is the case where the reported grid has gone stale, and
-        // it is the only evidence that the workaround was needed at all. Throttled by
-        // the fact that it can only fire on a change of the derived value.
-        // Once per distinct correction, not once per call: `resolvedGrid` is read on
-        // every frame, and a stale grid during a drag would otherwise re-log at mouse
-        // speed — the same mistake the `pane view:` line made.
-        // Logged only when the corrected size differs from what was on screen, which
-        // is a change the pane cannot otherwise explain from the numbers it prints.
-        if frameGrid.map({ Int($0.height) != Int(derived.rows) }) ?? true {
-            kraalLog("grid from view: pane=\(paneId) reported=\(reported.columns)x\(reported.rows)"
-                + " view=\(derived.columns)x\(derived.rows) px=\(pixelsWide)x\(pixelsHigh)")
-        }
+        ) else { return reported }
         return derived
     }
 
@@ -284,60 +282,6 @@ extension PaneTerminalModel {
         guard let previous, Self.gridMoved(from: previous, to: frame) else { return }
         kraalLog("paint grid: pane=\(paneId) was=\(previous.width)x\(previous.height)"
             + " now=\(frame.width)x\(frame.height)")
-    }
-}
-
-extension PaneTerminalModel {
-    /// Repaints when SwiftUI has handed the terminal a new size.
-    ///
-    /// The repaint used to hang off `onChange(of: state.surfaceSize)` — the field
-    /// this workaround exists because it goes **stale**. Stale means no new value,
-    /// no `onChange`, no repaint: a pane that shrank stayed frozen at its old
-    /// contents and the rows it stopped covering showed as a blank band. Gating the
-    /// cure on the symptom is why three attempts looked right in the logs and
-    /// changed nothing on screen.
-    ///
-    /// A view's frame drives Ghostty's grid on its own path (`setFrameSize` →
-    /// `fitToSize`), independently of what `surface.size()` reports back, so this
-    /// size cannot go stale for this purpose.
-    ///
-    /// Cheap when nothing moved: only fires on an actual size change.
-    func layoutSettled(size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        // The guard used to be `size != lastLaidOutSize` alone, which is why a pane whose
-        // view never took its allocation stayed wrong for good: `proxy.size` reached its
-        // final value, so no later layout pass re-entered this function, and the view
-        // kept the previous pane's rectangle. Measured on a settled drag, both panes one
-        // row out in opposite directions, totals conserved:
-        //
-        //     p16 allocated=592.0pt view=573.5pt gap=+18.5pt
-        //     p14 allocated=314.5pt view=333.0pt gap=-18.5pt
-        //
-        // The stale view is inside the pane, so the band it leaves is drawn by Ghostty,
-        // not by the ZStack — which is why colouring the ZStack magenta changed nothing.
-        let viewSize = state.attachedPlatformView?.bounds.size
-        let viewOff = viewSize.map {
-            abs($0.height - size.height) > 0.5 || abs($0.width - size.width) > 0.5
-        } ?? false
-        guard size != lastLaidOutSize || viewOff else { return }
-        lastLaidOutSize = size
-        if let view = state.attachedPlatformView {
-            enforceEngineLayerFrame(view: view)
-        }
-        // Report the cell size on **every** settled layout, not just from `apply`.
-        //
-        // `reportCellMetrics` ran inside `apply` and read `state.surfaceSize`, which
-        // stops being republished once the grid holds still. So the measurement the
-        // whole surface negotiation divides by could go unrefreshed, and the client
-        // kept using `fallbackCellPoints` (7.8x17.0 pt).
-        //
-        // Measured on one session: the only correction in the entire log was
-        //     [19:25:59.597] cell metrics: (15.6, 34.0) -> (17.0, 37.0)
-        // arriving *after* the panes had been asked for 120x34 cells at a size where
-        // Ghostty fits 110x31 — 8% on both axes, i.e. ten columns the view could not
-        // show and three rows it did not have.
-        reportCellMetrics()
-        reapplyAfterGridViewMoved()
     }
 }
 
@@ -548,7 +492,14 @@ func logAllocationGap(
 /// of a drag, and no cell- or grid-level assertion can see it because the cells are
 /// all correct.
 ///
-/// Called from `layoutSettled`, i.e. once per settled layout, not per frame.
+/// **Measured to be a no-op.** A throwaway probe against a real engine disabled this and
+/// compared every layer's frame with the view's bounds across 540 samples of fast resizes:
+/// none ever disagreed, so this is *not* what the band was (see `EngineScreenReport`). It
+/// stays because it is cheap, the library names the obligation, and the `layer frame:` line
+/// it writes when it does correct something is the one way to learn whether a user's machine
+/// differs from the test rig. If that line never appears in real logs, delete this.
+///
+/// Called from `viewDidSettle`, once per settled layout, not per frame.
 func enforceEngineLayerFrame(view: NSView) {
     let bounds = view.bounds
     guard bounds.width > 0, bounds.height > 0 else { return }
@@ -566,5 +517,124 @@ func enforceEngineLayerFrame(view: NSView) {
         CATransaction.setDisableActions(true)
         layer.frame = bounds
         CATransaction.commit()
+    }
+}
+
+extension PaneTerminalModel {
+    /// The view's bounds settled. This is the pane's real size.
+    ///
+    /// Driven by `PaneSurfaceHostView.layout()`, after AppKit applied the new bounds,
+    /// so this is the size the terminal is about to render into — not what SwiftUI
+    /// intends to give it, which is one layout pass ahead and was the reason every
+    /// earlier measurement looked right while the screen was wrong.
+    ///
+    /// `super.layout()` has already run `fitToSize()`, so the grid read afterwards
+    /// matches the view; `reapplyAfterGridViewMoved` then paints at it.
+    func viewDidSettle(size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        didViewSizeChange = lastAllocatedSize.map { $0 != size } ?? true
+        lastAllocatedSize = size
+        logSettledSize(size)
+        reportCellMetrics()
+        if let view = state.attachedPlatformView {
+            enforceEngineLayerFrame(view: view)
+        }
+        logPaneShortfall(size: size)
+        reapplyAfterGridViewMoved()
+    }
+
+    /// Compares the rows the view can hold with the rows the daemon gave this pane.
+    ///
+    /// A positive shortfall means the daemon's `innerRect` is shorter than the view, so
+    /// the bottom of the pane has no cells belonging to it: whatever colour happens to
+    /// be there wins, and for an unwritten terminal surface that is libghostty's own
+    /// background — the band. Printing the number is what turns "there is a band" into
+    /// "the daemon gave 8 rows for a 14-row view", or rules it out.
+    func logPaneShortfall(size: CGSize) {
+        guard let surface = lastSurface,
+              let geometry = surface.panes.first(where: { $0.paneId == paneId }),
+              let cell = cellMetrics, cell.height > 0
+        else { return }
+        let scale = state.attachedPlatformView?.window?.backingScaleFactor ?? 2
+        let rowsFit = Int(((size.height * scale) / cell.height).rounded(.down))
+        let given = Int(geometry.innerRect.height)
+        guard rowsFit != given else { return }
+        let scaleLabel = "viewRows=\(rowsFit) innerRows=\(given)"
+            + " diff=\(rowsFit - given)"
+            + " tab=\(surface.frame.width)x\(surface.frame.height)"
+        kraalLog("pane shortfall: pane=\(paneId) \(scaleLabel)")
+    }
+
+    /// Records one settled size, with the grid the pane will paint at.
+    ///
+    /// `view=` and `terminal=` are equal by construction now; if they ever differ, one
+    /// of them is being computed somewhere else again.
+    func logSettledSize(_ size: CGSize) {
+        let terminal = state.surfaceSize
+        // The view's rectangle in the window, next to its own size. "Drawn where it
+        // cannot be seen" and "not drawn" produce identical size numbers; only the
+        // origin distinguishes them, and a pane shifted by a scroll offset paints its
+        // rows somewhere the user is not looking.
+        let view = state.attachedPlatformView
+        let origin = view.flatMap { pane -> CGPoint? in
+            guard let window = pane.window else { return nil }
+            _ = window
+            return pane.convert(pane.bounds, to: nil).origin
+        }
+        kraalLog("settled: pane=\(paneId) origin=\(origin.map { "\(Int($0.x)),\(Int($0.y))" } ?? "nil")"
+            + " size=\(size.width)x\(size.height)pt"
+            + " view=\(resolvedGrid.map { "\($0.columns)x\($0.rows)" } ?? "nil")"
+            + " terminal=\(terminal.map { "\($0.columns)x\($0.rows)" } ?? "nil")")
+    }
+}
+
+extension PaneTerminalModel {
+    /// Printed only when the cells alone decided a repaint — the revision and the grid both
+    /// said "nothing changed" and the frame's contents said otherwise. That is exactly a
+    /// scroll, and it is what the GUI case asserts on. Kept this narrow on purpose: logging
+    /// every repaint would make "the scroll was painted" unfalsifiable.
+    func logScrollRepaint(
+        geometry: PaneSurfacePane, previous: FrameData?, frame: FrameData,
+        projectionChanged: Bool
+    ) {
+        guard !projectionChanged, geometry.contentRevision == lastRevision, let previous,
+              previous.width == frame.width, previous.height == frame.height,
+              previous.buffer != frame.buffer else { return }
+        kraalLog("scroll repaint: pane=\(paneId) rev=\(geometry.contentRevision) "
+            + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
+            + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
+    }
+}
+
+extension PaneTerminalModel {
+    /// The pane's height in rows, for `SurfaceANSIRenderer.rowsBelowFrame`.
+    ///
+    /// Where `0J` would actually take effect, so the larger of the two figures that can each
+    /// be wrong in opposite directions: `surfaceSize` can freeze (45 rows settled, 36
+    /// reported, never updated — see `resolvedGrid`), and `resolvedGrid` is derived from
+    /// `bounds` and so runs ahead of the engine. Chosen by argument, not measurement: the
+    /// test that pins it stays green if the `max` becomes a `min`.
+    var viewRows: Int? {
+        let reported = state.surfaceSize.map { Int($0.rows) }
+        let derived = resolvedGrid.map { Int($0.rows) }
+        switch (reported, derived) {
+        case let (reported?, derived?): return max(reported, derived)
+        case let (reported?, nil): return reported
+        case let (nil, derived?): return derived
+        case (nil, nil): return nil
+        }
+    }
+
+    /// Whether the surface the baseline describes has been replaced.
+    ///
+    /// Compared by identity of the object, not of its address: a freed surface's address is
+    /// the likeliest one for its replacement, which made `ObjectIdentifier` call a new
+    /// surface "the same one". Nothing seen yet means there is no baseline to invalidate.
+    nonisolated static func surfaceWasReplaced(
+        seenBefore: Bool,
+        previous: AnyObject?,
+        current: AnyObject
+    ) -> Bool {
+        seenBefore && previous !== current
     }
 }

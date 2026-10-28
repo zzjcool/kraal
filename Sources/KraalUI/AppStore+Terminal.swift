@@ -42,6 +42,17 @@ extension AppStore {
             + (hasMeasuredCellSize ? "" : " (first measurement)"))
         terminalCellSize = size
         hasMeasuredCellSize = true
+        // The daemon divides pane pixel rects by the cell size, and the handshake could
+        // only carry a guess: connections are built before any surface exists, so they
+        // announced the `(10, 20)` default while the real font measures `17x37`. Nothing
+        // corrected it afterwards, because `EndpointConnection.cellSize` was a `let`.
+        // `size` is already in device pixels — `reportCellMetrics` passes
+        // `surfaceSize.cellWidthPixels` — so it goes on the wire unchanged.
+        let pixels = (width: UInt32(size.width.rounded()), height: UInt32(size.height.rounded()))
+        for endpoint in endpoints {
+            guard let connection = endpoint.connection else { continue }
+            Task { await connection.updateCellSize(width: pixels.width, height: pixels.height) }
+        }
         needsGeometryReeval = true
     }
 
