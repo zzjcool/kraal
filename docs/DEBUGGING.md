@@ -430,3 +430,32 @@ Ghostty 用 Metal 绘制，AX 树几乎是空的，所以**不要指望用 Acces
 | 关掉多行续接 | ✘ `a multi-line array binding is not dropped` |
 | 括号计数忽略引号 | ✘ `a bracket inside a quoted binding is not a bracket` |
 | `scalar` 重新拒绝内部引号 | ✘ `an escaped quote inside a binding is resolved, not rejected` |
+
+---
+
+## 13. 线协议里的 `0` 是「默认」，不是调色板第 0 项
+
+自绘 path 的第一版把每个 cell 的颜色直接按 `TerminalColor.named(n)` 查表，于是
+面板渲染出来是**一整块黑**——只有光标可见。不是没画，是黑字画在黑底上。
+
+根因在编号约定，两边都自洽，只是不是同一套：
+
+| 写法 | 含义 |
+| --- | --- |
+| `named(0)` | **默认前景/默认背景**（`SurfaceANSIRenderer` 发 `39`/`49`） |
+| `named(1)` | 黑（SGR `30`） |
+| `named(8)` | 白（SGR `37`） |
+| `named(9)` | 亮黑（SGR `90`） |
+| `named(16)` | 亮白（SGR `97`） |
+
+也就是说它是 **1-based 的 SGR 编号**，而且 `0` 是"不带颜色"的哨兵。把 `0` 当成
+表项 0 会得到"终端普通文字 = 黑"，而终端的默认底色恰恰也是黑的。
+
+> 判据不是"颜色看起来对不对"，而是**这张表以谁为准**：`SurfaceANSIRenderer` 的
+> `colorParameter` 是本仓库唯一把 raw 值翻译成 SGR 的地方，它写了
+> `guard index != 0, index <= 16` + `30 + (index - 1)`，那就没什么可争的。
+
+同一轮还踩了配套的一个坑：**证据没出现 ≠ 功能没生效**。验证开关时加了一行
+`launch: cell painter=…`，位置在 `KraalLog.shared.rotate()` 之前，于是每次都被
+截断掉——查日志得到 0 条，读起来和"开关没传进来"一模一样，白查了半小时。
+日志的**第一条**是最容易被 rotate 吃掉的那条，需要留证据的行要写在 rotate 之后。
