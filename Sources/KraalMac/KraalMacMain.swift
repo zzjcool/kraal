@@ -95,7 +95,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         kraalLog("launch: session=\(KraalLog.shared.sessionName ?? "(none)") "
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
-        kraalLog("launch: cell painter=\(CellPainterPolicy.enabled)")
+        kraalLog("launch: cell painter=\(CellPainterPolicy.mode.rawValue)")
 
         let theme = makeThemeStore()
         let pool = makeTerminalPool(theme: theme)
@@ -241,24 +241,22 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             geometry: geometry,
             onFocus: { store.focus(paneId: paneId) }
         )
-        guard CellPainterPolicy.enabled else {
+        guard CellPainterPolicy.mode != .off else {
             return AnyView(engine)
         }
         // The engine keeps running underneath — same writes, same input, same scrollback —
-        // and the cells are drawn on top. This is the smallest arrangement in which "who
-        // paints the pane" is the only difference between two runs.
-        kraalLog("cell painter: pane=\(paneId) inner=\(geometry.innerRect.width)"
-            + "x\(geometry.innerRect.height) frame=\(surface.frame.width)x\(surface.frame.height)")
+        // and `PaneCellOverlay` decides when to draw the cells on top of it. In the shipped
+        // mode that is exactly while a divider is being dragged (see `CellPainterPolicy`).
         return AnyView(
             ZStack(alignment: .topLeading) {
                 engine
-                PaneCellCanvas(
+                PaneCellOverlay(
+                    store: store,
                     frame: surface.frame,
                     inner: geometry.innerRect,
                     cellSize: SurfaceGeometry.points(for: store.terminalCellSize),
                     palette: AnsiPalette.from(palette)
                 )
-                .allowsHitTesting(false)
             }
         )
     }

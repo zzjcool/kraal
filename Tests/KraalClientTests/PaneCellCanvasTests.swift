@@ -341,14 +341,61 @@ struct PaneCellCanvasTests {
         #expect(ink.max() ?? 0 > 120, "the cell after the wide glyph is empty")
     }
 
-    @Test("the renderer is off unless asked, and one variable turns it on")
-    func policyIsOffByDefault() {
+    /// The wiring, end to end: the overlay must be invisible while nothing is dragging and
+    /// must show this pane's own cells the moment a divider drag starts. Drawing it is
+    /// `PaneCellCanvas`'s job; this is about when it is in the picture at all.
+    @Test("the overlay is drawn only while a divider is being dragged")
+    @MainActor
+    func overlayFollowsTheDrag() throws {
+        CellPainterPolicy.apply(["KRAAL_CELL_PAINTER": "drag"])
+        defer { CellPainterPolicy.apply([:]) }
+        let store = AppStore()
+        let frame = Self.frame(columns: 2, rows: 1) { cells in
+            for index in 0 ..< 2 {
+                cells[index] = CellData(
+                    symbol: " ", foreground: Self.red, background: Self.red,
+                    modifier: 0, skip: false, hyperlink: nil
+                )
+            }
+        }
+        func redPixels(dragging: Bool) throws -> Int {
+            store.isDraggingSplit = dragging
+            let view = PaneCellOverlay(
+                store: store, frame: frame,
+                inner: SurfaceRect(originX: 0, originY: 0, width: 2, height: 1),
+                cellSize: Self.cell, palette: Self.palette()
+            )
+            .frame(width: 2 * Self.cell.width, height: Self.cell.height)
+            let image = try Self.pixels(view)
+            // The test canvas is filled magenta so a transparent area is distinguishable
+            // from a black one; count only the cells' own red, not that backdrop.
+            return (0 ..< image.width).flatMap { column in
+                (0 ..< image.height).map { image.at(column: column, row: $0) }
+            }.filter { $0.red > 150 && $0.green < 90 && $0.blue < 90 }.count
+        }
+        #expect(try redPixels(dragging: false) == 0, "the engine owns the picture when idle")
+        #expect(try redPixels(dragging: true) > 0, "the drag is drawn by us")
+    }
+
+    @Test("the renderer takes over for a drag, and one variable forces it")
+    func painterPolicy() {
         CellPainterPolicy.apply([:])
-        #expect(!CellPainterPolicy.enabled)
+        #expect(CellPainterPolicy.mode == .drag)
+        #expect(!CellPainterPolicy.shouldPaint(dragging: false))
+        #expect(CellPainterPolicy.shouldPaint(dragging: true))
+
         CellPainterPolicy.apply(["KRAAL_CELL_PAINTER": "1"])
-        #expect(CellPainterPolicy.enabled)
+        #expect(CellPainterPolicy.mode == .always)
+        #expect(CellPainterPolicy.shouldPaint(dragging: false))
+
         CellPainterPolicy.apply(["KRAAL_CELL_PAINTER": "0"])
-        #expect(!CellPainterPolicy.enabled)
+        #expect(CellPainterPolicy.mode == .off)
+        #expect(!CellPainterPolicy.shouldPaint(dragging: true), "off means the engine only")
+
+        // A typo must not turn the renderer on: `KRAAL_CELL_PAINTER=yes please` is not a mode.
+        CellPainterPolicy.apply(["KRAAL_CELL_PAINTER": "yes please"])
+        #expect(CellPainterPolicy.mode == .drag)
+        CellPainterPolicy.apply([:])
     }
 
     // MARK: - Pixels
