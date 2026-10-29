@@ -271,7 +271,23 @@ public extension Palette {
     /// the theme's "very dim surface" — for gruvbox it is `#282828`, which is literally
     /// that theme's own `background`.
     var terminalBackgroundHex: String? {
-        guard let token = terminalBackground ?? surfaceDim else { return nil }
+        hex(terminalBackground ?? surfaceDim)
+    }
+
+    /// The selection highlight as the `RRGGBB` string Ghostty's config takes.
+    ///
+    /// Nothing is derived when the theme has no such token: the engine's own default
+    /// (and, more importantly, the *absence* of a `selection-foreground` override) keeps
+    /// each cell's own ink, which is the right contrast without guessing. Writing a
+    /// foreground here was rejected for that reason — a fixed colour would beat the
+    /// per-cell one the terminal already chose.
+    var selectionBackgroundHex: String? {
+        hex(selectionBackground)
+    }
+
+    /// `0xRRGGBB` → `RRGGBB`; `nil` in, `nil` out.
+    private func hex(_ token: UInt32?) -> String? {
+        guard let token else { return nil }
         return String(format: "%02X%02X%02X",
                       (token >> 16) & 0xFF, (token >> 8) & 0xFF, token & 0xFF)
     }

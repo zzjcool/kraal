@@ -364,7 +364,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             onInput: { [weak self] target, data in
                 self?.routeInput(target: target, data: data)
             },
-            background: theme.palette.terminalBackgroundHex
+            background: theme.palette.terminalBackgroundHex,
+            selectionBackground: theme.palette.selectionBackgroundHex
         )
         // Logged because it is the only evidence a GUI case can assert on: whether the
         // terminals took the theme's background or libghostty's default is not visible
@@ -377,13 +378,18 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         theme.onPaletteChange = { [weak self, weak pool] palette in
             self?.logTerminalBackground(palette)
             pool?.background = palette.terminalBackgroundHex
+            pool?.selectionBackground = palette.selectionBackgroundHex
         }
         return pool
     }
 
     /// Records the colour the terminals were built with, for the GUI gate.
     private func logTerminalBackground(_ palette: Palette) {
-        kraalLog("terminal background: \(palette.terminalBackgroundHex ?? "nil")")
+        // Both colours in one line: a selection that keeps the engine's default is only
+        // visible in the pixels, so the GUI gate needs the value the app actually built
+        // the surfaces with.
+        kraalLog("terminal background: \(palette.terminalBackgroundHex ?? "nil")"
+            + " selection: \(palette.selectionBackgroundHex ?? "nil")")
     }
 
     private func makeThemeStore() -> ThemeStore {

@@ -58,12 +58,24 @@ public final class PaneTerminalPool {
         }
     }
 
+    /// The theme's selection highlight, as `RRGGBB`, applied to every terminal this pool
+    /// builds. Same construction-time rule as ``background``: changing it retires the
+    /// models.
+    public var selectionBackground: String? {
+        didSet {
+            guard selectionBackground != oldValue else { return }
+            models.removeAll()
+        }
+    }
+
     public init(
         onInput: @escaping @Sendable (String, Data) -> Void,
-        background: String? = nil
+        background: String? = nil,
+        selectionBackground: String? = nil
     ) {
         self.onInput = onInput
         self.background = background
+        self.selectionBackground = selectionBackground
     }
 
     /// Points the pool at the machine whose panes it is about to be asked for.
@@ -95,7 +107,8 @@ public final class PaneTerminalPool {
             paneId: paneId,
             machine: key.machine,
             isPopup: isPopup,
-            background: background
+            background: background,
+            selectionBackground: selectionBackground
         ) { [weak self] data in
             self?.onInput(paneId, data)
         }

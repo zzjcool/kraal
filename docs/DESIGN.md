@@ -601,6 +601,12 @@ U+2580–259F 方块、U+2800–28FF 盲文；`░▒▓` 按引擎的做法填�
 （旁证：`setOcclusion(false)` 只会停掉 draw，**不清空**已有 IOSurface —— 上游 zig 行为，
 封装未验证。）
 
+**画出来的和引擎的差别（2026-10-29 起）**：终端背景和**选中高亮**都跟主题走
+（`selection-background` 从 `Palette.selectionBackground` 写进 terminal），未写
+`selection-foreground` —— 留给引擎按每格自己的前景色决定对比度。抖动只在**高度**变化
+时存在：拖竖直分隔条（改宽度）用 `extend-always` 已经填好最右一列，实测两种帧间隔都是
+0 px（`docs/AUTOMATION.md` §18）。
+
 ### 4.5 为什么侧边栏用 SwiftUI 而不是 cell 绘制
 
 herdr 的 TUI 侧边栏是用 ratatui 画字符画出来的。我们不需要像素级还原，而是**用原生控件做出更好的体验**：
