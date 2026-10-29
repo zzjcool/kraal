@@ -178,7 +178,7 @@ private struct MatchParseError: Error {
 /// describes a band nobody asked for (measured once: a 959x664 rect against a
 /// 1180x760 window became 959x314, and "4032 magenta pixels" came out of it). So the
 /// clamp is detected and reported instead of being measured.
-private func regionOfInterest(args: Arguments, image: CGImage) -> CGRect {
+func regionOfInterest(args: Arguments, image: CGImage) -> CGRect {
     // Region of interest in *image* pixels.
     var region = CGRect(x: 0, y: 0, width: image.width, height: image.height)
     if let rect = args.string("rect") {

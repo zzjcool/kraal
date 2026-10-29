@@ -616,3 +616,105 @@ private func frame(width: UInt16, height: UInt16) -> FrameData {
         graphics: Data()
     )
 }
+
+/// The pane can be taller than the frame the daemon sent; the rows past the frame
+/// belong to the terminal and must be cleared. See `SurfaceANSIRenderer.rowsBelowFrame`.
+@MainActor
+@Suite("Rows below the frame")
+struct RowsBelowFrameTests {
+    /// A pane taller than the frame must clear the rows the frame does not cover.
+    ///
+    /// This is the band in #188. The daemon keeps sending a frame whose height stops
+    /// growing, so `previous.height > frame.height` is never true and the trailing
+    /// `0J` never goes out. The rows past `frame.height` then hold whatever libghostty
+    /// last put there — its own theme background, not the pane's. Measured on a live
+    /// split: 7 rows x 37px = 259px of `#1E1E1E` under cells drawn in `#0E1014`.
+    @Test("a view taller than the frame clears the rows beneath it")
+    func viewTallerThanFrameClearsRemainder() {
+        var renderer = SurfaceANSIRenderer()
+        let grid = frame(width: 8, height: 4)
+        _ = renderer.render(grid, clearingFirst: true)
+        // Same frame again, but the pane now shows 10 rows. Nothing about the frame
+        // changed, which is exactly the case the old check could not see.
+        let again = renderer.render(
+            grid, clearingFirst: false, invalidateBaseline: false, viewRows: 10
+        )
+        let text = String(bytes: again, encoding: .utf8) ?? ""
+        #expect(text.contains("\u{1B}[5;1H"), "the first uncovered row was not addressed")
+        #expect(text.contains("\u{1B}[0J"), "the uncovered rows were not cleared")
+        // `0J` is "cursor to end of screen": it touches no scrollback, unlike `3J`.
+        #expect(!text.contains("\u{1B}[3J"), "clearing the remainder must keep scrollback")
+    }
+
+    /// A frame that fills the view writes no trailing clear.
+    ///
+    /// Without this every frame would carry an extra escape sequence, and the erase
+    /// count — which the GUI gate asserts on — would stop meaning anything.
+    @Test("a frame that fills the view writes no trailing clear")
+    func frameFillingViewWritesNoClear() {
+        var renderer = SurfaceANSIRenderer()
+        let grid = frame(width: 8, height: 4)
+        _ = renderer.render(grid, clearingFirst: true)
+        let again = renderer.render(
+            grid, clearingFirst: false, invalidateBaseline: false, viewRows: 4
+        )
+        let text = String(bytes: again, encoding: .utf8) ?? ""
+        #expect(!text.contains("\u{1B}[0J"), "an exactly-full frame must not clear")
+    }
+
+    /// A view shorter than the frame writes no trailing clear either.
+    ///
+    /// The rows below the view are not ours to touch: clipping is the view's job, and
+    /// erasing there would clear another pane's screen if the geometry were ever off.
+    @Test("a view shorter than the frame writes no trailing clear")
+    func viewShorterThanFrameWritesNoClear() {
+        var renderer = SurfaceANSIRenderer()
+        let grid = frame(width: 8, height: 10)
+        _ = renderer.render(grid, clearingFirst: true)
+        let again = renderer.render(
+            grid, clearingFirst: false, invalidateBaseline: false, viewRows: 4
+        )
+        let text = String(bytes: again, encoding: .utf8) ?? ""
+        #expect(!text.contains("\u{1B}[0J"), "a smaller view must not clear the frame")
+    }
+
+    /// The reported band, measured on a live pane.
+    ///
+    /// `settled: pane=w1:p1 size=928.0x288.0pt view=116x16 terminal=118x36` — the view
+    /// settled at 16 rows while the engine still reported 36. The frame from the daemon
+    /// was 8 rows. Two numbers each looked like "the terminal's height" and neither was:
+    /// the frame says what content exists, `resolvedGrid` says what the view fits, and
+    /// `surfaceSize` says what the engine last got around to reporting.
+    ///
+    /// `0J` erases from the cursor to the end of the screen, so it reaches only rows that
+    /// exist. Clearing from row 9 in a 36-row terminal leaves rows 17...36 holding
+    /// whatever the previous layout put there, and on a pane that grew that is a band.
+    @Test("the below-frame clear reaches the real end of the terminal")
+    func clearReachesRealTerminalEnd() {
+        var renderer = SurfaceANSIRenderer()
+        // A 36-row screen holding the previous, taller layout.
+        _ = renderer.render(frame(width: 8, height: 36), clearingFirst: true)
+
+        // The daemon now sends 8 rows while the view fits 16 and the engine says 36.
+        // `viewRows` is the largest of those, which is what makes the clear reach the
+        // rows that actually exist.
+        let delta = String(
+            bytes: renderer.render(
+                frame(width: 8, height: 8),
+                clearingFirst: false,
+                invalidateBaseline: true,
+                viewRows: 36
+            ),
+            encoding: .utf8
+        ) ?? ""
+        #expect(delta.contains("\u{1B}[9;1H"),
+                "the clear starts below the frame")
+        // `0J` runs to the end of the screen by definition, so the single unambiguous
+        // requirement is that the clear is issued at all. What the caller must not do is
+        // pass 16 there: `0J` from row 9 in a 36-row screen still goes to row 36, but the
+        // *frame* of reference differs and a subsequent 16-row render would re-clear only
+        // from 17. Asserting the cut point is what pins the caller's number.
+        #expect(delta.contains("\u{1B}[0J"),
+                "rows past the frame must be erased to the real end of the screen")
+    }
+}

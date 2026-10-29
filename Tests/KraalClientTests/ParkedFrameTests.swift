@@ -28,6 +28,8 @@
 import CoreGraphics
 import Testing
 
+import GhosttyTerminal
+
 @testable import KraalTerminalView
 
 @Suite("Parked frame retry")
@@ -65,5 +67,74 @@ struct ParkedFrameRetryTests {
             frameWidth: 117, frameHeight: 40,
             gridColumns: 127, gridRows: 43
         ))
+    }
+
+    /// The rule `flushPendingFrame` uses: **exact**, and the live trace that says
+    /// why it cannot be "at least".
+    ///
+    /// A previous revision allowed a grid larger than the frame, reasoning that a
+    /// frame whose cells all land on real coordinates cannot be wrong and that
+    /// waiting was only costing latency. Both halves of that are wrong, and a real
+    /// session shows it:
+    ///
+    /// ```
+    /// [18:00:09.786] grid mismatch: pane=wB:p16 ghostty=126x14 frame=126x13
+    /// ```
+    ///
+    /// The pane's view was 13 rows (240.5 pt); Ghostty still reported 14. `14 >= 13`
+    /// let a 13-row frame be written into a 14-row screen. The last row kept
+    /// whatever the previous layout left there — the band at the bottom of the pane
+    /// that would not go away — and because `frameGrid` was then set to the frame,
+    /// nothing repainted it. Wait instead: one more layout pass and the grid
+    /// arrives at 13, at which point the frame is exact.
+    @Test("a parked frame paints only at the exact grid it was composed for")
+    func parkedFramePaintsOnlyAtExactGrid() {
+        // The ordinary case.
+        #expect(PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 30
+        ))
+        // The live failure. One row more must keep waiting, not paint.
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 126, frameHeight: 13, gridColumns: 126, gridRows: 14
+        ))
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 31
+        ))
+        // Too small: every row would wrap.
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 124, gridRows: 29
+        ))
+        #expect(!PaneTerminalModel.parkedFrameFits(
+            frameWidth: 124, frameHeight: 30, gridColumns: 123, gridRows: 30
+        ))
+    }
+
+    /// The grid has to be re-derived from the view, because the reported one can
+    /// freeze.
+    ///
+
+    /// A settled view's own bounds decide the grid, not the stale reported size.
+    ///
+    /// The measurement this is written against:
+    ///
+    ///     settled: p14 size=148.0pt view=126x14 terminal=126x14
+    ///
+    /// 148pt is 8 rows at 18.5pt (37px); 14 rows is 259pt, i.e. the *previous* layout.
+    /// `surfaceSize` is one layout pass behind `bounds`, so reading it as the authority
+    /// paints 8 rows' worth of cells into a 14-row screen and leaves the other 6 rows
+    /// showing libghostty's own background — the band in #188.
+    @Test("a settled view's bounds decide the grid")
+    func gridFollowsSettledBounds() {
+        let cell = TerminalGridMetrics(
+            columns: 126, rows: 14,
+            widthPixels: 2142, heightPixels: 518,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
+        // 148pt at 2x is 296px, and 296 / 37 is 8 exactly.
+        let settled = PaneTerminalModel.grid(
+            forViewPixelsWide: 2142, high: 296, cell: cell
+        )
+        #expect(settled?.rows == 8,
+                "148pt is 8 rows; reporting 14 is the previous layout's grid")
     }
 }

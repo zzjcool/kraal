@@ -144,9 +144,18 @@ public enum SurfaceGeometry {
         previousGrid: (width: Int, height: Int)?,
         currentGrid: (width: Int, height: Int),
         cellsDiffer: @autoclosure () -> Bool = false,
-        graphicsDiffer: @autoclosure () -> Bool = false
+        graphicsDiffer: @autoclosure () -> Bool = false,
+        viewSizeChanged: Bool = false
     ) -> Bool {
         if contentRevisionChanged { return true }
+        // The pane's own size, which none of the reasons below can express. A pane that
+        // grows keeps its frame — same projection, revision, cells and grid — because
+        // the daemon renders at the grid it was last told about and that has not caught
+        // up. Every other check says "unchanged", the frame is skipped, and the rows the
+        // view just gained are never written: they keep libghostty's background. That is
+        // the band, and its width is how many rows were added, i.e. how far the divider
+        // moved — which is why a fast drag leaves a wider one.
+        if viewSizeChanged { return true }
         guard let previousGrid else { return true }
         if previousGrid.width != currentGrid.width
             || previousGrid.height != currentGrid.height { return true }
@@ -202,9 +211,32 @@ public enum SurfaceGeometry {
         currentGrid: (width: Int, height: Int)
     ) -> Bool {
         if deltaStreamRestarted { return true }
-        guard let previousGrid else { return true }
+        // No previous grid means nothing has been painted yet, which is not a reason
+        // to erase: the frame is already a full one (the renderer treats a missing
+        // baseline as `firstFrame`) and the screen it would erase is empty.
+        //
+        // Returning `true` here is what made an erase self-sustaining and invisible.
+        // The caller cleared `frameGrid` whenever the daemon's grid disagreed with
+        // the frame — during startup that is every frame for ~200 ms — so every one
+        // of them erased, while the caller's own `widthMoved` (already `?? false`)
+        // logged `false` and pointed the investigation at the wrong condition.
+        // Measured: 110 of 116 erases in one session carried `projection=false
+        // restart=false widthMoved=false clean=false`.
+        guard let previousGrid else { return false }
+        // Only a **width** change needs a screen reset.
+        //
+        // A width change reflows every row: no cell keeps its coordinate, so the
+        // only trustworthy action is to throw the baseline away. A height change
+        // does not — a row is still at the same column, and rows above the old
+        // height are untouched. `SurfaceANSIRenderer` clears the rows the frame no
+        // longer covers and diffs the rest.
+        //
+        // This is the difference between a drag that feels heavy and one that does
+        // not. Measured on a live session: 1139 of 1195 paints during a drag went
+        // through the `clearingFirst` path at ~6 KB of ANSI each, up to 97 paints
+        // in one second, because every one-row height change was treated as a
+        // reset. Height changes dominate a vertical drag.
         return previousGrid.width != currentGrid.width
-            || previousGrid.height != currentGrid.height
     }
 
     /// Rough metrics for a 13 pt monospaced font, in points, used before any
@@ -344,6 +376,16 @@ private struct SurfaceGeometryReader: ViewModifier {
         if !force, lastScheduled == size { return }
         lastScheduled = size
         pendingSize = size
+
+        // Do not ask the daemon for a grid computed from a guess. The fallback is a
+        // 13 pt estimate and the real font is wider, so the first negotiation used to
+        // request 137 columns where 126 fit — panes 93 pt wider than the window, then
+        // a second and third negotiation to correct it. Each one is a new projection,
+        // i.e. a full wipe and repaint of every pane.
+        //
+        // `updateCellMetrics` sets `needsGeometryReeval` on the first measurement, and
+        // that path forces a release, so nothing is lost by waiting here.
+        guard store.hasMeasuredCellSize || force else { return }
 
         let now = Date()
         if ResizePacing.releasesImmediately(

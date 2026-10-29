@@ -31,12 +31,7 @@ public final class PaneTerminalModel {
     /// 450 pt / 8.5 pt = 52 columns of text, but padding eats a few, and the
     /// renderer then reflows every row we send. The pane is already inset by the
     /// daemon's own border rects, so the padding must be zero here.
-    public let state = TerminalViewState(
-        terminalConfiguration: TerminalConfiguration { builder in
-            builder.withWindowPaddingX(0)
-            builder.withWindowPaddingY(0)
-        }
-    )
+    public let state: TerminalViewState
     private var renderer = SurfaceANSIRenderer()
     /// Turns the daemon's graphics scene into kitty bytes (issue #105, parent #37).
     ///
@@ -44,21 +39,39 @@ public final class PaneTerminalModel {
     var graphicsEncoder = GraphicsEncoder()
     /// The machine this pane belongs to, used only to scope graphics image ids.
     ///
-    /// Image ids are a hash of `scope + asset key`, so two machines that both name
-    /// a pane `w1:p1` would otherwise share an id namespace and one pane's
-    /// `d=I` would delete the other's picture. Pane ids are scoped to one daemon —
-    /// upstream says so outright (`docs/next/website/.../connecting-machines.mdx:118`).
+    /// Ids are a hash of `scope + asset key`, so two machines that both name a pane
+    /// `w1:p1` would share a namespace and one pane's `d=I` would delete the
+    /// other's picture. Pane ids are scoped to one daemon.
     let machine: String
     /// Whether this model draws a popup rather than a pane.
     ///
-    /// It changes two things, both about id spaces: which graphics targets this
-    /// terminal accepts, and the scope its image ids are hashed from. The pool keys
-    /// popup models by the popup's `terminalId`, which can coincide with a pane id,
-    /// so the kind cannot be inferred from the id alone.
+    /// It changes which graphics targets this terminal accepts and the scope its
+    /// image ids hash from. A popup's `terminalId` can coincide with a pane id, so
+    /// the kind cannot be inferred from the id alone.
     let isPopup: Bool
-    private var lastRevision: UInt64 = 0
+    var lastRevision: UInt64 = 0
     /// The pane grid the last rendered frame was composed for.
-    private var frameGrid: FrameData?
+    var frameGrid: FrameData?
+    /// The surface the baseline belongs to; see `noteSurfaceIdentity`.
+    ///
+    /// Weak, not an `ObjectIdentifier`: a freed surface's address is the likeliest one for
+    /// the next surface to be allocated at, so comparing addresses calls a replacement
+    /// "the same surface".
+    weak var seenSurface: TerminalSurface?
+    var hasSeenSurface = false
+    /// Last size the platform view settled on; see `viewDidSettle`.
+    var lastAllocatedSize: CGSize?
+    /// The screen size the engine last announced; see `EngineScreenReport`.
+    var engineScreen: EngineScreenReport?
+    /// Whether the surface in use has been asked to announce its screen size.
+    var engineReportsRequested = false
+    /// The engine's screen changed since the last write, so whatever the renderer believes
+    /// is on it is no longer so. Cleared by the next write, which is a whole frame.
+    var engineScreenMoved = false
+    /// Set by `viewDidSettle` when the pane's own size moved; cleared by `apply`.
+    var didViewSizeChange = false
+    /// Last `view chain:` shape printed; see `logViewChain`.
+    var lastViewChainShape: String?
     /// The projection the renderer's baseline belongs to.
     ///
     /// Nothing else the pane compares can see a workspace or machine switch.
@@ -69,10 +82,13 @@ public final class PaneTerminalModel {
     /// judged "nothing to do", and leave the previous machine's picture on
     /// screen. `bootId` is stamped at daemon boot and never shared, which is the
     /// one field that separates them.
-    private var lastProjection: SurfaceGeometry.ProjectionIdentity?
+    private(set) var lastProjection: SurfaceGeometry.ProjectionIdentity?
     /// A frame that arrived before Ghostty's surface existed, or before its grid
     /// caught up with the frame's size.
     private var pendingFrame: FrameData?
+    /// The surface the last `apply` was given, for re-applying it once the
+    /// terminal's grid catches up with a layout SwiftUI had not applied yet.
+    private(set) var lastSurface: PaneSurfaceFrame?
     /// The retry chain that keeps trying to paint `pendingFrame`.
     private var pendingRetryTask: Task<Void, Never>?
 
@@ -83,6 +99,15 @@ public final class PaneTerminalModel {
     /// parking is the observable seam. It is also the *real* path — `apply` is what
     /// the view calls — so a test on it cannot pass while the wiring is cut.
     var parkedFrame: FrameData? { pendingFrame }
+
+    /// Overrides the grid `apply` compares against, for tests only.
+    ///
+    /// `state.surfaceSize` is `internal(set)` and has no injection point, so the
+    /// grid-mismatch branch — the one that decides whether a pane paints anything
+    /// while the grid lags — was unreachable from a test. Every unit test stayed green
+    /// when that branch was reduced to a bare `return`, which is how the stray
+    /// background band reached a user twice.
+    var gridOverride: TerminalGridMetrics?
 
     /// How many times a screen reset has been applied. Test-observable because the
     /// reset and the image bytes race inside one `apply` call, and `parkedFrame`
@@ -99,6 +124,8 @@ public final class PaneTerminalModel {
     /// Counted here rather than inferred by a test: `swift test` has no Ghostty
     /// surface, and the GUI case can only read what the app logs.
     private(set) var paintCount = 0
+    /// The bytes of the most recent write; the only output a test can assert on.
+    private(set) var lastPainted: Data?
     /// Writes that carried an erase together with their repaint.
     ///
     /// Not the same count as `screenResetCount`, and the difference is the point:
@@ -114,7 +141,7 @@ public final class PaneTerminalModel {
     /// it. The stale rows are still in the terminal's scrollback, and an
     /// incremental repaint only touches rows that changed — so the skew survives
     /// every later update until the screen is explicitly cleared.
-    private var needsCleanRepaint = false
+    private(set) var needsCleanRepaint = false
     /// Paints a popup's own grid.
     ///
     /// A popup carries a complete `FrameData` of its own — it is a separate terminal
@@ -191,15 +218,74 @@ public final class PaneTerminalModel {
         paneId: String,
         machine: String = "",
         isPopup: Bool = false,
+        /// The theme's terminal background as `RRGGBB`, or `nil` to keep libghostty's
+        /// own default.
+        ///
+        /// It has to be set here rather than left to the platform default. Those
+        /// defaults are `alabaster` (`#F7F7F7`) on light and `afterglow` (`#212121`) on
+        /// dark, so a dark theme on a light Mac got a `(247,247,247)` band wherever the
+        /// terminal painted its own background — measured between two `(17,20,25)`
+        /// panes. The theme never crosses the wire, so this is the only place that
+        /// colour can come from.
+        background: String? = nil,
         onInput: @escaping @Sendable (Data) -> Void
     ) {
         self.paneId = paneId
         self.machine = machine
         self.isPopup = isPopup
+        // The background has to go in `theme`, not `terminalConfiguration`.
+        //
+        // `GhosttyConfigRenderer.render` emits `configuration` first and `theme`
+        // second (`Configuration/GhosttyConfigRenderer.swift:23-29`), so the theme wins
+        // on any key both set — and `TerminalTheme.default` sets `background` on both
+        // its arms (`alabaster` `F7F7F7`, `afterglow` `212121`). Put in
+        // `terminalConfiguration`, this colour was silently overridden by libghostty's
+        // own default, which is exactly the bug: measured `background: 282828` in the
+        // log while the screen still painted `#F7F7F7`.
+        //
+        // Both arms get the same value: the theme is Kraal's, not the platform's, so
+        // the terminal must not change colour when macOS switches appearance.
+        let theme: TerminalTheme
+        if let background {
+            let arm = TerminalConfiguration { builder in
+                builder.withBackground(background)
+            }
+            theme = TerminalTheme(light: arm, dark: arm)
+        } else {
+            theme = .default
+        }
+        state = TerminalViewState(
+            theme: theme,
+            terminalConfiguration: TerminalConfiguration { builder in
+                builder.withWindowPaddingX(0)
+                builder.withWindowPaddingY(0)
+                // What the cell grid does not cover takes the colours of the row next to it.
+                //
+                // The grid is `floor(view / cell)` and the engine adopts a new size ~25 ms
+                // after the view has it (`termio/Thread.zig`, `Coalesce.min_ms`). In that
+                // window a pane that grew is taller than its grid, and the strip below the
+                // grid is *padding*, drawn in the theme background: against a full-screen
+                // program that is a band the program never drew. Measured with a real
+                // engine on a program with one background, a fast drag showed it in 42.7% of
+                // samples; with this setting, 8.5%.
+                //
+                // `extend-always`, not `extend`: `extend` is a heuristic that gives up as
+                // soon as *any* cell of the edge row has the default background, which a
+                // footer or a command line almost always does — measured, it left 38.2% of
+                // samples with the band where this leaves 8.5%.
+                builder.withCustom("window-padding-color", "extend-always")
+            }
+        )
+        let relay = EngineReportRelay()
         session = InMemoryTerminalSession(
             write: { data in
                 // Ghostty -> daemon: key bytes, paste payloads, replies to queries.
-                onInput(data)
+                //
+                // Except the engine's screen-size reports: those are this app's own
+                // question, and sent on they would be typed into the pane's shell.
+                let (reports, rest) = EngineScreenReport.extract(from: data)
+                reports.forEach(relay.deliver)
+                if !rest.isEmpty { onInput(rest) }
             },
             resize: { _ in
                 // The daemon owns the grid size: it renders the surface at the
@@ -208,6 +294,18 @@ public final class PaneTerminalModel {
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
+        // See `PaneSurfaceHostView`: the view pins itself to the pane's allocation.
+        // The view reports its own settled size; see `viewDidSettle`.
+        state.makePlatformView = { [weak self] in
+            let view = PaneSurfaceHostView(frame: .zero)
+            view.onSettledSize = { [weak self] size in
+                self?.viewDidSettle(size: size)
+            }
+            return view
+        }
+        relay.connect { [weak self] batch in
+            self?.engineScreenDidChange(batch)
+        }
     }
 
     /// Feeds a pane's cells to the terminal, skipping redundant revisions.
@@ -220,6 +318,11 @@ public final class PaneTerminalModel {
         guard let geometry = surface.panes.first(where: { $0.paneId == paneId }) else {
             return
         }
+        // Kept so the frame can be re-applied when Ghostty's grid catches up with a
+        // layout SwiftUI had not applied yet. See `reapplyAfterGridViewMoved`.
+        lastSurface = surface
+        noteSurfaceIdentity()
+        requestEngineScreenIfNeeded()
         // Decide whether this frame needs a screen reset **before** encoding it.
         //
         // The order matters and it is subtle: `paneFrame` encodes the graphics
@@ -240,45 +343,29 @@ public final class PaneTerminalModel {
             previous: lastProjection,
             current: projection
         )
-        let resetNeeded = projectionChanged || SurfaceGeometry.needsScreenReset(
-            deltaStreamRestarted: SurfaceGeometry.deltaStreamRestarted(
-                previousRevision: lastRevision,
-                incomingRevision: geometry.contentRevision
-            ),
-            previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
-            // The pane's grid, not the surface's — see `paneGrid`.
-            currentGrid: Self.paneGrid(geometry)
+        let decision = eraseDecision(
+            projectionChanged: projectionChanged, geometry: geometry
         )
-        // A clean repaint was requested by an earlier frame that could not be
-        // painted at a trustworthy grid. It is a reset for the same reason a
-        // changed grid is: the rows on screen were written at the wrong width.
-        let cleanRepaint = needsCleanRepaint
-        let eraseBeforePaint = resetNeeded || cleanRepaint
-        if eraseBeforePaint {
-            screenResetCount += 1
-            // Runs **before** `paneFrame` below for every path that erases, not
-            // just the `resetNeeded` one. `GraphicsEncoder` is stateful: encoding
-            // against a cache that still believes the image is on screen yields
-            // zero bytes, and the erase that follows then takes the picture with
-            // nothing to put it back. That is #101 review's "gone permanently".
+        let eraseBeforePaint = decision.erase
+        // Before `paneFrame`: `GraphicsEncoder` is stateful, and a cache that
+        // believes the image is on screen encodes to zero bytes, after which the
+        // erase takes the picture with nothing to put it back (#101).
+        //
+        // The first frame needs the same forget without erasing — which is how "no
+        // previous grid" once came to look like a reason to wipe the screen.
+        if eraseBeforePaint || frameGrid == nil {
             resetSurfaces()
         }
+        if eraseBeforePaint {
+            screenResetCount += 1
+        }
         let frame = paneFrame(from: surface, geometry: geometry)
-        // A different projection means the screen this renderer built its
-        // baseline from is gone, whatever the numbers say. It has to be taken as
-        // a whole frame, not diffed against cells that came from somewhere else.
         lastProjection = projection
 
-        // A pane's content revision only moves when its *content* changes, so the
-        // same revision is normal for a pane that merely got a new grid: going
-        // from a split to full width changes every row's width but not one cell
-        // of text. Skipping those frames on the revision alone left the pane blank
-        // until it printed something. The grid is what decides whether the frame
-        // already on screen is still valid.
-        //
-        // The projection is a third reason to repaint, and the one that covers a
-        // workspace or machine switch: the same cells have to be re-taken whole
-        // rather than diffed onto a baseline from another projection.
+        // The revision alone is not enough: a pane that merely got a new grid keeps
+        // its cells, so the frame must still be taken. The projection is a third
+        // reason — same cells, different workspace or machine, so they have to be
+        // re-taken whole rather than diffed onto another projection's baseline.
         guard projectionChanged || SurfaceGeometry.needsRepaint(
             contentRevisionChanged: geometry.contentRevision != lastRevision,
             previousGrid: frameGrid.map { (width: Int($0.width), height: Int($0.height)) },
@@ -291,21 +378,29 @@ public final class PaneTerminalModel {
             // An image can move or change without touching a cell: the cells it
             // covers are not part of the daemon's cell buffer. Comparing cells alone
             // dropped those frames, freezing the picture at its old position (#105).
-            graphicsDiffer: frameGrid?.graphics != frame.graphics
-        ) else { return }
-        // Printed only when the cells alone decided a repaint — the revision and the
-        // grid both said "nothing changed" and the frame's contents said otherwise.
-        // That is exactly a scroll, and it is what the GUI case asserts on. Kept
-        // this narrow on purpose: logging every repaint would make "the scroll was
-        // painted" unfalsifiable.
-        if !projectionChanged, geometry.contentRevision == lastRevision,
-           let previous = frameGrid,
-           previous.width == frame.width, previous.height == frame.height,
-           previous.buffer != frame.buffer {
-            kraalLog("scroll repaint: pane=\(paneId) rev=\(geometry.contentRevision) "
-                + "offset=\(geometry.scroll?.offsetFromBottom ?? 0)"
-                + "/\(geometry.scroll?.maxOffsetFromBottom ?? 0)")
+            graphicsDiffer: frameGrid?.graphics != frame.graphics,
+            // The pane's own size, which none of the four above can express. A pane that
+            // grows keeps its projection, revision, cells and grid — the daemon renders
+            // at the grid it was last told about and that has not caught up — so all of
+            // them say "unchanged", the frame is skipped, and the rows the view gained
+            // are never written. They keep libghostty's background: the band, as wide as
+            // the drag moved the divider.
+            viewSizeChanged: didViewSizeChange || engineScreenMoved
+        ) else {
+            logSkippedFrame(paneId: paneId, revision: geometry.contentRevision,
+                            frame: frame, previous: frameGrid)
+            return
         }
+        didViewSizeChange = false
+        // A repaint owed because the engine's screen moved is discharged by the first write
+        // below that is a whole frame; every path here either writes one or parks the frame
+        // with no baseline, so the eventual write is whole.
+        let engineMoved = engineScreenMoved
+        engineScreenMoved = false
+        logScrollRepaint(
+            geometry: geometry, previous: frameGrid, frame: frame,
+            projectionChanged: projectionChanged
+        )
         if eraseBeforePaint {
             // The erase is **not** written here. It travels inside
             // `renderer.render(_:clearingFirst:)`'s synchronized-output block so
@@ -324,87 +419,69 @@ public final class PaneTerminalModel {
 
         reportCellMetrics()
 
-        // If the terminal's grid disagrees with the frame, writing this frame
-        // would wrap every row and push the overflow into scrollback, leaving a
-        // permanently skewed screen. Repaint from a clean slate in that case and
-        // let the next apply land on a grid that matches.
+        // A grid that disagrees with the frame would wrap every row and push the
+        // overflow into scrollback: a permanently skewed screen.
         // No surface yet: the view has been mounted but Ghostty has not finished
         // attaching, so `surfaceSize` is nil and anything written is queued
         // without a grid to lay it out in. Remember the frame and paint it when
         // the surface reports a size; writing now both wastes the frame and
         // leaves the pane blank even though the terminal later becomes ready.
-        guard let grid = state.surfaceSize else {
-            pendingFrame = frame
-            lastRevision = 0
-            frameGrid = nil
-            // Same reason as the grid-mismatch branch: the grid appearing fires
-            // `onChange` only while it is still *changing*. If the surface reports
-            // its first size before the view observes it, nothing else will come.
-            schedulePendingRetry()
+        guard let grid = resolvedGrid else {
+            parkMismatched(frame)
             return
         }
         pendingFrame = nil
 
-        if grid.columns != frame.width || grid.rows != frame.height {
-            let all = surface.panes.map {
-                "\($0.paneId)=\($0.innerRect.width)x\($0.innerRect.height)"
-            }
-            kraalLog("grid mismatch: pane=\(paneId) ghostty=\(grid.columns)x\(grid.rows) "
-                + "frame=\(frame.width)x\(frame.height) "
-                + "surface=\(surface.frame.width)x\(surface.frame.height) panes=[\(all.joined(separator: " "))]")
-            needsCleanRepaint = true
-            lastRevision = 0
-            frameGrid = nil
-            // Keep the frame instead of dropping it. Resizing a window re-renders
-            // the tab at a new grid, but Ghostty's own surface still reports the
-            // *previous* grid for a moment, so this check fails on the frame that
-            // carries the new size. Dropping it left the pane with nothing to
-            // paint and no later trigger: revisions only advance when the
-            // program prints, so a still screen stayed frozen at the old size
-            // forever. Parking it lets the grid arriving below repaint it.
-            pendingFrame = frame
-            // Parking alone is not enough: this frame is only ever painted again
-            // by a *later* trigger, and after the window stops moving there are no
-            // more grid changes to trigger it. The daemon has already rendered the
-            // final grid, so nothing else will arrive. Schedule our own retry —
-            // the grid does catch up, it just does it after the last event any
-            // observer is watching for.
-            schedulePendingRetry()
+        // A wider frame is still parked: cropping columns wraps every row and that skew
+        // survives in scrollback. A taller one is handled by `paintBridged`.
+        if grid.columns != frame.width {
+            logGridMismatch(grid: grid, frame: frame, surface: surface)
+            parkMismatched(frame)
+            return
+        }
+        if grid.rows != frame.height {
+            paintBridged(frame, grid: grid, surface: surface, revision: geometry.contentRevision)
             return
         }
 
-        if needsCleanRepaint {
-            // Reached only when the grid became trustworthy *between* the reset
-            // decision at the top of this call and here, which cannot happen: the
-            // flag is folded into `eraseBeforePaint` above. Kept as an explicit
-            // clear so a future edit cannot leave the flag stuck on.
-            needsCleanRepaint = false
-        }
-
-        let painted = renderer.render(frame, clearingFirst: eraseBeforePaint)
+        needsCleanRepaint = false
+        logPaintGridIfMoved(paneId: paneId, from: frameGrid, to: frame)
+        let painted = renderer.render(
+            frame,
+            clearingFirst: eraseBeforePaint,
+            // A new projection invalidates the diff even when the grid held still:
+            // the cells on screen came from another projection, so comparing rows
+            // against them is meaningless. Repainting is required; erasing is not.
+            invalidateBaseline: decision.repaintAll || engineMoved
+                || Self.gridMoved(from: frameGrid, to: frame),
+            viewRows: viewRows
+        )
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: surface.graphics.assets.count,
                     placements: surface.graphics.placements.count)
+        logSurfaceExtent(paneId: paneId, grid: grid, frame: frame)
         deliver(painted)
     }
 
+    /// Reports the renderer's measured cell size, in device pixels.
+    ///
+    /// Called before the grid check in `apply`, not after it: the check bails out
+    /// while the grid is wrong, and if reporting lived past that bail-out the size
+    /// used for layout could never be corrected — a one-way trap where the grid stays
+    /// wrong because it was never measured, and never measured because it was wrong.
+    ///
+    /// (The doc block above `deliver` used to be a duplicate of this one, left behind
+    /// by a move. Two doc comments on one declaration is not a compile error, so it
+    /// survived review.)
     /// Hands one painted frame to the terminal, and records that it was one write.
     ///
-    /// Split out of `apply(surface:)` only to keep that function within
-    /// swiftlint's body limit; the accounting and the log line belong together.
-    ///
-    /// The one place a painted buffer reaches the terminal.
-    ///
-    /// Every classification the GUI case reads is derived from **the bytes actually
-    /// written**, not from a caller-supplied flag. That is deliberate: it is what
-    /// makes the assertion able to catch the defect it was written for. An earlier
-    /// version took `erasing:` from the caller, so a regression that wrote the erase
-    /// as its own `session.receive` — the exact shape of the flash — still logged
-    /// `erase=0, eraseWrites>0, paints>eraseWrites`, and a "no erase escaped its
-    /// repaint" check passed on it. Verified by injection: routing the erase back
-    /// outside gives `erases=0` here and the case goes red.
+    /// Every classification the GUI case reads comes from the **bytes actually
+    /// written**, never a caller flag — that is what lets the assertion catch the
+    /// defect it was written for (an `erasing:` flag let a two-write erase log
+    /// `erase=0` and pass). Verified by injection; see `docs/ENVIRONMENT.md` §8.11.
     private func deliver(_ painted: Data) {
         paintCount += 1
+        lastPainted = painted
         // The clear pair this app erases with: `ED2` + `ED3` + cursor home.
         let carriesErase = painted.range(of: Data("\u{1B}[2J".utf8)) != nil
         // "Cells" means *row writes*: a cursor-position sequence `CSI <row>;1H`.
@@ -417,27 +494,51 @@ public final class PaneTerminalModel {
         // Logged for every write, so `grep -c paint:` *is* the write count and the
         // GUI case can compare it against the erase count.
         kraalLog("paint: pane=\(paneId) erase=\(carriesErase ? 1 : 0) "
+            + "rows=\(renderer.lastWroteRows) "
             + "cells=\(carriesCells ? 1 : 0) "
             + "eraseWrites=\(eraseWrites) resets=\(screenResetCount) "
             + "paints=\(paintCount) bytes=\(painted.count)")
         session.receive(painted)
     }
 
-    /// Reports the renderer's measured cell size, in device pixels.
-    ///
-    /// Called before the grid check in `apply`, not after it: the check bails out
-    /// while the grid is wrong, and if reporting lived past that bail-out the
-    /// size used for layout could never be corrected — a one-way trap where the
-    /// grid stays wrong because it was never measured, and never measured
-    /// because it was wrong.
-    private func reportCellMetrics() {
-        guard let grid = state.surfaceSize,
-              grid.cellWidthPixels > 0,
-              grid.cellHeightPixels > 0 else { return }
-        onCellMetrics?(CGSize(
-            width: CGFloat(grid.cellWidthPixels),
-            height: CGFloat(grid.cellHeightPixels)
-        ))
+    /// Paints the rows the terminal holds when the frame and the grid disagree. Same
+    /// width means every row keeps its coordinate, so the rows that fit are correct and
+    /// the renderer clears the rest. Painting nothing is right only while the grid does
+    /// catch up; in #188 it never did and the pane stopped drawing entirely.
+    private func paintBridged(
+        _ frame: FrameData,
+        grid: TerminalGridMetrics,
+        surface: PaneSurfaceFrame,
+        revision: UInt64
+    ) {
+        logGridMismatch(grid: grid, frame: frame, surface: surface)
+        guard let bridge = Self.bridgeFrame(
+            frame, gridColumns: grid.columns, gridRows: grid.rows
+        ) else {
+            parkMismatched(frame)
+            return
+        }
+        let painted = renderer.render(
+            bridge, clearingFirst: false, invalidateBaseline: true,
+            viewRows: Int(grid.rows)
+        )
+        frameGrid = bridge
+        lastRevision = revision
+        logGraphics(
+            encoded: bridge.graphics, painted: painted,
+            assets: surface.graphics.assets.count,
+            placements: surface.graphics.placements.count
+        )
+        deliver(painted)
+    }
+
+    /// Keeps a frame the terminal cannot take, and keeps trying. Nothing is painted, so
+    /// nothing needs cleaning: clearing the baseline makes the eventual paint whole.
+    private func parkMismatched(_ frame: FrameData) {
+        frameGrid = nil
+        lastRevision = 0
+        pendingFrame = frame
+        schedulePendingRetry()
     }
 
     /// Paints a frame that arrived before the terminal was able to accept it.
@@ -447,48 +548,53 @@ public final class PaneTerminalModel {
     /// because the only frame for that tab was dropped while the view was still
     /// being attached.
     func flushPendingFrame() {
-        guard let frame = pendingFrame else { return }
-        // Only paint once the terminal's grid actually matches the frame. A parked
-        // frame can now also come from the grid-mismatch path above, where the
-        // terminal has not caught up with the new window size yet; painting then
-        // would wrap every row. Leaving it parked is correct — another grid report
-        // follows.
-        guard let grid = state.surfaceSize,
-              Self.gridMatches(
-                  frameWidth: Int(frame.width),
-                  frameHeight: Int(frame.height),
-                  gridColumns: grid.columns,
-                  gridRows: grid.rows
-              ) else { return }
+        guard let frame = pendingFrame, let grid = resolvedGrid else { return }
+        let exact = Self.parkedFrameFits(
+            frameWidth: Int(frame.width),
+            frameHeight: Int(frame.height),
+            gridColumns: grid.columns,
+            gridRows: grid.rows
+        )
+        guard exact else { return }
         pendingFrame = nil
         lastRevision = 0
+        // Read the baseline **before** clearing it. The first version of this
+        // assigned `frameGrid = nil` above and then asked whether it was nil, so the
+        // answer was always yes and `wipe` was always true — the optimisation read
+        // as present and did nothing. Caught by the live log still showing 509 of 565
+        // paints with `erase=1` at a constant width.
+        let widthMoved = Self.widthMoved(from: frameGrid, to: frame)
         frameGrid = nil
         resetSurfaces()
-        // One flush, erase inside the synchronized block — the same reasoning as
-        // `apply(surface:)`. A parked frame is routinely the one that carries a new
-        // grid (that is why it was parked), so this is the resize path too.
-        let painted = renderer.render(frame, clearingFirst: true)
+        // A parked frame is routinely the one that carries a new grid, so this is
+        // the resize path too. Erase only when the width moved: a vertical drag is
+        // one height change per mouse move, and each erase is a `2J 3J H` plus a
+        // full rewrite (8-10 KB of ANSI). The renderer clears the rows this frame
+        // stopped covering by itself.
+        let painted = renderer.render(
+            frame, clearingFirst: widthMoved, invalidateBaseline: false,
+            viewRows: viewRows
+        )
         logGraphics(encoded: frame.graphics, painted: painted,
                     assets: 0, placements: 0)
         deliver(painted)
         lastRevision = 0
         frameGrid = frame
-
+        engineScreenMoved = false   // this write was the whole frame
     }
 
     /// How many times a parked frame is retried, and how far apart.
     ///
-    /// Read by the tests as the contract for how long a park may live: long
-    /// enough to outlast the launch grid burst, short enough that a pane whose
-    /// grid genuinely disagrees is not repainted into the wrong width.
+    /// The tests pin this as the contract for how long a park may live: long enough
+    /// to outlast the launch grid burst, short enough that a genuinely wrong grid is
+    /// not repainted at the wrong width.
     static let pendingRetryAttempts = 12
     static let pendingRetryIntervalMilliseconds = 80
 
     /// Whether a parked frame can be painted at the grid the terminal reports.
     ///
-    /// Split out so the rule is testable without a Ghostty surface: painting at
-    /// a different width wraps every row and pushes the overflow into
-    /// scrollback, which is worse than staying blank for one more turn.
+    /// Split out so the rule is testable without a Ghostty surface: a different
+    /// width wraps every row and pushes overflow into scrollback.
     static func gridMatches(
         frameWidth: Int, frameHeight: Int,
         gridColumns: UInt16, gridRows: UInt16
@@ -511,9 +617,22 @@ public final class PaneTerminalModel {
     /// up with a resize. It stops as soon as the frame paints, and it does
     /// nothing at all when no frame is parked.
     private func schedulePendingRetry() {
-        // One timer per model. Re-parking during an active retry must not start a
-        // second chain that would double-paint when the grid finally matches.
-        guard pendingRetryTask == nil else { return }
+        // Refresh the budget, do not keep the first one.
+        //
+        // A chain that is already running is *restarted* rather than left alone.
+        // The budget is wall-clock (12 x 80 ms), and `apply` re-parks on every frame
+        // that does not fit — a drag produces a new frame every few milliseconds.
+        // Keeping the first chain meant the budget was measured from the *first*
+        // mismatch of a gesture, so any drag longer than ~1 s spent it before the
+        // gesture ended; the frame parked by the last mismatch then had nothing left
+        // to wake it and the blank rows stayed until the program next printed. That
+        // is "drag fast, lots of empty rows appear at the bottom".
+        //
+        // Restarting cannot double-paint: the previous task is cancelled, and
+        // `flushPendingFrame` clears `pendingFrame` before it writes, so at most one
+        // chain is ever alive and at most one frame is in flight.
+        pendingRetryTask?.cancel()
+        pendingRetryTask = nil
         pendingRetryTask = Task { @MainActor [weak self] in
             defer { self?.pendingRetryTask = nil }
             // The first attempt is immediate: most parks are one runloop turn
@@ -530,6 +649,16 @@ public final class PaneTerminalModel {
             // leaving it to be painted at some arbitrary later moment against a
             // grid it was not rendered for. The next surface frame repaints.
             guard let self, !Task.isCancelled else { return }
+            // Why a band can outlive the retry window: if Ghostty's bounds catch
+            // up *after* this fires, the frame that would have covered the missing
+            // row is gone and only a new daemon revision repaints it — which for a
+            // still screen can be seconds. Logged because "it fixes itself after a
+            // while" is otherwise indistinguishable from the retry having worked.
+            if let parked = self.pendingFrame {
+                self.logParkExpired(
+                    paneId: self.paneId, frame: parked, grid: self.state.surfaceSize
+                )
+            }
             self.pendingFrame = nil
         }
     }
@@ -546,6 +675,7 @@ public final class PaneTerminalModel {
     /// the whole frame.
     func prepareForNewTerminalView() {
         resetSurfaces()
+        forgetEngineScreen()
         lastRevision = 0
         frameGrid = nil
         lastProjection = nil
@@ -579,215 +709,6 @@ public final class PaneTerminalModel {
         frameGrid = nil
     }
 
-    /// Crops the composited tab surface down to this pane's content area.
-    ///
-    /// The terminal only ever knows about its own pane, so the surrounding
-    /// borders and sibling panes must not be fed to it — otherwise a patch in a
-    /// neighbouring pane would repaint ours.
-    ///
-    /// Rows are handed to the frame already chunked (`CellBuffer(rows:width:)`)
-    /// rather than flattened into one array and re-split. The flatten-then-chunk
-    /// shape copied the pane twice — once into `[CellData]`, once per row by
-    /// `Array(slice)` inside `CellBuffer.init(_:width:)`, which does not share
-    /// storage with the slice it comes from. The storage step alone is what that
-    /// removes, and it is the reproducible part: 200x50, 37.5 us -> 0.033 us
-    /// (docs/PERFORMANCE.md, "`paneFrame`：本次改动自己制造、又自己还回去的那笔
-    /// 存储拷贝"). The whole-path timings this comment used to quote could not be
-    /// reproduced independently and were dropped — do not reintroduce them.
-    private func paneFrame(
-        from surface: PaneSurfaceFrame,
-        geometry: PaneSurfacePane
-    ) -> FrameData {
-        // Encode *here*, once per frame, so every path that paints this frame —
-        // including the parked-frame retries below — carries the graphics without
-        // each one having to remember. The encoder diffs against what it already
-        // sent, so a frame with unchanged images contributes no bytes.
-        //
-        // The scene is in **surface** coordinates: a placement's `cellX`/`cellY`
-        // address the whole tab, while this terminal only knows its own pane. The
-        // cells below are cropped by `innerRect` for exactly that reason, and the
-        // placements have to be shifted the same way or an image in a split pane is
-        // drawn at the wrong column. Upstream does the same addition in reverse
-        // (`client_host_piece`, `kitty_graphics/surface.rs:1032`: `origin.0 +
-        // placement.x`), so subtracting the origin here restores pane-local space.
-        let paneOrigin = (x: Int(geometry.innerRect.originX), y: Int(geometry.innerRect.originY))
-        let paneSize = (
-            width: Int(geometry.innerRect.width),
-            height: Int(geometry.innerRect.height)
-        )
-        let graphics = graphicsEncoder.encode(
-            scene: sceneInPaneSpace(surface.graphics, origin: paneOrigin, paneSize: paneSize),
-            scope: graphicsScope
-        )
-        let area = geometry.innerRect
-        let width = Int(area.width)
-        let height = Int(area.height)
-        let frameWidth = Int(surface.frame.width)
-        var rows: [[CellData]] = []
-        rows.reserveCapacity(height)
-
-        // Row at a time: a row of the surface is one array, so this is one retain
-        // per row instead of one per cell. The bounds check is per cell because a
-        // malformed frame's last row can be shorter than the grid says; a cell the
-        // surface does not cover is filled blank, exactly as `surface.frame[c, r]`
-        // returning nil used to do.
-        for row in 0 ..< height {
-            let sourceRow = Int(area.originY) + row
-            let rowCells = surface.frame.buffer.row(sourceRow)
-            let available = rowCells.count
-            var cropped: [CellData] = []
-            cropped.reserveCapacity(width)
-            for column in 0 ..< width {
-                let sourceColumn = Int(area.originX) + column
-                if sourceColumn < frameWidth, sourceColumn < available {
-                    cropped.append(rowCells[rowCells.startIndex + sourceColumn])
-                } else {
-                    cropped.append(.blank)
-                }
-            }
-            rows.append(cropped)
-        }
-
-        var cursor: CursorState?
-        if let surfaceCursor = surface.frame.cursor,
-           Int(surfaceCursor.column) >= Int(area.originX),
-           Int(surfaceCursor.column) < Int(area.originX) + width,
-           Int(surfaceCursor.row) >= Int(area.originY),
-           Int(surfaceCursor.row) < Int(area.originY) + height {
-            cursor = CursorState(
-                column: surfaceCursor.column - area.originX,
-                row: surfaceCursor.row - area.originY,
-                visible: surfaceCursor.visible,
-                shape: surfaceCursor.shape
-            )
-        }
-
-        return FrameData(
-            buffer: CellBuffer(rows: rows, width: width),
-            width: UInt16(width),
-            height: UInt16(height),
-            cursor: cursor,
-            hyperlinks: surface.frame.hyperlinks,
-            // The encoder's output, not `surface.frame.graphics`. Kitty graphics do
-            // not live in the cell frame: the daemon sends them as a *scene*
-            // (`surface.graphics`) and the client encodes it. Reading
-            // `surface.frame.graphics` here — what this used to do — reads the ANSI
-            // path's field, which the daemon leaves empty for semantic clients, so
-            // an image was decoded, laid out against the grid, and thrown away
-            // (issues #37, #105).
-            graphics: graphics
-        )
-    }
-}
-
-/// Hosts the pane models for one window and keeps them in sync with the store.
-///
-/// Keys are `(machine, paneId)`, not `paneId` alone. Pane ids are scoped to one
-/// daemon — upstream says so outright: "Workspace, tab, pane IDs, and agent names
-/// are scoped to one server. Two machines may both contain `w1:p1`"
-/// (`docs/next/website/src/content/docs/connecting-machines.mdx:118`). Keying on
-/// the pane id alone made two machines' `w1:p1` share one model, and with it one
-/// Ghostty `InMemoryTerminalSession`: the scrollback, the alternate-screen state
-/// and the cursor of the machine you just left were still inside the surface that
-/// went on to render the new one. A full-screen program like btop lives entirely
-/// in the alternate screen, so that leak showed up as its picture surviving into
-/// the other machine's pane.
-@MainActor
-@Observable
-public final class PaneTerminalPool {
-    private var models: [Key: PaneTerminalModel] = [:]
-    private let onInput: @Sendable (String, Data) -> Void
-
-    /// Which machine a model belongs to, plus the pane inside it.
-    private struct Key: Hashable {
-        let machine: String
-        let paneId: String
-        /// `paneId` for a pane, the popup's terminal id for a popup.
-        ///
-        /// A separate field rather than a `"popup:"` prefix on `paneId`: `prune`
-        /// compares `paneId` against the live pane set, and a prefixed id never
-        /// matches, so every popup's Ghostty surface would be leaked forever.
-        let isPopup: Bool
-    }
-
-    /// The machine whose panes the pool currently holds.
-    ///
-    /// A switch drops every model: their surfaces belong to another daemon's
-    /// session, so there is nothing in them worth carrying across, and keeping
-    /// them alive is how the previous machine's screen state leaked into the next.
-    private var machine: String?
-
-    public init(onInput: @escaping @Sendable (String, Data) -> Void) {
-        self.onInput = onInput
-    }
-
-    /// Points the pool at the machine whose panes it is about to be asked for.
-    ///
-    /// Called before any model is handed out for a new machine. A switch retires
-    /// every model unconditionally: they are bound to the other daemon's session,
-    /// and the whole reason `w1:p1` on two machines must not share a surface is
-    /// that the Ghostty state inside it belongs to exactly one of them.
-    ///
-    /// Staying on the same machine is a no-op, which is the normal case —
-    /// switching workspaces never reaches this.
-    public func selectMachine(_ identifier: String) {
-        guard machine != identifier else { return }
-        machine = identifier
-        models.removeAll()
-    }
-
-    /// The model for a pane, or for a popup when `isPopup` is set.
-    ///
-    /// The two live in separate key spaces because their graphics scopes differ and
-    /// a popup's `terminalId` can coincide with a pane id: sharing one model would
-    /// let a popup and a pane fight over the same image ids in one terminal.
-    public func model(for paneId: String, isPopup: Bool = false) -> PaneTerminalModel {
-        let key = Key(machine: machine ?? "", paneId: paneId, isPopup: isPopup)
-        if let existing = models[key] {
-            return existing
-        }
-        let model = PaneTerminalModel(
-            paneId: paneId,
-            machine: key.machine,
-            isPopup: isPopup
-        ) { [weak self] data in
-            self?.onInput(paneId, data)
-        }
-        models[key] = model
-        return model
-    }
-
-    /// Drops terminals for panes that no longer exist, releasing their surfaces.
-    public func prune(keeping paneIds: Set<String>) {
-        // Popups are excluded on purpose: `paneIds` is the set of *panes*, a popup
-        // is not one, and its lifetime is the popup's — it closes when the surface
-        // stops carrying one (`applyPopup` is not called, and the view goes away with
-        // the model). Pruning by `paneId` would drop a popup's terminal every time
-        // the pane set changed, throwing away its image cache mid-display.
-        for key in models.keys where !key.isPopup && !paneIds.contains(key.paneId) {
-            models.removeValue(forKey: key)
-        }
-    }
-
-    /// Drops popup terminals for popups the surface no longer carries.
-    ///
-    /// Called from the same place as `prune(keeping:)` — when the store's surface
-    /// changes — but keyed on the popup instead of the pane set. A popup is not in
-    /// `paneIds`, so folding the two together would either leak every popup's
-    /// Ghostty surface (what a `"popup:"`-prefixed `paneId` did) or delete live
-    /// panes.
-    public func prunePopups(keeping terminalIds: Set<String>) {
-        for key in models.keys
-        where key.isPopup && !terminalIds.contains(key.paneId) {
-            models.removeValue(forKey: key)
-        }
-    }
-
-    public func reset() {
-        for model in models.values {
-            model.reset()
-        }
-    }
 }
 
 /// The SwiftUI pane view: Ghostty's surface, plus click-to-focus.
@@ -811,16 +732,11 @@ public struct GhosttyPaneView: View {
 
     public var body: some View {
         TerminalSurfaceView(context: model.state)
-            .background {
-                GeometryReader { proxy in
-                    Color.clear
-                        .task(id: Int(proxy.size.width * 10) &+ Int(proxy.size.height * 10)) {
-                            kraalLog("pane view: \(geometry.paneId) "
-                                + "size=\(Int(proxy.size.width))x\(Int(proxy.size.height))pt "
-                                + "cells=\(geometry.innerRect.width)x\(geometry.innerRect.height)")
-                        }
-                }
-            }
+            // No `GeometryReader` here any more: it reports the size SwiftUI is
+            // *about to* give this pane, which is one layout pass ahead of the view
+            // tree. `PaneSurfaceHostView.layout()` reports the size the view actually
+            // has, and `viewDidSettle` is driven from it.
+            .background(Color.clear)
             .onAppear {
                 // A freshly mounted terminal view has an empty screen, so the
                 // model's memory of what it already drew is a lie. Forget it and
@@ -834,9 +750,20 @@ public struct GhosttyPaneView: View {
             // how a pane resized by a window drag catches up, since the new grid
             // arrives *after* the frame that asked for it.
             .onChange(of: model.state.surfaceSize) { _, new in
-                if new != nil {
-                    model.flushPendingFrame()
-                }
+                guard new != nil else { return }
+                // Two different reasons the grid can move, and both need a repaint:
+                //
+                //   * a frame was parked because the grid had not caught up yet
+                //     (`flushPendingFrame`), and
+                //   * `apply` declined to paint at the stale grid at all, so the
+                //     surface it was given still has to be drawn
+                //     (`reapplyAfterGridViewMoved`).
+                //
+                // The second is the reason this used to leave a pane blank: the
+                // surface was handed over before the NSView had its new size, and
+                // nothing re-applied it afterwards.
+                model.flushPendingFrame()
+                model.reapplyAfterGridViewMoved()
             }
             .onChange(of: surface.surfaceRevision) { _, _ in
                 model.apply(surface: surface)
@@ -860,11 +787,6 @@ public struct GhosttyPaneView: View {
             // re-rendered the tab at a new grid, the view is handed the new
             // surface, and nothing repaints it. That is why dragging a window
             // left the pane frozen at the old size.
-            //
-            // The revision cannot be relied on across a reconnect, but the grid
-            // can: `apply` already treats a changed frame grid as "repaint the
-            // whole frame", so keying the trigger on the pane's own grid closes
-            // the gap without adding a second notion of size.
             .onChange(of: geometry.innerRect) { _, _ in
                 model.apply(surface: surface)
             }

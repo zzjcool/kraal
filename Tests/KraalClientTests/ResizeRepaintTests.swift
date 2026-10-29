@@ -20,6 +20,7 @@
 // the view cannot be driven without a window.
 
 import CoreGraphics
+import Foundation
 import Testing
 
 import KraalProtocol
@@ -350,21 +351,51 @@ struct ScreenResetScopeTests {
         #expect(!needs)
     }
 
-    /// A new grid must reset: rows written at the old width are still in the
-    /// scrollback, and an incremental repaint only revisits rows that changed.
-    @Test("a grid change does need a screen reset")
-    func gridChangeNeedsReset() {
+    /// A **width** change must reset: rows written at the old width are still in
+    /// the scrollback, and an incremental repaint only revisits rows that changed.
+    @Test("a width change does need a screen reset")
+    func widthChangeNeedsReset() {
         #expect(SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: false,
             previousGrid: (width: 119, height: 40),
             currentGrid: (width: 111, height: 35)
         ))
-        // Rows only, so a check that compared columns alone would miss it.
+        // Same height, so a check that compared rows alone would miss it.
         #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 119, height: 40),
+            currentGrid: (width: 111, height: 40)
+        ))
+    }
+
+    /// A **height**-only change must not reset, and the renderer must still clear
+    /// the rows the frame no longer covers.
+    ///
+    /// This is the drag path. A vertical divider produces one-row height changes at
+    /// mouse speed, and treating each as a reset meant `2J 3J H` plus a full
+    /// rewrite: measured on a live drag, 1139 of 1195 paints took that path at ~6 KB
+    /// of ANSI each, up to 97 in a second. Correctness has to survive dropping the
+    /// reset, so the clear is asserted here rather than assumed.
+    @Test("a height-only change does not reset, but clears the rows it lost")
+    func heightChangeClearsWithoutReset() {
+        #expect(!SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: false,
             previousGrid: (width: 111, height: 40),
             currentGrid: (width: 111, height: 35)
         ))
+
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(Self.blankFrame(columns: 8, rows: 40), clearingFirst: true)
+        let bytes = renderer.render(Self.blankFrame(columns: 8, rows: 35), clearingFirst: false)
+        let text = String(bytes: bytes, encoding: .utf8) ?? ""
+
+        // Rows 36..40 are the ones that used to be content and are now nothing.
+        // `0J` from the first row past the new height erases to the end of screen,
+        // which covers all of them without a full-screen erase.
+        #expect(text.contains("\u{1B}[36;1H"), "the rows below the new height were not cleared")
+        #expect(text.contains("\u{1B}[0J"), "the clear was not an erase-to-end")
+        #expect(!text.contains("\u{1B}[2J"), "a full-screen erase is what the drag could not afford")
+        #expect(!text.contains("\u{1B}[3J"), "the scrollback must not be thrown away for a resize")
     }
 
     /// A restarted delta stream refers to a baseline that no longer exists, so it
@@ -379,12 +410,43 @@ struct ScreenResetScopeTests {
     }
 
     /// Until a frame has been painted there is nothing incremental to paint onto.
-    @Test("the first frame needs a screen reset")
-    func firstFrameNeedsReset() {
-        #expect(SurfaceGeometry.needsScreenReset(
+    /// "No previous grid" is not a reason to erase, and saying it was is what made
+    /// an erase self-sustaining.
+    ///
+    /// `needsScreenReset` answers one question: does the screen hold cells that this
+    /// frame can no longer describe? With no previous grid there is nothing painted
+    /// to describe, so the answer is no. The first frame still *clears* — the
+    /// renderer does that itself (`clear = firstFrame || clearingFirst`) — but the
+    /// caller does not need to ask, and asking cost real frames:
+    ///
+    ///   * the caller clears `frameGrid` whenever the daemon's grid disagrees with the
+    ///     frame, so during startup every frame looked like "no previous grid";
+    ///   * 110 of 116 erases in one session carried `projection=false restart=false
+    ///     widthMoved=false clean=false`, i.e. all four named reasons were false and
+    ///     the frame still erased.
+    @Test("needsScreenReset has no opinion when nothing has been painted")
+    func firstFrameIsNotAReset() {
+        #expect(!SurfaceGeometry.needsScreenReset(
             deltaStreamRestarted: false,
             previousGrid: nil,
             currentGrid: (width: 111, height: 35)
+        ))
+        // What does need a reset: a width change, and a restarted delta stream.
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 112, height: 35)
+        ))
+        #expect(SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: true,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 111, height: 35)
+        ))
+        // And a height change does not, which is what keeps a vertical drag cheap.
+        #expect(!SurfaceGeometry.needsScreenReset(
+            deltaStreamRestarted: false,
+            previousGrid: (width: 111, height: 35),
+            currentGrid: (width: 111, height: 36)
         ))
     }
 
@@ -446,4 +508,233 @@ struct ScreenResetScopeTests {
             currentGrid: grid
         ))
     }
+    /// A frame of blank cells, sized exactly. Enough to drive the renderer: the
+    /// assertions are about which escape sequences come out, not the glyphs.
+    static func blankFrame(columns: UInt16, rows: UInt16) -> FrameData {
+        let count = Int(columns) * Int(rows)
+        let buffer = CellBuffer(Array(repeating: .blank, count: count), width: Int(columns))
+        return FrameData(buffer: buffer, width: columns, height: rows,
+                         cursor: nil, hyperlinks: [], graphics: Data())
+    }
+
+    /// Re-painting a parked frame must not erase the screen unless the width moved.
+    ///
+    /// This decision shipped broken: the caller cleared `frameGrid` and then asked
+    /// whether it was nil, so the answer was always yes and every parked repaint was
+    /// a full-screen erase. It read fine and every test passed, because nothing
+    /// called it — the live log is what caught it, still showing 509 of 565 paints
+    /// with `erase=1` while the surface width never left 126.
+    @Test("a parked repaint erases only when the width moved")
+    func parkedRepaintErasesOnlyOnWidthChange() {
+        let wide = Self.blankFrame(columns: 126, rows: 26)
+        let tall = Self.blankFrame(columns: 126, rows: 30)
+
+        // Height-only: the rows are still at the right columns, so no erase.
+        #expect(!PaneTerminalModel.widthMoved(from: wide, to: tall),
+                "a height change erased the screen; that is the whole drag cost")
+        // Width: every row reflows, so the screen has to go.
+        #expect(PaneTerminalModel.widthMoved(
+            from: Self.blankFrame(columns: 120, rows: 26),
+            to: wide
+        ))
+        // No baseline at all: nothing on screen is trustworthy.
+        #expect(PaneTerminalModel.widthMoved(from: nil, to: wide))
+    }
+
+    /// A grid change must reissue the cells even when the frame's own size is the
+    /// same, and must **not** erase.
+    ///
+    /// The live failure: after a vertical drag settled, `paint:` logged `bytes=38`
+    /// (cursor sequence, zero cells) every second for as long as it was observed.
+    /// The pane's grid had moved, so the rows the cells belong to no longer matched
+    /// what was on screen — but the frame was the same size as the previous one, so
+    /// every row compared equal and nothing was written. The rows the pane stopped
+    /// covering kept their old content: the blank area.
+    @Test("a grid move reissues the cells without erasing")
+    func gridMoveReissuesWithoutErase() {
+        var renderer = SurfaceANSIRenderer()
+        // Paint one frame at 20 rows.
+        let first = renderer.render(Self.blankFrame(columns: 8, rows: 20), clearingFirst: true)
+        #expect(!first.isEmpty)
+
+        // Same 8x20 frame, but the grid moved, so the baseline is meaningless.
+        let again = renderer.render(
+            Self.blankFrame(columns: 8, rows: 20),
+            clearingFirst: false,
+            invalidateBaseline: true
+        )
+        let text = String(bytes: again, encoding: .utf8) ?? ""
+        // Every row written again: `CSI <n>;1H` for each.
+        #expect(text.contains("\u{1B}[1;1H"), "row 1 was not reissued")
+        #expect(text.contains("\u{1B}[20;1H"), "the last row was not reissued")
+        // And without the erase, which a vertical drag cannot afford per mouse move.
+        #expect(!text.contains("\u{1B}[2J"), "a grid move must not throw the screen away")
+        #expect(!text.contains("\u{1B}[3J"), "a grid move must not throw the scrollback away")
+    }
+
+    /// `gridMoved` is the predicate that feeds it.
+    @Test("gridMoved sees a grid change the renderer cannot")
+    func gridMovedDetectsGridChange() {
+        let frame = Self.blankFrame(columns: 8, rows: 20)
+        #expect(PaneTerminalModel.gridMoved(from: nil, to: frame))
+        #expect(!PaneTerminalModel.gridMoved(from: frame, to: frame))
+        #expect(PaneTerminalModel.gridMoved(
+            from: Self.blankFrame(columns: 8, rows: 21), to: frame
+        ))
+    }
+
+    /// `viewDidSettle(size:)` records the size the view actually has.
+    ///
+    /// The bug it replaces: the repaint was driven by `GeometryReader`'s proposal, which
+    /// is one layout pass **ahead** of the view tree. Measured with the view-chain
+    /// diagnostic, every entry read `terminal == super1` while both trailed the
+    /// allocation by one step:
+    ///
+    ///     allocated=148.0  terminal=74.0
+    ///     allocated=203.5  terminal=148.0
+    ///     allocated=444.0  terminal=203.5
+    ///
+    /// So the NSView was never disobedient — the trigger was reading a rectangle the
+    /// view did not have yet, and when the drag stopped no further pass came.
+    @Test("viewDidSettle records the view's own size")
+    @MainActor
+    func viewDidSettleRecordsSize() {
+        let model = PaneTerminalModel(paneId: "wB:p14") { _ in }
+        #expect(model.lastAllocatedSize == nil)
+        model.viewDidSettle(size: CGSize(width: 1071, height: 777))
+        #expect(model.lastAllocatedSize == CGSize(width: 1071, height: 777))
+        // A degenerate size is not the new baseline.
+        model.viewDidSettle(size: .zero)
+        #expect(model.lastAllocatedSize == CGSize(width: 1071, height: 777))
+        // A real change does move it.
+        model.viewDidSettle(size: CGSize(width: 1071, height: 129.5))
+        #expect(model.lastAllocatedSize == CGSize(width: 1071, height: 129.5))
+    }
+
+    /// The first grid negotiation must not run on the fallback cell estimate.
+    ///
+    /// Measured on a live start, before this guard existed:
+    ///
+    ///     19:41:43.131  geometry: 120x40 -> 137x54      (fallback 7.8x17)
+    ///     19:41:43.217  layout: grid=137x54  rect=1164pt  (container is 1071)
+    ///     19:41:43.268  layout: grid=126x50  rect=1071pt  (real 8.5x18.5)
+    ///
+    /// 137 columns at 8.5 pt is 1164.5 pt: 93.5 pt of pane outside the window, and
+    /// every transition is a new projection, so both panes were wiped and repainted
+    /// twice before anything was touched.
+    @Test("the fallback cell size is wider than the real font, so it cannot size a surface")
+    func fallbackWouldOverflowTheContainer() {
+        let container = CGSize(width: 1071, height: 930)
+        let fallback = SurfaceGeometry.cells(
+            for: container, cellSize: SurfaceGeometry.fallbackCellSize, scale: 2
+        )
+        let real = SurfaceGeometry.cells(
+            for: container, cellSize: CGSize(width: 17, height: 37), scale: 2
+        )
+        // The fallback asks for the same grid the live log showed: 137x54.
+        #expect(fallback.cols == 137)
+        #expect(real.cols == 126)
+        // And that grid does not fit: 137 columns of the real font measure more
+        // than the container, which is the pane-outside-the-window symptom.
+        #expect(CGFloat(fallback.cols) * 8.5 > container.width)
+        #expect(CGFloat(real.cols) * 8.5 <= container.width)
+    }
+
+    /// The negotiation must refuse to release a grid computed from the fallback.
+    @Test("a surface is not sized from the fallback cell estimate")
+    @MainActor
+    func negotiationWaitsForAMeasurement() {
+        let store = AppStore()
+        #expect(!store.hasMeasuredCellSize, "a fresh store has only the fallback")
+        #expect(store.terminalCellSize == SurfaceGeometry.fallbackCellSize)
+        // The first real measurement flips it, and asks for a re-evaluation.
+        store.updateCellMetrics(CGSize(width: 17, height: 37))
+        #expect(store.hasMeasuredCellSize)
+        #expect(store.needsGeometryReeval)
+        // A measurement that happens to land within the threshold still counts,
+        // because it is what unblocks the negotiator.
+        let second = AppStore()
+        second.updateCellMetrics(CGSize(width: 17.1, height: 37.1))
+        #expect(second.hasMeasuredCellSize)
+    }
+
+    /// A new projection must rewrite every row without throwing the screen away.
+    ///
+    /// Measured on a live start, twice, with the width constant the whole time:
+    ///
+    ///     [19:46:12.725] erase why: wB:p16 projection=true restart=false \
+    ///                    widthMoved=false clean=false
+    ///
+    /// Both panes erased and repainted 6 KB for a projection change that needed only
+    /// the rows rewritten. Erasing also drops scrollback, which is the part a user
+    /// notices.
+    @Test("a projection change repaints every row and does not erase")
+    func projectionChangeRepaintsWithoutErasing() {
+        var renderer = SurfaceANSIRenderer()
+        _ = renderer.render(Self.blankFrame(columns: 8, rows: 20), clearingFirst: true)
+        // Same grid, different projection: baseline worthless, scrollback fine.
+        let repaint = renderer.render(
+            Self.blankFrame(columns: 8, rows: 20),
+            clearingFirst: false,
+            invalidateBaseline: true
+        )
+        let text = String(bytes: repaint, encoding: .utf8) ?? ""
+        // Every row written again.
+        #expect(text.contains("\u{1B}[1;1H"), "row 1 was not reissued")
+        #expect(text.contains("\u{1B}[20;1H"), "the last row was not reissued")
+        // And the screen — hence the scrollback — survives.
+        #expect(!text.contains("\u{1B}[2J"), "a projection change must not erase")
+        #expect(!text.contains("\u{1B}[3J"), "a projection change must not drop scrollback")
+    }
+
+    /// A rebuilt surface starts empty, so the baseline must not outlive it.
+    ///
+    /// This is the "everything went magenta" failure. Ghostty replaces its surface on
+    /// ordinary events (a reattach, a rebuild after the zero-size guard, a config
+    /// change) and the replacement has no cells. The baseline survived, so every later
+    /// frame compared equal to cells that existed nowhere and was skipped forever:
+    ///
+    ///     frame skipped: pane=wB:p16 rev=20348->20348 frame=126x44 \
+    ///                    previous=126x44 cellsDiffer=false graphicsDiffer=false
+    ///
+    /// Forcing the terminal background to magenta then showed the whole pane magenta:
+    /// the erase had already taken the previous frame and nothing put cells back.
+    @Test("a replaced surface invalidates the painted baseline")
+    func replacedSurfaceInvalidatesBaseline() {
+        let first = NSObject()
+        let second = NSObject()
+        #expect(
+            PaneTerminalModel.surfaceWasReplaced(
+                seenBefore: true, previous: first, current: second
+            ),
+            "a different surface instance must count as a replacement"
+        )
+    }
+
+    /// Recording the same surface twice is not a replacement.
+    ///
+    /// Without this, every frame would clear the baseline and repaint every row.
+    @Test("the same surface keeps the baseline")
+    func sameSurfaceKeepsBaseline() {
+        let surface = NSObject()
+        #expect(
+            !PaneTerminalModel.surfaceWasReplaced(
+                seenBefore: true, previous: surface, current: surface
+            )
+        )
+    }
+
+    /// Nothing painted yet means nothing to invalidate.
+    ///
+    /// The first frame on a fresh surface must not be treated as a replacement: it is
+    /// the ordinary first paint, already handled by the renderer's own clear.
+    @Test("an unrecorded surface is not a replacement")
+    func unrecordedSurfaceIsNotAReplacement() {
+        #expect(
+            !PaneTerminalModel.surfaceWasReplaced(
+                seenBefore: false, previous: nil, current: NSObject()
+            )
+        )
+    }
+
 }

@@ -15,13 +15,44 @@ import KraalTransport
 extension AppStore {
     /// Records the renderer's measured cell size and re-negotiates if it changed
     /// enough to alter the grid.
+    /// Records the renderer's measured cell size.
+    ///
+    /// `hasMeasuredCellSize` exists because the startup sequence used to negotiate
+    /// the whole surface against `fallbackCellSize`, then again against the real
+    /// font, and once more after the window settled — three grids in 240 ms, with
+    /// the middle one wider than the window:
+    ///
+    ///     19:41:43.131  geometry: 120x40 -> 137x54      (fallback 7.8x17)
+    ///     19:41:43.217  layout: grid=137x54  rect=1164pt  (container is 1071)
+    ///     19:41:43.268  layout: grid=126x50  rect=1071pt  (real 8.5x18.5)
+    ///
+    /// 137 columns at 8.5 pt is 1164.5 pt: 93.5 pt of pane outside the window. Each
+    /// transition is a new projection, so each wiped and repainted both panes before
+    /// the user had touched anything.
     public func updateCellMetrics(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
         let changed = abs(size.width - terminalCellSize.width) > 0.5
             || abs(size.height - terminalCellSize.height) > 0.5
-        guard changed else { return }
-        kraalLog("cell metrics: \(terminalCellSize) -> \(size)")
+        // The first real measurement always counts, even if it happens to land within
+        // the threshold: `hasMeasuredCellSize` is what lets the negotiator stop
+        // waiting, and a guess that was accidentally close enough would otherwise
+        // leave the whole startup sequence blocked.
+        guard changed || !hasMeasuredCellSize else { return }
+        kraalLog("cell metrics: \(terminalCellSize) -> \(size)"
+            + (hasMeasuredCellSize ? "" : " (first measurement)"))
         terminalCellSize = size
+        hasMeasuredCellSize = true
+        // The daemon divides pane pixel rects by the cell size, and the handshake could
+        // only carry a guess: connections are built before any surface exists, so they
+        // announced the `(10, 20)` default while the real font measures `17x37`. Nothing
+        // corrected it afterwards, because `EndpointConnection.cellSize` was a `let`.
+        // `size` is already in device pixels — `reportCellMetrics` passes
+        // `surfaceSize.cellWidthPixels` — so it goes on the wire unchanged.
+        let pixels = (width: UInt32(size.width.rounded()), height: UInt32(size.height.rounded()))
+        for endpoint in endpoints {
+            guard let connection = endpoint.connection else { continue }
+            Task { await connection.updateCellSize(width: pixels.width, height: pixels.height) }
+        }
         needsGeometryReeval = true
     }
 

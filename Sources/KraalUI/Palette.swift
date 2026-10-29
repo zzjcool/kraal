@@ -36,6 +36,18 @@ public struct Palette: Equatable, Sendable {
     public var accent: UInt32?
     /// Tab bar, floating panels, overlays, modals.
     public var panelBackground: UInt32?
+    /// The terminal's own background — the colour behind its cells.
+    ///
+    /// This is the one colour that has to reach Ghostty rather than the SwiftUI
+    /// chrome, so it is carried as a token and converted at the boundary (see
+    /// ``terminalBackgroundHex``). `nil` leaves whatever libghostty's built-in theme
+    /// picked.
+    ///
+    /// Why it matters, measured: libghostty's defaults are `alabaster` (`#F7F7F7`) on
+    /// light and `afterglow` (`#212121`) on dark appearance, so a gruvbox user saw a
+    /// `(247,247,247)` band between two `(17,20,25)` panes. That band was the terminal
+    /// painting its own background into the row its view was taller than the grid.
+    public var terminalBackground: UInt32?
     /// Optional sidebar background. `nil` keeps whatever is behind it.
     public var sidebarBackground: UInt32?
     /// Active workspace row, focused agent row.
@@ -77,6 +89,7 @@ public struct Palette: Equatable, Sendable {
     public init(
         accent: UInt32? = nil,
         panelBackground: UInt32? = nil,
+        terminalBackground: UInt32? = nil,
         sidebarBackground: UInt32? = nil,
         activeRowBackground: UInt32? = nil,
         selectionBackground: UInt32? = nil,
@@ -97,6 +110,7 @@ public struct Palette: Equatable, Sendable {
     ) {
         self.accent = accent
         self.panelBackground = panelBackground
+        self.terminalBackground = terminalBackground
         self.sidebarBackground = sidebarBackground
         self.activeRowBackground = activeRowBackground
         self.selectionBackground = selectionBackground
@@ -251,6 +265,17 @@ public extension Palette {
     var paneSurfaceColor: Color {
         color(panelBackground, fallback: color(surfaceDim, fallback: .clear))
     }
+    /// The terminal background as the `RRGGBB` string Ghostty's config takes.
+    ///
+    /// `surface_dim` is the fallback because every built-in theme names it and it is
+    /// the theme's "very dim surface" — for gruvbox it is `#282828`, which is literally
+    /// that theme's own `background`.
+    var terminalBackgroundHex: String? {
+        guard let token = terminalBackground ?? surfaceDim else { return nil }
+        return String(format: "%02X%02X%02X",
+                      (token >> 16) & 0xFF, (token >> 8) & 0xFF, token & 0xFF)
+    }
+
     var mutedColor: Color { color(overlay0, fallback: .secondary) }
     var mutedStrongColor: Color { color(overlay1, fallback: .secondary) }
     var textColor: Color { color(text, fallback: .primary) }

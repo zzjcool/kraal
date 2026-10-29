@@ -25,6 +25,7 @@
 
 import CoreGraphics
 import Foundation
+import GhosttyTerminal
 import Testing
 
 @testable import KraalProtocol
@@ -114,6 +115,7 @@ struct PaneGraphicsTests {
         _ scene: SurfaceGraphicsScene,
         revision: UInt64 = 1,
         gridWidth: UInt16 = 4,
+        paneWidth: UInt16 = 4,
         paneOrigin: (x: UInt16, y: UInt16) = (x: 0, y: 0)
     ) -> PaneSurfaceFrame {
         PaneSurfaceFrame(
@@ -128,7 +130,7 @@ struct PaneGraphicsTests {
                 innerRect: SurfaceRect(
                     originX: paneOrigin.x,
                     originY: paneOrigin.y,
-                    width: 4,
+                    width: paneWidth,
                     height: 1
                 ),
                 scrollbarRect: nil,
@@ -275,14 +277,24 @@ struct PaneGraphicsTests {
     @Test("a frame that resets the screen re-uploads the image")
     func resetFrameReuploads() {
         let model = makeModel()
+        // A grid is required to reach the paint path: without one every frame is
+        // parked, so this used to assert on `parkedFrame` and prove nothing about
+        // the reset pairing.
+        model.gridOverride = TerminalGridMetrics(
+            columns: 4, rows: 1,
+            widthPixels: 68, heightPixels: 37,
+            cellWidthPixels: 17, cellHeightPixels: 37
+        )
         model.apply(surface: surface(scene(), revision: 1))
-        #expect(model.parkedFrame?.graphics.isEmpty == false)
+        #expect(hasUpload(model.lastPainted ?? Data()), "the first frame carried no image")
 
         let resetsBefore = model.screenResetCount
-        model.apply(surface: surface(scene(), revision: 1, gridWidth: 5))
+        // A **pane** width change — the reset decision reads the pane's own grid, so
+        // `gridWidth` and `paneWidth` move together.
+        model.apply(surface: surface(scene(), revision: 1, gridWidth: 5, paneWidth: 5))
         #expect(model.screenResetCount > resetsBefore,
                 "the fixture never reached the reset branch, so it proves nothing")
-        #expect(hasUpload(model.parkedFrame?.graphics ?? Data()),
+        #expect(hasUpload(model.lastPainted ?? Data()),
                 "the frame that cleared the screen carried no upload")
     }
 
