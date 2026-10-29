@@ -222,3 +222,21 @@ Apache-2.0，新文件需带 SPDX 头（见 [CONTRIBUTING.md](../CONTRIBUTING.md
 | 3 | 三个可选 codec（reuse/delta/scroll）的收益 | 仍为关闭；开启可再省带宽 |
 | 4 | 超大 surface（>500 列）性能 | 未压测 |
 | 5 | 系统输入法（IME）合成按键 | 拼音候选阶段会把合成键当文本；需要在 `TextCommit` 路径上加 marked-text 判断 |
+
+### 已归档的实验分支（2026-10-29）
+
+`exp/hold-until-adopted`（14 个提交）试过「帧挂起到引擎采纳、不裁剪」这条路，为了让
+拖动时几何不追内容。结论：**它能消掉 mismatch / surface 重建，但消不掉抖动**——把
+引擎 drawable 冻住之后用户手动拖仍然抖，这条负结果直接指向了真正的机制（合成器把
+上一帧按新矩形拉一遍，见 `docs/DESIGN.md` §4.4.1），也就是现在「拖动期间自绘」的
+方案（`CellPainterPolicy`）。
+
+分支已删除，提交留在**本地 tag** `archive/exp-hold-until-adopted`（未推送，需要时
+`git log archive/exp-hold-until-adopted`）。里面还有两样没有进 main 的东西，留个索引：
+
+- `069fbfb` 的擦屏修复（`lastPaintedWidth` + `widthMoved(fromWidth:to:)`，
+  用例 `aParkThatEndsDoesNotErase`）：独立缺陷，只在「挂起模型」成立时才会触发；
+  现在的渲染路径下没有复现过，所以没有摘出来单独合。
+- 21 个 demo 模式 + `Scripts/demo-jitter.sh`：抖动测量仪，用离屏 demo 窗口量静态带
+  闪烁。抖动现在有真门禁了（`gui.sh run drag-jitter`，见 `docs/AUTOMATION.md` §15），
+  这套 demo 仪器不再需要。
