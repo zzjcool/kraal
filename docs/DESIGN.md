@@ -579,8 +579,27 @@ func layout(_ surface: PaneSurfaceFrame, in size: CGSize) -> [PaneID: CGRect] {
 现在由 `CellGlyphShapes` 画几何：U+2500–257F 框线（轻/重/双线/混合）、
 U+2580–259F 方块、U+2800–28FF 盲文；`░▒▓` 按引擎的做法填混色。
 
-**还没接的**：选择/链接/IME/搜索高亮（overlay 不透明，会盖住引擎画的）、sixel 与
-kitty graphics、滚动回看。这也是「只在拖动期间用自绘」而不是全面替换的原因。
+#### 4.4.2 为什么现在还不能全面替换引擎（2026-10-29 侦察结论）
+
+问题不是「overlay 不透明」这么一句话，而是**引擎根本没有把这些东西分开暴露**。逐项
+查过封装库（`.build/checkouts/libghostty-spm`，pin `1.6.20261003`，checkout 只有 Swift
+封装 + patch，没有 zig 源码）：
+
+| 能力 | 引擎暴露什么 | 全面自绘能不能补 |
+| --- | --- | --- |
+| 选中高亮 | `hasSelection()` + `readSelection()`（字符串）+ **内部** `SelectionResult{offsetStart,offsetLength}`（viewport 线性索引 `row*cols+col`，**没有矩形**） | 差一步：几何可以自己算，但这两个偏移是 internal，要改封装才拿得到 |
+| 搜索匹配 | 只有 apprt action 的计数（`search_total/selected`），**没有位置**，也没有 `search_*` C 函数；Kraal 本身没有搜索 UI | 不能 |
+| 链接 | 悬停回调只给 URL，不给单元格范围 | **能**：wire 的 `FrameData.hyperlinks` + 每 cell 的 `hyperlink` 就在手上，下划线可以自己画 |
+| IME 预编辑 | 只能送进去（`preedit()` internal），读不出来；`TerminalMarkedTextState` 也是 internal | 不能（但拖动时没人输入法打字，`.drag` 模式下无影响） |
+| 图像（sixel/kitty） | 引擎画，没有给位置/位图的数据接口 | 不能 |
+| 只画高亮不画正文 | 没有：config 颜色是 `uint8_t r,g,b`（无 alpha），没有 `font-opacity`/`text-opacity`；`custom-shader` 这个键存在但构建时 `-Dcustom-shaders=false` | 不能 |
+
+所以「拖动期间自绘、松手交还」不是折中凑合，而是**当前唯一能拿到两者的组合**。如果
+哪天要全面替换，第一步不是改 overlay，而是给封装加一个 `selectionRects()`（把内部
+`SelectionResult` 暴露成矩形），那是一件独立的小事；IME 预编辑则要上游给回调。
+
+（旁证：`setOcclusion(false)` 只会停掉 draw，**不清空**已有 IOSurface —— 上游 zig 行为，
+封装未验证。）
 
 ### 4.5 为什么侧边栏用 SwiftUI 而不是 cell 绘制
 
