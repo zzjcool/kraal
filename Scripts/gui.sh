@@ -759,6 +759,13 @@ launch_app() {
     local) die "Kraal window did not appear; see $SCRATCH/app.out" ;;
     vm)
         tart exec "$VM" /bin/bash -lc "cat $VM_ROOT/app.out 2>/dev/null | tail -20" >&2
+        # A guest that died mid-case must not end the run: the caller retries once
+        # after restarting it (see `run_case`). `die` here aborted the whole suite with
+        # "VM kraal-agent is not running" and left every later case untested.
+        if ! vm_running; then
+            bad "guest died while launching Kraal"
+            return 3
+        fi
         die "Kraal window did not appear in $VM"
         ;;
     esac
@@ -4258,7 +4265,7 @@ collect_app_log() {
     fi
 }
 
-run_case() {
+run_case_once() {
     local name="$1"
     local runner="case_${name//-/_}"
     if ! declare -F "$runner" >/dev/null; then
@@ -4373,7 +4380,10 @@ run_case() {
     daemon_config
     start_daemon
     app_setup
-    launch_app
+    if ! launch_app; then
+        # 3 = the guest went away; `run_case` restarts it and runs the case again.
+        return 3
+    fi
 
     # These are host-side shell redirections, so they must target host_dir: under
     # the vm backend `dir` is a guest path that does not exist here.
@@ -4500,6 +4510,40 @@ JSON
         printf '    artifacts: %s\n' "$host_dir"
     fi
     return "$code"
+}
+
+# Runs a case, and survives the guest dying underneath it.
+#
+# Apple's Virtualization.framework can stop the VM mid-case: both crashes on 2026-10-29
+# are `EXC_BREAKPOINT` / `SIGTRAP` on the queue `com.apple.virtualization.virtio.vsock-device:0`
+# inside `com.apple.Virtualization.VirtualMachine` (crash reports in
+# `~/Library/Logs/DiagnosticReports/`, same signature 30 minutes apart, different cases).
+# Nothing in the guest is at fault and nothing we ship can fix it, but it used to end the
+# whole suite: the run died with "VM kraal-agent is not running" and every later case went
+# untested, which reads exactly like a product failure.
+#
+# So: one retry, after restarting the guest and re-deploying. A second death reports the
+# case as `vm-died` and returns 2 (environment), never 1 (product).
+run_case() {
+    local name="$1"
+    local code=0
+    run_case_once "$name" || code=$?
+    if [ "$BACKEND" != "vm" ] || vm_running; then
+        return "$code"
+    fi
+    bad "guest died during '$name' (VZ stopped the VM); restarting and retrying once"
+    vm_start || return 2
+    vm_deploy || return 2
+    case "$name" in
+    machines-*) machines_prereqs ;;
+    esac
+    local retry=0
+    run_case_once "$name" || retry=$?
+    if [ "$BACKEND" = "vm" ] && ! vm_running; then
+        bad "guest died again during '$name'; giving up (environment, not a product failure)"
+        return 2
+    fi
+    return "$retry"
 }
 
 # The jitter is a property of how the picture is produced, not of where the divider ended
