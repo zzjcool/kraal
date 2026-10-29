@@ -141,6 +141,24 @@ struct PaneLayoutView: View {
                             // shrink it made Ghostty compute a narrower grid
                             // than the cells it was sent, and every row wrapped.
                             .frame(width: frame.width, height: frame.height)
+                            // Clip the terminal to its own box, so pixels from a
+                            // size the pane no longer has cannot show. The container
+                            // is clipped too, but that clips at the *container's*
+                            // edge — far too coarse: a pane that shrinks keeps its
+                            // old pixels inside the container, so nothing removes
+                            // them.
+                            //
+                            // They survive because the repaint decision compares cell
+                            // grids, not point sizes: during a drag one grid is
+                            // measured at two sizes (`819x323pt` then `892x351pt`,
+                            // both `cells=105x19`), so `needsRepaint`/`needsScreenReset`
+                            // answer "nothing changed" while the box grew. Resetting
+                            // would erase and repaint every drag frame — the flash
+                            // #181 removed; a clip touches no pixel inside the box.
+                            // Upstream clips for the same reason
+                            // (`herdr-gpui/render.rs`, `.overflow_hidden()`).
+                            // `ResizeRepaintTests.gridIsNotThePointSize` pins the gap.
+                            .clipped()
                             // The scroll indicator, in the lane the daemon
                             // reserved for it.
                             //
