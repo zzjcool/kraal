@@ -60,8 +60,13 @@ enum SyntheticInput {
     /// multiplying an already-doubled input and made the divider run away from the
     /// pointer. Chasing the remaining 2x by editing this file would be papering
     /// over an app bug — see `docs/ENVIRONMENT.md` §8.8.
+    /// - Parameter onHold: called with the button still down, after the last move. It is the
+    ///   only moment a case can look at the window *while* a drag is in progress, which is
+    ///   exactly when the divider-jitter question is decided: `commandDrag` uses it to take
+    ///   a burst of screenshots before releasing.
     static func drag(
-        from start: CGPoint, to end: CGPoint, steps: Int = 1, button: CGMouseButton = .left
+        from start: CGPoint, to end: CGPoint, steps: Int = 1,
+        button: CGMouseButton = .left, onHold: (() -> Void)? = nil
     ) {
         let dragType: CGEventType = button == .right ? .rightMouseDragged : .leftMouseDragged
         let total = max(steps, 1)
@@ -86,6 +91,7 @@ enum SyntheticInput {
         }
 
         usleep(80_000)
+        onHold?()
         post(.leftMouseUp, at: end, button: button)
     }
 

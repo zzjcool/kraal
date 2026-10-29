@@ -101,6 +101,10 @@ fi
 # Derived from the socket path so two concurrent runs cannot collide on a log
 # file, and so the name here matches what KraalLog picks.
 SESSION="${KRAAL_DEV_SESSION:-gui-$$}"
+# Which renderer the app under test should use. The shipped default (an empty value) draws
+# panes itself only while a divider is dragged; `off`/`always` exist so a case can measure
+# what that is worth instead of assuming it.
+CELL_PAINTER="${KRAAL_CELL_PAINTER:-}"
 
 # True when the login window owns the session. Synthetic events are posted to
 # whatever is frontmost; while locked that is loginwindow, so they silently do
@@ -437,6 +441,24 @@ container_size() {
     printf '%s' "$line" | sed -n 's/.*container=\([0-9]*\)x\([0-9]*\).*/\1 \2/p'
 }
 
+# Where the terminal container starts inside the window, in points.
+#
+# The vertical divider cases used to place the drag at `container_h / 2` from the window's
+# top, which is 71pt above the real divider (the container starts below the title/tab bar)
+# — outside a two-cell hit area, so the press missed and the case "passed" while measuring
+# nothing but the absence of damage from a drag that never started. The origin is logged
+# for exactly this reason (issue #103), so read it instead of deriving it.
+container_origin() {
+    local log="Kraal-$SESSION.log" line
+    case "$BACKEND" in
+    local) line=$(tail -200 "$HOME/Library/Logs/$log" 2>/dev/null | grep 'layout: container=' | tail -1) ;;
+    vm) line=$(tart exec "$VM" /bin/bash -lc "tail -200 ~/Library/Logs/$log 2>/dev/null" 2>/dev/null \
+            | grep 'layout: container=' | tail -1) ;;
+    esac
+    [ -n "$line" ] || return 1
+    printf '%s' "$line" | sed -n 's/.*containerOrigin=\(-\{0,1\}[0-9]*\),\(-\{0,1\}[0-9]*\).*/\1 \2/p'
+}
+
 # ---------------------------------------------------------------- lifecycle
 
 cmd_probe() {
@@ -703,6 +725,7 @@ launch_app() {
         KRAAL_DEV_BACKGROUND="$background" \
         KRAAL_DEV_SESSION="$SESSION" \
         KRAAL_PREFS_SUITE="$PREFS_SUITE" \
+        KRAAL_CELL_PAINTER="$CELL_PAINTER" \
         nohup "$ROOT/build/Kraal.app/Contents/MacOS/KraalMac" \
             >"$SCRATCH/app.out" 2>&1 &
         ;;
@@ -716,6 +739,7 @@ launch_app() {
              KRAAL_HERDR_SOCKET=$CLIENT_SOCKET KRAAL_HERDR_HOME=$ROSTER_HOME \
              KRAAL_DEV_BACKGROUND=$background KRAAL_DEV_SESSION=$SESSION \
              KRAAL_PREFS_SUITE=$PREFS_SUITE HERDR_CONFIG_DIR=$VM_ROOT/config \
+             KRAAL_CELL_PAINTER=$CELL_PAINTER \
              nohup $VM_APP/Contents/MacOS/KraalMac > $VM_ROOT/app.out 2>&1 </dev/null &
              disown 2>/dev/null
              echo launched" \
@@ -4434,7 +4458,145 @@ JSON
     return "$code"
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+# The jitter is a property of how the picture is produced, not of where the divider ended
+# up: two frames of a pane that did not change and was not moved must be the same picture.
+# So this case captures frames *inside* the drag (the driver holds the button down) and
+# diffs them over a band of the pane above the divider, which the drag never touches.
+#
+# The band holds `seq` output, i.e. constant text: with the engine painting, a drag resizes
+# its layer and the compositor stretches the last frame until the engine repaints at the new
+# size, so the band changes between frames. Drawing the cells at paint time has no such
+# window — which is what `KRAAL_CELL_PAINTER` (default: during a drag) is for.
+case_drag_jitter() {
+    requires() { echo focus; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        if [ "$(pane_count)" = "1" ]; then
+            herdr pane split --pane "$(first_pane_id)" --direction down >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "2" ] || return 1
+        sleep 1
+        pane_layout | layout_check '
+import json, sys
+layout = json.load(sys.stdin)["result"]["layout"]
+sys.exit(0 if len(layout["splits"]) == 1 else 1)
+'
+    }
+    action() {
+        local window_info
+        window_info=$(driver window)
+        local origin_x origin_y window_w
+        origin_x=$(printf '%s' "$window_info" | sed -n 's/.* x=\(-\{0,1\}[0-9]*\) .*/\1/p')
+        origin_y=$(printf '%s' "$window_info" | sed -n 's/.* y=\(-\{0,1\}[0-9]*\) .*/\1/p')
+        window_w=$(printf '%s' "$window_info" | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+        local container_w container_h container_x container_y
+        read -r container_w container_h <<EOF
+$(container_size)
+EOF
+        read -r container_x container_y <<EOF
+$(container_origin)
+EOF
+        if [ -z "${container_h:-}" ] || [ -z "${container_y:-}" ]; then
+            echo "cannot read the container geometry from the app's layout log"
+            return 1
+        fi
+        # `driver drag` takes **window-relative** points; the screen origin is only used
+        # for `--at-screen` clicks. Passing screen points here put the press 71pt off the
+        # divider (below the title bar) and the drag into the pane instead — which is how a
+        # case can "pass" while measuring a drag that never grabbed anything.
+        local sidebar_w divider_x divider_y
+        sidebar_w=$((window_w - container_w))
+        divider_x=$((container_x + container_w / 2))
+        divider_y=$((container_y + container_h / 2))
+
+        # Static content, in the pane the band lives in: `seq` fills it, then the shell sits
+        # idle. Clicking first focuses that pane, so the typing lands there.
+        driver click --at-screen "$((origin_x + sidebar_w + 120)),$((origin_y + 60))" \
+            >/dev/null 2>&1 || { echo "cannot focus the upper pane"; return 1; }
+        sleep 0.4
+        driver type --text "seq 1 400" >/dev/null 2>&1 || { echo "cannot type"; return 1; }
+        driver key --name return >/dev/null 2>&1 || { echo "cannot send return"; return 1; }
+        sleep 1.5
+
+        # `dir` is the runner's path for this case on whichever side the driver lives
+        # (guest path under vm, host path under local). The driver creates it.
+        local frame_dir="$dir/frames"
+        local ratio_before
+        ratio_before=$(pane_layout | layout_check '
+import json, sys
+print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
+')
+        driver drag --from "$divider_x,$divider_y" --to "$divider_x,$((divider_y + 20))" \
+            --steps 20 --frames 10 --frame-interval 40 --frame-dir "$frame_dir" \
+            >"$host_dir/drag.txt" 2>&1 || { echo "cannot drag the divider"; cat "$host_dir/drag.txt"; return 1; }
+        sleep 0.5
+        local ratio_after
+        ratio_after=$(pane_layout | layout_check '
+import json, sys
+print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
+')
+        # The driver reports how many of its own captures succeeded; a host-side `ls`
+        # would report zero under the vm backend, where `$frame_dir` is a guest path.
+        local captured
+        captured=$(sed -n 's/.*frames=\([0-9]*\).*/\1/p' "$host_dir/drag.txt" | tail -1)
+        printf '%s\n' "${captured:-0}" >"$host_dir/captured.txt"
+        printf '%s\n' "$ratio_before" >"$host_dir/ratio-before.txt"
+        printf '%s\n' "$ratio_after" >"$host_dir/ratio-after.txt"
+
+        # The band: inside the upper pane, clear of the divider and of the terminal's own
+        # top row. `--rect` is in window points; the frames are window captures, so the
+        # driver scales them by the backing factor itself.
+        local band_x band_y band_w band_h
+        band_x=$((container_x + 20))
+        band_y=$((container_y + 20))
+        band_w=$((container_w - 40))
+        band_h=$((container_h / 2 - 60))
+        local worst=0 worst_frame="" line value index
+        for index in $(seq 1 $((captured - 1))); do
+            local frame="$frame_dir/frame-$index.png"
+            line=$(driver diff --a "$frame_dir/frame-0.png" --b "$frame" \
+                --rect "$band_x $band_y $band_w $band_h" 2>&1)
+            value=$(printf '%s' "$line" | sed -n 's/.*mismatch=\([0-9]*\).*/\1/p')
+            if [ -z "$value" ]; then
+                printf 'cannot diff %s: %s\n' "$frame" "$line" >"$host_dir/diff-error.txt"
+                return 1
+            fi
+            if [ "$value" -gt "$worst" ]; then
+                worst=$value
+                worst_frame=$(basename "$frame")
+            fi
+        done
+        printf '%s %s %s %s %s\n' \
+            "$worst" "${worst_frame:-none}" "$band_w" "$band_h" "$index" \
+            >"$host_dir/band.txt"
+    }
+    assert() {
+        local captured worst worst_frame band_w band_h frames ratio_before ratio_after
+        captured=$(cat "$host_dir/captured.txt" 2>/dev/null)
+        if [ -f "$host_dir/diff-error.txt" ]; then
+            check "the frames could be compared" 1 "$(cat "$host_dir/diff-error.txt")"
+            return 1
+        fi
+        read -r worst worst_frame band_w band_h frames <"$host_dir/band.txt" 2>/dev/null
+        ratio_before=$(cat "$host_dir/ratio-before.txt" 2>/dev/null)
+        ratio_after=$(cat "$host_dir/ratio-after.txt" 2>/dev/null)
+        check "the drag was captured mid-flight" \
+            "$([ "${captured:-0}" -ge 5 ] && echo 0 || echo 1)" \
+            "${captured:-0} frame(s)"
+        # Zero tolerance, because the two frames are of the same picture: any difference is
+        # the renderer showing something the daemon did not send.
+        check "the pane above the divider is the same picture in every mid-drag frame" \
+            "$([ "${worst:-1}" -eq 0 ] && echo 0 || echo 1)" \
+            "worst mismatch=${worst:-?} px (${worst_frame:-none}) over ${band_w}x${band_h}pt in ${frames:-0} comparison(s)"
+        check "the drag actually moved the divider" \
+            "$([ -n "$ratio_before" ] && [ "$ratio_before" != "$ratio_after" ] && echo 0 || echo 1)" \
+            "ratio ${ratio_before:-?} -> ${ratio_after:-?}"
+    }
+}
+
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -4674,11 +4836,22 @@ EOF
             echo "cannot read the container size from the app's layout log"
             return 1
         fi
-        local window_w sidebar_w centre_x divider_y
+        local window_w sidebar_w centre_x divider_y container_x container_y
         window_w=$(printf '%s' "$window_info" | sed -n 's/.* w=\([0-9]*\).*/\1/p')
+        read -r container_x container_y <<EOF
+$(container_origin)
+EOF
         sidebar_w=$((window_w - container_w))
-        centre_x=$((origin_x + sidebar_w + container_w / 2))
-        divider_y=$((origin_y + container_h / 2))
+        # Window-relative, from the container's own origin: `origin_y + container_h / 2`
+        # is 71pt above the divider (the container starts below the title bar), which put
+        # the press inside the pane and made this case measure a drag that never happened.
+        centre_x=$((container_x + container_w / 2))
+        divider_y=$((container_y + container_h / 2))
+        local ratio_before
+        ratio_before=$(pane_layout | layout_check '
+import json, sys
+print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
+')
         # The counters before the drag, so the assertion measures this drag and not
         # everything the launch did.
         collect_app_log_tail | grep -ac 'erase=1' >"$host_dir/erase-before.txt"
@@ -4692,10 +4865,23 @@ EOF
             return 1
         }
         sleep 1
+        # Both ratios, so `assert` can tell a drag that moved the divider from one that
+        # missed it — the failure this case had while it only counted screen resets.
+        printf '%s\n' "$ratio_before" >"$host_dir/ratio-before.txt"
+        pane_layout | layout_check '
+import json, sys
+print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
+' >"$host_dir/ratio-after.txt"
         collect_app_log "$host_dir"
     }
     assert() {
-        local before after
+        local before after ratio_before ratio_after
+        ratio_before=$(cat "$host_dir/ratio-before.txt" 2>/dev/null)
+        ratio_after=$(cat "$host_dir/ratio-after.txt" 2>/dev/null)
+        check "the drag moved the divider" \
+            "$([ -n "$ratio_before" ] && [ -n "$ratio_after" ] \
+                && [ "$ratio_before" != "$ratio_after" ] && echo 0 || echo 1)" \
+            "ratio ${ratio_before:-?} -> ${ratio_after:-?}"
         before=$(cat "$host_dir/erase-before.txt" 2>/dev/null)
         after=$(grep -ac 'erase=1' "$host_dir/kraal.log" 2>/dev/null)
         if [ -z "$before" ] || [ -z "$after" ]; then
