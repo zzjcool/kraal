@@ -956,3 +956,56 @@ fixture 里，后面所有「需要名册」的用例跟着一起死。
 `VZErrorDomain Code=1 "The virtual machine stopped unexpectedly."` 停掉（两次，不同位置）。
 这不是用例失败，宿主内存/磁盘都正常，是 Virtualization.framework 的 guest 崩溃；分两段
 跑各自全绿。这条写在这里，免得下次又把「VM 死了」当成「用例红了」。
+
+---
+
+## §17 guest 会在跑到一半时被 VZ 停掉：找到签名，并让门禁活下来（2026-10-29）
+
+整套 36 条一次跑完，**两次**中途死在同一个地方：
+
+```
+error: Kraal window did not appear in kraal-agent
+VM "kraal-agent" is not running
+```
+
+两次宿主崩溃报告（`~/Library/Logs/DiagnosticReports/`，20:29:19 与 19:59:12）签名相同：
+
+```
+com.apple.Virtualization.VirtualMachine  EXC_BREAKPOINT / SIGTRAP
+faultingThread queue: com.apple.virtualization.virtio.vsock-device:0
+  → _xpc_connection_call_event_handler → _dispatch_mach_msg_invoke
+```
+
+即 **Apple 的 virtio-vsock 设备在 XPC 回调里触发了一个 Swift trap**，整个 VM 服务进程
+被 SIGTRAP 杀掉。不是 guest 内核 panic，不是内存/磁盘（宿主 16384 页大小下仍有 ~7 GB
+free、367 GB 可用），也不是我们的代码 —— 我们能做的只有两件事：少碰它、以及别让它
+把整轮门禁带走。
+
+### 少碰：`tart exec` 是要钱的
+
+vsock 就是 `tart exec` 的通道。`gui.sh` 每条用例都会透过它做一堆事（`defaults delete`、
+`mkdir`、`pane list` 的 API 调用、`machine_home`、artefact 收集……）。这次修 machines
+fixture 时又加了 `machines_remote_herdr` 的版本检查 + 复制，正好压在同一个通道上。
+崩溃是否由频率触发**未验证**（没有可控复现），但「能缓存就别每用例 exec 一次」是
+白拿的：`machines_remote_herdr` 现在的第一次检查之后在 guest 里是幂等短路。
+
+### 别带走：一次自动重试
+
+`run_case` 现在是 `run_case_once` 的包装：跑完发现 `vm_running` 为假 → 打印
+`guest died during '<case>' (VZ stopped the VM); restarting and retrying once` → `vm_start`
++ `vm_deploy`（machines 用例再补 `machines_prereqs`）→ **原样重跑一次**。
+
+- `launch_app` 在 guest 已经消失时不再 `die`，而是 `return 3`（旧行为是整轮 abort，
+  实测 `exit=2`，后面所有用例再没跑过）
+- 重跑仍然死 → `return 2`（环境问题），不是 `1`（产品失败）
+
+**注入验证**（§0.3）：用例跑到 assert 阶段时 `tart stop kraal-agent`，日志依次是
+
+```
+FAILED: split-right failed at assert (panes 1 -> )
+FAILED: guest died during 'split-right' (VZ stopped the VM); restarting and retrying once
+== booting vm kraal-agent (headless) == → ok: vm up → ok: deployed ...
+ok: split-right passed (panes 1 -> 2)          exit=0
+```
+
+A/B 的另一半是旧行为：同一时刻杀 VM，旧脚本 `exit=2` 且此后再无输出。
