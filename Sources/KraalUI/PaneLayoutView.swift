@@ -511,6 +511,7 @@ struct PaneLayoutView: View {
                         // cumulative translation produces the same ratio instead of
                         // compounding (see the note on `ratio(for:drag:anchoringAt:)`).
                         let position = splitDragAnchor(for: split)
+                        store.isDraggingSplit = true
                         store.dragSplitRatio(
                             path: split.path,
                             ratio: ratio(for: split, drag: value, cellSize: cellSize,
@@ -519,6 +520,7 @@ struct PaneLayoutView: View {
                         )
                     }
                     .onEnded { value in
+                        defer { store.isDraggingSplit = false }
                         // The final position is authoritative and must not be
                         // dropped: the last `onChanged` may have been coalesced
                         // away, and the daemon has no idea where the pointer
