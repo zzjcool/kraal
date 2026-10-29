@@ -29,10 +29,14 @@ enum SyntheticInput {
         }
         post(.mouseMoved, at: point)
         usleep(60_000)
-        for _ in 0..<max(clicks, 1) {
-            post(pressType, at: point, button: button)
+        // `clickState` is what makes a multi-click a *multi*-click. Posted events default to
+        // 1, so `--clicks 3` used to deliver three separate single clicks: measured, a
+        // triple click selected nothing (`0px` of the selection colour before and after),
+        // and any case that wanted word or line selection silently tested a plain click.
+        for index in 0..<max(clicks, 1) {
+            post(pressType, at: point, button: button, clickState: index + 1)
             usleep(30_000)
-            post(releaseType, at: point, button: button)
+            post(releaseType, at: point, button: button, clickState: index + 1)
             usleep(30_000)
         }
     }
@@ -152,12 +156,17 @@ enum SyntheticInput {
     }
 
     private static func post(
-        _ type: CGEventType, at point: CGPoint, button: CGMouseButton = .left
+        _ type: CGEventType,
+        at point: CGPoint,
+        button: CGMouseButton = .left,
+        clickState: Int = 1
     ) {
-        CGEvent(
+        guard let event = CGEvent(
             mouseEventSource: nil, mouseType: type,
             mouseCursorPosition: point, mouseButton: button
-        )?.post(tap: .cghidEventTap)
+        ) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
+        event.post(tap: .cghidEventTap)
     }
 
     /// US-layout virtual key codes — the only ones a positional lookup can give.

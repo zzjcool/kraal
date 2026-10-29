@@ -2690,10 +2690,55 @@ machine_client_socket() { machine_socket "$1" "$2" herdr-client.sock; }
 machine_api_socket() { machine_socket "$1" "$2" herdr.sock; }
 
 # The home the fixture's daemons actually live in: the real one, on both backends.
+# Memoises a value that cannot change while one `gui.sh run` is going.
+#
+# Every `tart exec` is a trip over virtio-vsock, which is the device Apple's
+# Virtualization.framework was trapping on when it killed the guest (AUTOMATION.md §17).
+# Values like the guest's `$HOME` are asked for by a dozen cases and cannot differ between
+# them, so they are asked once per run and read from a file after that.
+#
+# Only for run-constant values: anything that depends on the case's window, pane or app
+# (container geometry, app log lines) must stay live, or a case would assert on the
+# previous case's numbers.
+guest_constant() {
+    local key="$1"
+    local command="$2"
+    local cache="$SCRATCH/guest-constants/$key"
+    if [ -f "$cache" ]; then
+        cat "$cache"
+        return 0
+    fi
+    local value
+    value=$(eval "$command" 2>/dev/null | tr -d '\r\n')
+    [ -n "$value" ] || return 1
+    mkdir -p "$SCRATCH/guest-constants"
+    printf '%s' "$value" >"$cache"
+    printf '%s' "$value"
+}
+
+# Writes a file where the *terminal* can read it: inside the guest under `vm`, on the
+# host under `local`.
+#
+# Raw bytes over `tart exec -i` rather than a shell `printf`: the payload in these cases is
+# UTF-8 box drawing, braille and block elements, and any quoting layer is a chance to
+# mangle it into something that still renders (so the case would pass) but is not what the
+# case meant to draw.
+push_text_file() {
+    local source="$1"
+    local destination="$2"
+    case "$BACKEND" in
+    local) cp "$source" "$destination" ;;
+    vm)
+        tart exec -i "$VM" /bin/bash -lc "cat > $destination" <"$source" \
+            || return 1
+        ;;
+    esac
+}
+
 machine_home() {
     case "$BACKEND" in
     local) printf '%s' "$HOME" ;;
-    vm) tart exec "$VM" /bin/bash -lc 'printf %s "$HOME"' 2>/dev/null | tr -d '\r\n' ;;
+    vm) guest_constant machine-home 'tart exec "$VM" /bin/bash -lc "printf %s \$HOME"' ;;
     esac
 }
 
@@ -5508,8 +5553,120 @@ case_notification_posted() {
 # The config lives under `$VM_ROOT/config` via `HERDR_CONFIG_DIR`, so the developer's
 # real theme cannot influence the answer — without that, a machine already set to `nord`
 # would pass this case no matter what it wrote.
+# Selects one line of terminal text, and counts how many pixels are the colour the theme
+# says a selection *should* be.
+#
+# The claim is about which colour the engine paints, so the evidence has to be pixels: the
+# value is a config key handed to libghostty at construction time, and nothing in the view
+# hierarchy knows about it. Counting twice — before and after the selection exists — is
+# self-calibrating: on a theme whose panel background happens to sit near the selection
+# colour both numbers move together, and on the shipped wiring the second is many times the
+# first.
+#
+# Measured before the key was written: 0 px of the theme's colour before *and* after the
+# triple click, because the highlight was libghostty's own `#303030` (afterglow's), a
+# colour from a theme this client does not use.
+select_a_line() {
+    local window_info origin_x origin_y
+    window_info=$(driver window)
+    origin_x=$(printf '%s' "$window_info" | sed -n 's/.* x=\(-\{0,1\}[0-9]*\) .*/\1/p')
+    origin_y=$(printf '%s' "$window_info" | sed -n 's/.* y=\(-\{0,1\}[0-9]*\) .*/\1/p')
+    local container_w container_h container_x container_y
+    read -r container_w container_h <<EOF
+$(container_size)
+EOF
+    read -r container_x container_y <<EOF
+$(container_origin)
+EOF
+    if [ -z "${container_w:-}" ] || [ -z "${container_y:-}" ]; then
+        echo "cannot read the container geometry from the app's layout log"
+        return 1
+    fi
+
+    # The colour the app says it built the surfaces with. `nil` means the theme has no
+    # selection token, in which case this case has nothing to assert and says so.
+    #
+    # The log has to be fetched here rather than assumed: the runner collects it once,
+    # *after* the action, so reading `$host_dir/kraal.log` from inside the action found
+    # whatever the previous case left behind — which is how this check first failed with
+    # "the app logged no selection colour" while the line was sitting in the log.
+    collect_app_log "$host_dir"
+    local selection_hex
+    selection_hex=$(sed -n 's/.* terminal background: .* selection: \([0-9A-Fa-f]\{6\}\).*/\1/p' \
+        "$host_dir/kraal.log" | tail -1)
+    if [ -z "$selection_hex" ]; then
+        echo "the app logged no selection colour; cannot count it" >"$host_dir/selection.txt"
+        return 0
+    fi
+    printf '%s\n' "$selection_hex" >"$host_dir/selection-hex.txt"
+    local match
+    # A tolerance, because the screenshot is colour-managed: the app logs gruvbox-light's
+    # background as `F2E5BC` and the captured pixel is `F2E4BC` — one unit off. An exact
+    # match would report "0px" for a selection that is painted perfectly.
+    match=$(python3 -c "
+h = '$selection_hex'
+r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+print(','.join(f'{c}>{v - 3},{c}<{v + 4}' for c, v in zip('rgb', (r, g, b))))")
+
+    # Text to select: plain rows, so the band that gets selected is mostly background.
+    driver click --at-screen "$((origin_x + 240)),$((origin_y + 120))" >/dev/null 2>&1 \
+        || { echo "cannot focus the pane"; return 1; }
+    sleep 0.3
+    driver type --text "seq 1 40" >/dev/null 2>&1 || { echo "cannot type"; return 1; }
+    driver key --name return >/dev/null 2>&1 || { echo "cannot send return"; return 1; }
+    sleep 1.2
+
+    # The band: three terminal rows near the top of the pane, wide enough to hold the
+    # selection, and independent of where the prompt ended up.
+    local band_x band_y band_w band_h
+    band_x=$((container_x + 10))
+    band_y=$((container_y + 30))
+    band_w=$((container_w - 40))
+    band_h=60
+    local shot_before="$VM_ROOT/selection-before.png"
+    local shot_after="$VM_ROOT/selection-after.png"
+    driver shot -o "$shot_before" >/dev/null 2>&1 || { echo "screenshot failed"; return 1; }
+    driver pixels --in "$shot_before" --rect "$band_x $band_y $band_w $band_h" \
+        --match "$match" >"$host_dir/selection-before.txt" 2>&1
+
+    # Triple click: Ghostty's own line selection, no drag coordinate to get wrong.
+    # A press-and-drag across one row of text: the ordinary way a user selects, and the one
+    # path that does not depend on multi-click semantics (a triple click selected nothing
+    # even with `clickState` set — measured 0px of the theme's colour on both sides).
+    #
+    # Window-relative, like the band: `container_origin` is a window offset, and mixing it
+    # with `--at-screen` put the click 350pt above the window.
+    local select_y=$((container_y + 40))
+    driver drag --from "$((container_x + 30)),$select_y" \
+        --to "$((container_x + 400)),$select_y" --steps 10 \
+        >"$host_dir/select-drag.txt" 2>&1 \
+        || { echo "cannot drag to select"; cat "$host_dir/select-drag.txt"; return 1; }
+    sleep 0.8
+    driver shot -o "$shot_after" >/dev/null 2>&1 || { echo "screenshot failed"; return 1; }
+    driver pixels --in "$shot_after" --rect "$band_x $band_y $band_w $band_h" \
+        --match "$match" >"$host_dir/selection-after.txt" 2>&1
+    # The screenshots are the only way to see *what* was selected, and a colour count alone
+    # cannot tell "nothing is selected" from "selected in another colour". Both go with the
+    # artefacts; under `vm` the shots live in the guest, so they are copied out.
+    local shot
+    for shot in before after; do
+        case "$BACKEND" in
+        local) cp "$VM_ROOT/selection-$shot.png" "$host_dir/selection-$shot.png" 2>/dev/null ;;
+        vm)
+            tart exec -i "$VM" /bin/bash -lc "cat $VM_ROOT/selection-$shot.png" \
+                >"$host_dir/selection-$shot.png" 2>/dev/null
+            ;;
+        esac
+    done
+    return 0
+}
+
 case_theme_applied() {
-    requires() { echo ax; }
+    # `focus`, not `ax`: the selection half of this case drives a real triple click, and a
+    # click has to reach a frontmost window. As `ax` the app ran as a background accessory
+    # and the click could not be delivered ("cannot focus the pane") — AX presses work
+    # without focus, synthetic clicks do not.
+    requires() { echo focus; }
     fixture() {
         ensure_sidebar_expanded || return 1
         return 0
@@ -5526,6 +5683,7 @@ case_theme_applied() {
         restart_app || return 1
         sleep 2
         capture_tab_bar_pixels "$host_dir/light.txt" || return 1
+        select_a_line || return 1
         return 0
     }
     assert() {
@@ -5551,6 +5709,26 @@ case_theme_applied() {
             "$([ -n "$dark" ] && [ -n "$light" ] \
                 && [ "$((light * 10))" -gt "$((dark * 13))" ] && echo 0 || echo 1)" \
             "dark=$dark light=$light (need light > 1.3x dark)"
+
+        local selection_hex before after
+        selection_hex=$(cat "$host_dir/selection-hex.txt" 2>/dev/null)
+        if [ -z "$selection_hex" ]; then
+            check "the theme's selection colour could be read" 1 \
+                "$(cat "$host_dir/selection.txt" 2>/dev/null)"
+            return 1
+        fi
+        before=$(sed -n 's/^pixels matched=\([0-9]*\).*/\1/p' "$host_dir/selection-before.txt" 2>/dev/null)
+        after=$(sed -n 's/^pixels matched=\([0-9]*\).*/\1/p' "$host_dir/selection-after.txt" 2>/dev/null)
+        if [ -z "$before" ] || [ -z "$after" ]; then
+            check "the selection band could be counted" 1 \
+                "$(cat "$host_dir/selection-before.txt" "$host_dir/selection-after.txt" 2>/dev/null | tr '\n' ' ')"
+            return 1
+        fi
+        # Absolute floor as well as the ratio: a theme whose surface is near the selection
+        # colour would otherwise pass on noise (`before` already high, ratio small).
+        check "selecting a line paints it in the theme's colour, not libghostty's" \
+            "$([ "$after" -gt $((before * 4 + 500)) ] && echo 0 || echo 1)" \
+            "#$selection_hex: ${before}px before, ${after}px after selecting"
     }
 }
 

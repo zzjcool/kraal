@@ -228,6 +228,16 @@ public final class PaneTerminalModel {
         /// panes. The theme never crosses the wire, so this is the only place that
         /// colour can come from.
         background: String? = nil,
+        /// The theme's selection highlight as `RRGGBB`, or `nil` to keep libghostty's
+        /// own default for the appearance.
+        ///
+        /// Measured before this existed: the client wrote three keys (`background`,
+        /// `window-padding-x/y`, `window-padding-color`) and nothing else, so a gruvbox
+        /// pane highlighted a selection in libghostty's neutral grey instead of the
+        /// theme's brown. Only the background of the highlight is written — the ink stays
+        /// each cell's own foreground, which is what the engine does when
+        /// `selection-foreground` is unset.
+        selectionBackground: String? = nil,
         onInput: @escaping @Sendable (Data) -> Void
     ) {
         self.paneId = paneId
@@ -249,6 +259,14 @@ public final class PaneTerminalModel {
         if let background {
             let arm = TerminalConfiguration { builder in
                 builder.withBackground(background)
+                // In the same arm as the background: that arm *replaces*
+                // `TerminalTheme.default`, so the two colours travel together. It also
+                // means the `background == nil` branch above keeps the default theme's own
+                // `selection-background` (#C9D0D9 light / #303030 dark) — which is why a
+                // selection colour is only written when the theme supplied a background.
+                if let selectionBackground {
+                    builder.withSelectionBackground(selectionBackground)
+                }
             }
             theme = TerminalTheme(light: arm, dark: arm)
         } else {

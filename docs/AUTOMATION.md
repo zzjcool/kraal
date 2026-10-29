@@ -1009,3 +1009,53 @@ ok: split-right passed (panes 1 -> 2)          exit=0
 ```
 
 A/B 的另一半是旧行为：同一时刻杀 VM，旧脚本 `exit=2` 且此后再无输出。
+
+---
+
+## §18 选中高亮也要门禁：三次「0 px」才发现三件事都不对（2026-10-29）
+
+Kraal 只往 libghostty 写三四个键（`background`、`window-padding-*`），所以**选中高亮
+一直是 libghostty 自己的 `#303030`/`#C9D0D9`**——一个来自我们根本没用过的主题
+（afterglow/alabaster）的颜色。现在主题的 `selection_background` 会跟背景一样写进
+terminal。怎么证明它在屏幕上真的生效：
+
+`theme-applied` 多加一步——在 gruvbox-light 下用鼠标拖选一行，然后**数像素**：
+拖选前后各截一张，数「主题说该是选中色的那个颜色」有多少 px。
+
+```
+#EBDBB2: 0px before, 3693px after selecting      ✓
+```
+
+**注入验证**（§0.3）：把接线改成 `selectionBackground: nil` → 同一用例
+`0px before, 0px after` → 红。改回来 → 绿。
+
+### 为了让这条断言真的能测，顺手修了三处
+
+1. **`--clicks 3` 从来不是三击。** 合成的鼠标事件默认 `clickState = 1`，所以「三击
+   选行」实际是三次独立单击——选不中任何东西，而用例会以为自己在测选中。
+   `SyntheticInput.click` 现在按序号写 `kCGMouseEventClickState`。不过最后仍然改用
+   **拖选**：三击在 Ghostty 里要的是系统级多击识别，拖选是用户真正会做的动作，也不
+   依赖时序。
+2. **截图是做过色彩管理的，精确颜色匹配会假阴性。** app 日志里背景是 `F2E5BC`，截到
+   的像素是 `F2E4BC`——差 1。用 `r=…,g=…,b=…` 精确匹配会把画得好好的选中报成 0 px，
+   现在用 ±3 容差。
+3. **`container_origin` 是窗口坐标，`--at-screen` 是屏幕坐标。** 混用把点击送到窗口
+   上方 350pt（`screen point (240,121) is outside the window`）。凡是和
+   `pixels --rect`（窗口坐标）配对的点击，一律用 `--at`。
+
+### 顺带：`machine_home` 这类常量不再每条用例都 exec 一次
+
+`guest_constant <key> <command>` 把「一轮运行内不可能变」的值（guest 的 `$HOME`）缓存
+在 `$SCRATCH/guest-constants/` 下。每一条 `tart exec` 都是一次 virtio-vsock 往返，而
+§17 记的就是这个设备把 VM 弄崩过。**只缓存 run 级常量**：窗口/面板/日志派生的值必须
+每次现取，否则用例会拿上一条用例的数字做断言。
+
+### 被删掉的假门禁：竖直分隔条不抖
+
+本来还想加一条「横向抖动」用例（拖竖直分隔条，改宽度），把框线/盲文/灰阶放进判定带。
+实测**它抓不住任何东西**：`KRAAL_CELL_PAINTER=off` 下同样 0 px，用 40 ms 和 15 ms 两种
+帧间隔、14 帧都是 0。也就是说这个抖动是**高度变化（行数变化）专有的**——宽度变化只
+丢掉/多出最右一列，而 `window-padding-color = extend-always` 已经把那一列填好了。
+
+结论：宽度方向没有可测的抖动，用例删掉，不留在门禁里假装有覆盖（同
+`drag-divider-vertical` 那次的教训）。
