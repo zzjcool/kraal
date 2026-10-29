@@ -910,3 +910,49 @@ done
 
 `shellcheck` 在本机缺失（`command -v shellcheck` 为空），所以这一轮脚本改动没有过
 shellcheck 门禁，只有 `bash -n` 语法检查——写在这里以免下次误以为跑过了。
+
+---
+
+## §16 一次「八条用例同时红」的根因是一个缺失的文件（2026-10-29）
+
+`verify.sh` 的 GUI 门禁红成一片：`machines-roster`、`machines-switch`、
+`machines-controls`、`machines-reachability`、`context-menu-remote`、
+`session-name-budget`、`sidebar-priority-across-machines`、`notification-posted`、
+`status-change-resorts` —— 看起来像八个 bug，其实是**一个**：
+
+```
+error: matching remote herdr 0.9.5 is not installed at "$HOME/.local/bin/herdr";
+run from an interactive terminal to approve installation; machine was not saved
+```
+
+`herdr machine add` 会把一个同版本 herdr 装到远端账号的 `~/.local/bin/herdr`，但**只在
+交互终端里**做。无人值守的 fixture 没有 TTY，于是第一条 machines 用例死在自己的
+fixture 里，后面所有「需要名册」的用例跟着一起死。
+
+修法两处，都是幂等的：
+
+- `Scripts/gui.sh` 的 `machines_prereqs` 现在在 `machine add` 之前把**自己用的那个**
+  herdr 复制到 `~/.local/bin/herdr` 并校验 `--version` 一致（`machines_remote_herdr`）。
+  不同版本的失败信息会写明「remote herdr is X, want Y」，不再伪装成八条用例失败。
+- `Scripts/vm-bootstrap.sh` 增加同一项检查与修复（换机器/重建 VM 时一次到位）。
+
+同一次排查里还挖出两条**用例自身的 bug**：
+
+1. `session-name-budget` 在**宿主**上算预算（`os.path.expanduser("~")` = `/Users/zzj`），
+   而被测 app 跑在 guest（`/Users/admin`）——两个字符的 home 长度差就是不同的预算。
+   它预测 51、app 回答 49，于是红。现在用 `machine_home`（两个后端都对）取 app 的 home。
+2. `sidebar-divider-drag` 偶发 `could not bring 'Kraal' to the front`：上一条用例的窗口
+   还在拆，第一次 `activate` 被吞。`activateAndConfirm` 现在重试一次（300 ms），
+   专治这种「单跑绿、整套红」。
+
+### 整套 36 条用例现在的结果（分两段跑）
+
+| 段 | 用例 | 结果 |
+| --- | --- | --- |
+| 前 17 条 | `click-coordinates` … `machines-switch` | 17 passed / 0 failed |
+| 后 19 条 | `machines-controls` … `status-change-resorts` | 19 passed / 0 failed |
+
+**为什么分两段**：整套一次跑完时 guest 在中途以
+`VZErrorDomain Code=1 "The virtual machine stopped unexpectedly."` 停掉（两次，不同位置）。
+这不是用例失败，宿主内存/磁盘都正常，是 Virtualization.framework 的 guest 崩溃；分两段
+跑各自全绿。这条写在这里，免得下次又把「VM 死了」当成「用例红了」。

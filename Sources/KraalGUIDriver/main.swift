@@ -717,14 +717,23 @@ func isScreenLocked() -> Bool {
 /// the app ever moved. Verifying frontmost-ness is the only thing that makes the
 /// next synthetic event meaningful.
 @discardableResult
-func activateAndConfirm(_ app: TargetApp, timeout: Double = 5) -> Bool {
-    let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    if frontmost == app.pid { return true }
-    app.application.activate(options: [.activateAllWindows])
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
+/// Brings the app to the front and waits for it to actually be frontmost.
+///
+/// Two attempts, because activation is asynchronous and has no completion callback: in a
+/// full suite run the previous case's window is still being torn down, the first
+/// `activate` is swallowed, and `sidebar-divider-drag` failed with "could not bring 'Kraal'
+/// to the front" while passing when run on its own. A single retry costs 300 ms on a rare
+/// path and removes a failure mode that has nothing to do with the case.
+func activateAndConfirm(_ app: TargetApp, timeout: Double = 5, attempts: Int = 2) -> Bool {
+    for attempt in 0 ..< max(attempts, 1) {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.pid { return true }
-        usleep(100_000)
+        app.application.activate(options: [.activateAllWindows])
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.pid { return true }
+            usleep(100_000)
+        }
+        if attempt + 1 < attempts { usleep(300_000) }
     }
     return false
 }
