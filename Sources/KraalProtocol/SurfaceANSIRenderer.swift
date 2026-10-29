@@ -172,42 +172,61 @@ public struct SurfaceANSIRenderer {
 
         var stream = RowStream()
         let rows = repaintEverything ? Array(0 ..< Int(frame.height)) : changedRows(frame)
-        for row in rows {
+
+        // Rows the previous frame occupied but this one does not, or that the view has and the
+        // frame never covered.
+        //
+        // A pane gets shorter when a divider is dragged, and the renderer used to answer that
+        // with `clearingFirst` from the caller — a `2J 3J H` that wipes the screen and
+        // scrollback and then rewrites all of it. Measured on a live drag: 1139 of 1195 paints
+        // carried `erase=1`, ~6 KB each, up to 97 paints in one second. Rows above the new
+        // height keep their coordinates, so only the rows the frame no longer covers have to
+        // go. And when the view is taller than a frame that stopped growing, those rows were
+        // never written by this renderer at all: they hold whatever the terminal had there,
+        // which for a fresh surface is libghostty's own background rather than the pane's —
+        // 7 rows x 37px of `#1E1E1E` under a pane drawn in `#0E1014` (#188).
+        //
+        // `0J` erases from the cursor to the end of the screen and touches no scrollback, so
+        // once per frame that needs it is cheap and safe.
+        let clearsBelow = (previous.map { $0.width == frame.width && $0.height > frame.height } ?? false)
+            || rowsBelowFrame
+        if clearsBelow {
+            // **Before the rows.** The cursor goes to row `height + 1`, and a terminal whose
+            // screen is shorter than that — which is what the engine has for ~25 ms after a
+            // pane grows, while the daemon's frame is already the new size — clamps it onto
+            // its *last line*, so `0J` empties a row that belongs to this very frame.
+            // Measured with a real engine: `CUP 21;1` + `0J` on a 20-row screen empties
+            // row 20. Written after the rows, as this used to be, that erase was the last word
+            // and a full-screen program showed a band under its last line. Written before
+            // them, any row this paint writes lands on top of it.
+            //
+            // A row this paint does *not* write is not repaired here: that is the engine
+            // announcing its new screen (`EngineScreenReport`), which sends the whole frame
+            // again, ~25 ms later. Until then a clamped erase can blank a row nothing rewrote.
+            //
+            // Rewriting every row on every such paint closes that window, and was measured:
+            // the sampled pictures cannot tell (band 0.5-1.3%, torn 0.0%, both ways — a row
+            // blanked in the frame's own colour looks like a row that is there), and a view
+            // that stays taller than the frame, the #188 pane, then costs 24.8 KB per paint
+            // where a one-cell change costs 3.7 KB. Once the engine has adopted the height the
+            // erase is in range and clamps nothing, so that is paid for nothing.
+            appendClearBelow(frame, output: &output)
+        }
+        // **Bottom-up.** Rows are independent, so on a screen as tall as the frame the order
+        // changes nothing. On a shorter one — a pane that grew, written before the terminal
+        // has adopted the new height — every CUP past the last line is clamped onto it, and
+        // each write replaces the one before. Top-down, the row that survives there is the
+        // frame's *last* one, a row from far below the place it is shown in, under correct
+        // rows above it: a picture that is not any frame the daemon ever sent. Bottom-up,
+        // the clamped rows go first and the row that belongs on that line lands last, so a
+        // too-short screen shows a correct prefix of the frame instead.
+        //
+        // Measured against a real engine during a fast drag: 31.6% of samples showed such
+        // a picture top-down, 0.0% bottom-up, with no extra bytes written.
+        for row in rows.reversed() {
             appendRow(row, frame: frame, stream: &stream, output: &output)
         }
         lastWroteRows = rows.count
-
-        // Rows the previous frame occupied but this one does not.
-        //
-        // A pane gets shorter when a divider is dragged, and the renderer used to
-        // answer that with `clearingFirst` from the caller — a `2J 3J H` that wipes
-        // the screen and scrollback and then rewrites all of it. Measured on a live
-        // drag: 1139 of 1195 paints carried `erase=1`, ~6 KB each, up to 97 paints
-        // in one second. That is what made dragging feel heavy.
-        //
-        // It is not necessary. Rows above the new height keep their coordinates, so
-        // only the rows the frame no longer covers have to go. Written **after** the
-        // row loop: the clear runs to the end of the screen, and doing it first
-        // would just be erased content again — it has to be the last word on those
-        // rows.
-        if let previous, previous.width == frame.width, previous.height > frame.height {
-            output.appendUTF8("\u{1B}[\(Int(frame.height) + 1);1H\u{1B}[0J")
-        } else if rowsBelowFrame {
-            // The view is taller than the frame, so the rows past `frame.height` were
-            // never written by this renderer at all — they hold whatever the terminal
-            // had there before, which for a fresh surface is libghostty's own theme
-            // background rather than the pane's.
-            //
-            // Only comparing `previous.height > frame.height` misses it: when the
-            // daemon keeps sending 26 rows and the view stays 33, `previous` and
-            // `frame` agree forever and the clear never goes out. Measured in #188:
-            // 7 rows x 37px = 259px of `#1E1E1E` under a pane whose own cells were
-            // `#0E1014` — the band.
-            //
-            // `0J` erases from the cursor to the end of the screen and touches no
-            // scrollback, so rung once per frame that needs it is cheap and safe.
-            output.appendUTF8("\u{1B}[\(Int(frame.height) + 1);1H\u{1B}[0J")
-        }
 
         // Cursor. Three separate requirements, all from `render_ansi.rs:778`
         // (`resolve_host_cursor_state`) and `:838` (`write_host_cursor_state`):
@@ -264,6 +283,63 @@ public struct SurfaceANSIRenderer {
 
         previous = frame
         return output
+    }
+
+    /// Erases everything below the frame's last row.
+    ///
+    /// The erase is made in the **colour the frame is mostly drawn on**, so the rows it
+    /// clears continue what the program paints its empty space with instead of showing the
+    /// terminal's own background. A full-screen program has one background over the whole
+    /// pane, and for the ~40 ms between the daemon's frame and the view settling, the rows
+    /// below the frame are exactly the ones nothing has written yet: left in the terminal's
+    /// default they read as a band under the pane.
+    ///
+    /// The *dominant* colour rather than the bottom row's: a status bar on the last line
+    /// (htop, tmux, mc) would otherwise be pulled down across the whole gap. A frame that is
+    /// mostly the terminal's default — a shell — sets nothing and erases exactly as before.
+    private func appendClearBelow(_ frame: FrameData, output: inout Data) {
+        output.appendUTF8("\u{1B}[\(Int(frame.height) + 1);1H")
+        if let parameter = dominantBackground(of: frame).flatMap(StyleCode.backgroundParameter) {
+            // Erasing takes the current background (xterm BCE), then it goes back so that
+            // nothing written after inherits it.
+            output.appendUTF8("\u{1B}[\(parameter)m\u{1B}[0J\u{1B}[0m")
+        } else {
+            output.appendUTF8("\u{1B}[0J")
+        }
+    }
+
+    /// The raw background the most cells of `frame` are drawn on; `nil` when the frame has no
+    /// cell to ask. A tie goes to the terminal's default, then to the lower value, so the
+    /// answer does not depend on dictionary order.
+    ///
+    /// Reversed cells are left out: what they show is their *foreground*, and counting that
+    /// as a background would let a reverse-video bar outvote the screen it sits on. Wide
+    /// characters' trailing halves carry no colour of their own.
+    ///
+    /// Counted by runs, so a screen painted one colour costs a comparison per cell and a
+    /// single dictionary write. This runs on every paint that clears, up to ~90 a second.
+    private func dominantBackground(of frame: FrameData) -> UInt32? {
+        var counts: [UInt32: Int] = [:]
+        var current: UInt32 = 0
+        var length = 0
+        for index in 0 ..< Int(frame.height) {
+            for cell in frame.buffer.row(index)
+            where !cell.skip && cell.modifier & CellModifier.reversed == 0 {
+                if length > 0, cell.background == current {
+                    length += 1
+                    continue
+                }
+                if length > 0 { counts[current, default: 0] += length }
+                current = cell.background
+                length = 1
+            }
+        }
+        if length > 0 { counts[current, default: 0] += length }
+        return counts.max { lhs, rhs in
+            if lhs.value != rhs.value { return lhs.value < rhs.value }
+            if (lhs.key == 0) != (rhs.key == 0) { return lhs.key != 0 }
+            return lhs.key > rhs.key
+        }?.key
     }
 
     /// Where the host cursor goes, and whether it is shown.
@@ -508,6 +584,13 @@ enum StyleCode {
         parts.append(colorParameter(foreground, isBackground: false))
         parts.append(colorParameter(background, isBackground: true))
         return parts.joined(separator: ";")
+    }
+
+    /// The SGR parameter that sets `raw` as the background, or `nil` for the terminal's
+    /// default — in which case there is nothing to set.
+    static func backgroundParameter(_ raw: UInt32) -> String? {
+        let parameter = colorParameter(TerminalColor(raw: raw), isBackground: true)
+        return parameter == "49" ? nil : parameter
     }
 
     private static func colorParameter(

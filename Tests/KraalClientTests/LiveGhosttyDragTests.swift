@@ -4,6 +4,7 @@
 import AppKit
 import Foundation
 import GhosttyTerminal
+import IOSurface
 @testable import KraalProtocol
 @testable import KraalTerminalView
 import SwiftUI
@@ -39,6 +40,12 @@ final class DragDriver: ObservableObject {
     @Published var frameRows: Int
     @Published var frameColumns: Int
     @Published var generation = 0
+    /// Points the view is taller than its cells need. The engine's grid is `floor(view / cell)`,
+    /// so a fraction of a cell adds no row and leaves a strip the grid does not cover.
+    @Published var extraHeight: CGFloat = 0
+    /// The last cell of the last row is on the terminal's default background, as a footer or a
+    /// command line almost always has one.
+    @Published var footerHasDefaultCell = false
 
     init(rows: Int, columns: Int = LiveFixture.columns) {
         self.rows = rows
@@ -66,7 +73,9 @@ enum LiveFixture {
         alphabet[(row + generation) % alphabet.count]
     }
 
-    static func surface(columns: Int, rows: Int, generation: Int) -> PaneSurfaceFrame {
+    static func surface(
+        columns: Int, rows: Int, generation: Int, footerHasDefaultCell: Bool = false
+    ) -> PaneSurfaceFrame {
         var cells: [CellData] = []
         for row in 0 ..< rows {
             let symbol = String(letter(row: row, generation: generation))
@@ -77,6 +86,7 @@ enum LiveFixture {
                 ))
             }
         }
+        if footerHasDefaultCell, !cells.isEmpty { cells[cells.count - 1].background = 0 }
         let frame = FrameData(
             cells: cells, width: UInt16(columns), height: UInt16(rows),
             cursor: nil, hyperlinks: [], graphics: Data()
@@ -104,7 +114,8 @@ struct DragRoot: View {
 
     var body: some View {
         let surface = LiveFixture.surface(
-            columns: driver.frameColumns, rows: driver.frameRows, generation: driver.generation
+            columns: driver.frameColumns, rows: driver.frameRows, generation: driver.generation,
+            footerHasDefaultCell: driver.footerHasDefaultCell
         )
         VStack(spacing: 0) {
             // The view is exactly the size the cells need, as `PaneLayoutView` lays it out.
@@ -113,7 +124,7 @@ struct DragRoot: View {
             )
             .frame(
                 width: CGFloat(driver.columns) * LiveFixture.cellWidth,
-                height: CGFloat(driver.rows) * LiveFixture.cellHeight
+                height: CGFloat(driver.rows) * LiveFixture.cellHeight + driver.extraHeight
             )
             Spacer(minLength: 0)
         }
@@ -294,12 +305,22 @@ struct LiveGhosttyDragTests {
                 let (rows, columns) = (rig.driver.rows, rig.driver.columns)
                 // In order, as the daemon's replies are: a later reply never overtakes an
                 // earlier one, and the last to arrive is the last step's.
+                //
+                // Sorting the deadlines is not enough, and this is the part that was wrong.
+                // Two replies due a millisecond apart are two `Task.sleep`s, and which of them
+                // resumes first is up to the scheduler: in 2 of 6 repetitions of one seed the
+                // last step's reply was applied *before* the one preceding it, so the final
+                // frame was 24 rows in a 25-row view, row 25 was rightly empty, and the test
+                // demanded a letter there. Chained, each reply waits for the previous one to
+                // have been applied, then for its own time.
                 let wanted = ContinuousClock.now
                     + .milliseconds(Int(Double.random(in: lag, using: &rng) * 1000))
                 let due = max(wanted, lastArrival + .milliseconds(1))
                 lastArrival = due
                 let driver = rig.driver
+                let previous = inFlight.last
                 inFlight.append(Task { @MainActor in
+                    await previous?.value
                     try? await Task.sleep(until: due, clock: .continuous)
                     driver.frameRows = rows
                     driver.frameColumns = columns
@@ -439,6 +460,174 @@ struct LiveGhosttyDragTests {
         let walk = Walk(columns: 60 ... 104, stride: 1 ... 5, gap: 0.0 ... 0.05, lag: 0.0 ... 0.1)
         let bad = await failures(label: "mixed", trials: 4, steps: 26, walk: walk, startColumns: 90)
         #expect(bad.isEmpty, "\(bad.count) of 4 mixed drags left the screen wrong: \(bad)")
+    }
+
+    // MARK: - What the renderer's bytes do to a real engine
+    //
+    // Fixed bytes in, the engine's own picture out: no clock, no sampling. Each test is one
+    // mechanism, and each says which line of the renderer or the configuration it pins.
+
+    /// The engine's picture, read back from the layer it renders into.
+    private struct Presented {
+        let surface: IOSurfaceRef
+        let cellHeight: Int
+
+        var height: Int { IOSurfaceGetHeight(surface) }
+
+        /// The colour `inset` pixels below the top of grid row `row`: clear of the glyph.
+        func row(_ row: Int, inset: Int = 5) -> UInt32 { pixel(line: row * cellHeight + inset) }
+
+        /// The last pixels of the surface, under the grid when the view is taller than it.
+        var bottomEdge: UInt32 { pixel(line: height - 3) }
+
+        private func pixel(line pixelRow: Int) -> UInt32 {
+            IOSurfaceLock(surface, .readOnly, nil)
+            defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+            let clamped = min(max(pixelRow, 0), height - 1)
+            let line = IOSurfaceGetBaseAddress(surface) + clamped * IOSurfaceGetBytesPerRow(surface)
+            return line.advanced(by: 2 * MemoryLayout<UInt32>.size)
+                .assumingMemoryBound(to: UInt32.self).pointee & 0x00FF_FFFF
+        }
+    }
+
+    private func presented(_ rig: Rig) -> Presented? {
+        guard let view = rig.model.state.attachedPlatformView, let root = view.layer,
+              let cell = rig.model.state.surfaceSize?.cellHeightPixels, cell > 0 else { return nil }
+        var found: CALayer?
+        func walk(_ layer: CALayer) {
+            if String(describing: type(of: layer)).contains("IOSurface") { found = layer }
+            layer.sublayers?.forEach(walk)
+        }
+        walk(root)
+        guard let contents = found?.contents,
+              CFGetTypeID(contents as CFTypeRef) == IOSurfaceGetTypeID() else { return nil }
+        return Presented(surface: unsafeBitCast(contents as AnyObject, to: IOSurfaceRef.self),
+                         cellHeight: Int(cell))
+    }
+
+    /// A frame of this rig's shape with the symbols of its last row replaced.
+    private func replacingLastRow(of surface: PaneSurfaceFrame, with symbol: String) -> FrameData {
+        var cells = surface.frame.flatCells
+        let width = Int(surface.frame.width)
+        for index in cells.count - width ..< cells.count { cells[index].symbol = symbol }
+        return FrameData(
+            cells: cells, width: surface.frame.width, height: surface.frame.height,
+            cursor: nil, hyperlinks: [], graphics: Data()
+        )
+    }
+
+    /// The grid is `floor(view / cell)`, so a view that is not a whole number of cells tall has a
+    /// strip under the last row that no cell covers. That strip is *padding*, drawn in the theme's
+    /// background — and for the ~25 ms after a pane grows, before the engine adopts the new
+    /// size, the new rows are exactly such a strip. `window-padding-color = extend-always` paints
+    /// it with the last row's colours instead.
+    ///
+    /// Pins `builder.withCustom("window-padding-color", "extend-always")`, and the second fixture
+    /// pins *which* value: `extend` is a heuristic that gives up on an edge row as soon as one of
+    /// its cells is on the default background, which a footer or a command line almost always
+    /// has. A sub-cell strip makes the case permanent, so no clock is involved. With a real drag
+    /// on one background, leaving the setting out showed a band in 22-37% of samples (0.7-1.3%
+    /// with it); `extend` with such a footer, 38.2% against `extend-always`'s 8.5% (measured on
+    /// the old renderer, changing only this setting).
+    @Test(
+        "the strip the grid does not cover continues the colour of the last row",
+        arguments: [false, true]
+    )
+    func paddingContinuesTheLastRow(footerHasDefaultCell: Bool) async {
+        let rig = makeRig(rows: 20)
+        rig.driver.extraHeight = LiveFixture.cellHeight / 2
+        rig.driver.footerHasDefaultCell = footerHasDefaultCell
+        await settle(rig)
+        await pump(0.5)
+        guard let picture = presented(rig) else {
+            Issue.record("the engine's picture could not be read back")
+            return
+        }
+        let stripHeight = picture.height - 20 * picture.cellHeight
+        #expect(stripHeight >= 8, "no strip under the grid to look at (\(stripHeight) px)")
+        #expect(picture.row(0) == picture.row(19), "control: every row of the fixture is one colour")
+        let strip = String(picture.bottomEdge, radix: 16)
+        let lastRow = String(picture.row(19), radix: 16)
+        #expect(
+            picture.bottomEdge == picture.row(19),
+            "the strip is \(strip), the last row \(lastRow) (footer with a default cell: \(footerHasDefaultCell))"
+        )
+        rig.window.orderOut(nil)
+    }
+
+    /// The pane grows and the daemon's frame has not followed — the #188 layout. The rows under the
+    /// frame are the terminal's own until something writes them, and the renderer erases them in
+    /// the colour the frame is drawn on (`0J` fills with the current background, xterm's BCE) so
+    /// they read as part of the program instead of as a band.
+    ///
+    /// Pins both halves: that the engine does erase in the current background, and that the
+    /// renderer sets it. Without the colour the rows come out in the theme's background.
+    @Test("rows under a frame that stopped growing are in the frame's colour")
+    func rowsUnderTheFrameKeepItsColour() async {
+        let rig = makeRig(rows: 20)
+        await settle(rig)
+        rig.driver.rows = 26 // the view grows, the frame stays 20 rows
+        await pump(0.6)
+        #expect(rig.model.engineScreen?.rows == 26, "the engine never adopted the taller screen")
+        guard let picture = presented(rig) else {
+            Issue.record("the engine's picture could not be read back")
+            return
+        }
+        let reference = picture.row(3)
+        let off = (0 ..< 26).filter { picture.row($0) != reference }
+        #expect(off.isEmpty, "rows \(off) are not in the frame's colour \(String(reference, radix: 16))")
+        rig.window.orderOut(nil)
+    }
+
+    /// The erase goes **first**. It addresses the row under the frame, and a screen that is only as
+    /// tall as the frame — the engine's, for ~25 ms after the pane grew — clamps that address onto
+    /// its last line, where `0J` empties a row that belongs to the frame. Written after the rows,
+    /// the erase had the last word.
+    ///
+    /// Fed straight to the engine, so the screen is exactly 20 rows tall and nothing races.
+    @Test("a paint that rewrites the last row is not undone by its own erase")
+    func lastRowSurvivesItsErase() async {
+        let rig = makeRig(rows: 20)
+        await settle(rig)
+        await pump(0.5)
+        let before = LiveFixture.surface(columns: LiveFixture.columns, rows: 20, generation: 3)
+        var renderer = SurfaceANSIRenderer()
+        rig.model.session.receive(renderer.render(
+            before.frame, clearingFirst: true, invalidateBaseline: false, viewRows: 20
+        ))
+        await pump(0.15)
+
+        // The last row changes, and the view is taller than the engine's 20 rows.
+        let after = replacingLastRow(of: before, with: "Z")
+        rig.model.session.receive(renderer.render(
+            after, clearingFirst: false, invalidateBaseline: false, viewRows: 24
+        ))
+        await pump(0.15)
+
+        let want = expectedMarks(rows: 19, generation: 3) + "Z"
+        #expect(marks(rig.model) == want, "want \(want) got \(marks(rig.model))")
+        rig.window.orderOut(nil)
+    }
+
+    /// Rows go from the last to the first. A frame taller than the engine's screen — the daemon is
+    /// ahead of the engine — has every address past the last line clamped onto it, each write
+    /// replacing the one before. Top-down, what survives there is the frame's *last* row: a picture
+    /// that is no frame the daemon ever sent. Bottom-up, the row that belongs there lands last and
+    /// the screen shows a correct prefix.
+    @Test("a frame taller than the engine's screen leaves a correct prefix, not a torn picture")
+    func shortScreenShowsAPrefix() async {
+        let rig = makeRig(rows: 20)
+        await settle(rig)
+        await pump(0.5)
+        let tall = LiveFixture.surface(columns: LiveFixture.columns, rows: 26, generation: 5)
+        var renderer = SurfaceANSIRenderer()
+        rig.model.session.receive(renderer.render(
+            tall.frame, clearingFirst: true, invalidateBaseline: false, viewRows: 26
+        ))
+        await pump(0.15)
+        let want = expectedMarks(rows: 20, generation: 5)
+        #expect(marks(rig.model) == want, "want \(want) got \(marks(rig.model))")
+        rig.window.orderOut(nil)
     }
 
     /// The assumption the fix stands on: after every resize the engine reports exactly the
