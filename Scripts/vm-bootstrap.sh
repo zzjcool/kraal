@@ -80,6 +80,38 @@ provision() {
         ok "all three granted"
     fi
 
+    say "checking remote herdr (herdr machine add needs it)"
+    echo "  \`herdr machine add\` installs a matching herdr at the guest's"
+    echo "  ~/.local/bin/herdr — but only from an interactive terminal. A headless"
+    echo "  harness has none, and without the file every machines case dies at its"
+    echo "  fixture with 'matching remote herdr X is not installed'."
+    WANT=""
+    if command -v herdr >/dev/null; then
+        WANT=$(herdr --version 2>/dev/null | head -1 | awk '{print $NF}')
+    fi
+    HAVE=$(tart exec "$VM" /bin/bash -lc '$HOME/.local/bin/herdr --version 2>/dev/null | head -1' 2>/dev/null \
+        | tr -d '\r' | awk '{print $NF}')
+    if [ -n "$WANT" ] && [ "$WANT" = "$HAVE" ]; then
+        ok "guest herdr $HAVE"
+    elif [ -n "$WANT" ]; then
+        HOST_HERDR=$(command -v herdr)
+        tar czf - -C "$(dirname "$HOST_HERDR")" "$(basename "$HOST_HERDR")" \
+            | tart exec -i "$VM" /bin/bash -lc \
+                "mkdir -p ~/.local/bin && tar xzf - -C ~/.local/bin && \
+                 mv ~/.local/bin/$(basename "$HOST_HERDR") ~/.local/bin/herdr && \
+                 chmod +x ~/.local/bin/herdr" >/dev/null 2>&1
+        HAVE=$(tart exec "$VM" /bin/bash -lc '$HOME/.local/bin/herdr --version 2>/dev/null | head -1' 2>/dev/null \
+            | tr -d '\r' | awk '{print $NF}')
+        if [ "$WANT" = "$HAVE" ]; then
+            ok "installed guest herdr $HAVE (was ${HAVE:-missing})"
+        else
+            printf '\033[33mwarning:\033[0m could not install herdr %s in the guest (have %s)\n' \
+                "$WANT" "${HAVE:-nothing}"
+            echo "  machines-* GUI cases will fail until it is there"
+        fi
+    else
+        printf '\033[33mwarning:\033[0m no herdr on the host; skipping the guest copy\n'
+    fi
 }
 
 # ---------------------------------------------------------------- dispatch

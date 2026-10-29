@@ -2778,6 +2778,43 @@ ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
     "$(id -un)@127.0.0.1" true
 '
     case "$BACKEND" in
+    local) bash -lc "$script" >/dev/null 2>&1 || return 1 ;;
+    vm) tart exec "$VM" /bin/bash -lc "$script" >/dev/null 2>&1 || return 1 ;;
+    esac
+    machines_remote_herdr
+}
+
+# Puts the fixture's own `herdr` where `machine add` looks for the *remote* copy.
+#
+# Without this every machines case dies at its fixture with
+#
+#   error: matching remote herdr 0.9.5 is not installed at "$HOME/.local/bin/herdr";
+#   run from an interactive terminal to approve installation; machine was not saved
+#
+# because `machine add` will not install it without a TTY. A harness has none, so the
+# eight cases that need a roster (and the six that inherit it) failed at once — the
+# cascade looked like eight bugs and was one missing file.
+machines_remote_herdr() {
+    local source
+    case "$BACKEND" in
+    local) source=$(command -v herdr 2>/dev/null || true) ;;
+    vm) source="$VM_ROOT/bin/herdr" ;;
+    esac
+    [ -n "$source" ] || return 1
+    local script="
+set -e
+[ -x '$source' ] || exit 1
+mkdir -p ~/.local/bin
+wanted=\$('$source' --version 2>/dev/null | head -1)
+have=\$(~/.local/bin/herdr --version 2>/dev/null | head -1)
+if [ ! -x ~/.local/bin/herdr ] || [ \"\$have\" != \"\$wanted\" ]; then
+    cp '$source' ~/.local/bin/herdr
+    chmod +x ~/.local/bin/herdr
+    have=\$(~/.local/bin/herdr --version 2>/dev/null | head -1)
+fi
+[ \"\$have\" = \"\$wanted\" ]
+"
+    case "$BACKEND" in
     local) bash -lc "$script" >/dev/null 2>&1 ;;
     vm) tart exec "$VM" /bin/bash -lc "$script" >/dev/null 2>&1 ;;
     esac
@@ -3406,12 +3443,19 @@ case_session_name_budget() {
     }
     assert() {
         local budget
+        # The home that matters is the one the *app* runs in, not this shell's: under the
+        # vm backend they differ (`/Users/admin` vs `/Users/zzj`), and that is two characters
+        # of socket path, i.e. a different budget — the case predicted 51 and the app
+        # answered 49, so it failed for a reason that has nothing to do with the budget.
+        local app_home
+        app_home=$(machine_home)
+        [ -n "$app_home" ] || app_home="$HOME"
         budget=$(python3 -c '
-import os
-home = os.path.expanduser("~")
+import sys
+home = sys.argv[1]
 fixed = len(home) + len("/.config/herdr/sessions/") + len("/herdr-client.sock")
 print(min(64, max(0, 103 - fixed)))
-')
+' "$app_home")
         printf '%s' "$budget" >"$host_dir/budget.txt"
 
         local shown
