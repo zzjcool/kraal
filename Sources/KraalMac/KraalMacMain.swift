@@ -86,11 +86,16 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         if !runsInBackground {
             NSApp.activate(ignoringOtherApps: true)
         }
+        // One renderer decision per process, taken before any pane exists. The *log line* has
+        // to come after `rotate()` below: anything written before it is truncated away, and a
+        // launch line that never appears is indistinguishable from a flag that never arrived.
+        CellPainterPolicy.apply()
         KraalLog.shared.rotate()
         kraalLog("launch: bundle=\(Bundle.main.bundleIdentifier ?? "none") bundlePath=\(Bundle.main.bundlePath)")
         kraalLog("launch: session=\(KraalLog.shared.sessionName ?? "(none)") "
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
+        kraalLog("launch: cell painter=\(CellPainterPolicy.enabled)")
 
         let theme = makeThemeStore()
         let pool = makeTerminalPool(theme: theme)
@@ -102,28 +107,9 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             windowActions: windowActions,
             copyModeBanner: copyController.banner
         ) { store, paneId, geometry in
-            guard let surface = store.surface else {
-                return AnyView(Color(nsColor: .textBackgroundColor))
-            }
-            // Point the pool at whichever machine this surface came from before
-            // asking it for a model. Pane ids are only unique within one daemon
-            // (two machines can both have `w1:p1`), so the pool keys on the pair
-            // and drops everything when the machine actually changes.
-            pool.selectMachine(surface.bootId)
-            let model = pool.model(for: paneId)
-            model.onCellMetrics = { [weak store] cellSize in
-                guard let store else { return }
-                Task { @MainActor in
-                    store.updateCellMetrics(cellSize)
-                }
-            }
-            return AnyView(
-                GhosttyPaneView(
-                    model: model,
-                    surface: surface,
-                    geometry: geometry,
-                    onFocus: { store.focus(paneId: paneId) }
-                )
+            self.paneView(
+                store: store, paneId: paneId, geometry: geometry,
+                pool: pool, palette: theme.palette
             )
         } popupPaneContent: { store, popup, _ in
             self.popupView(store: store, popup: popup, pool: pool)
@@ -220,6 +206,61 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 self.store.focus(paneId: target)
             }
         }
+    }
+
+    /// One pane's view: the engine, with the cell painter over it when it is on.
+    ///
+    /// Extracted from the `RootView` closure because that closure had grown past the length
+    /// this file's other functions are held to, and because "which renderer draws this pane"
+    /// deserves a name of its own when it is the thing under test.
+    private func paneView(
+        store: AppStore,
+        paneId: String,
+        geometry: PaneSurfacePane,
+        pool: PaneTerminalPool,
+        palette: Palette
+    ) -> AnyView {
+        guard let surface = store.surface else {
+            return AnyView(Color(nsColor: .textBackgroundColor))
+        }
+        // Point the pool at whichever machine this surface came from before asking it for a
+        // model. Pane ids are only unique within one daemon (two machines can both have
+        // `w1:p1`), so the pool keys on the pair and drops everything when the machine
+        // actually changes.
+        pool.selectMachine(surface.bootId)
+        let model = pool.model(for: paneId)
+        model.onCellMetrics = { [weak store] cellSize in
+            guard let store else { return }
+            Task { @MainActor in
+                store.updateCellMetrics(cellSize)
+            }
+        }
+        let engine = GhosttyPaneView(
+            model: model,
+            surface: surface,
+            geometry: geometry,
+            onFocus: { store.focus(paneId: paneId) }
+        )
+        guard CellPainterPolicy.enabled else {
+            return AnyView(engine)
+        }
+        // The engine keeps running underneath — same writes, same input, same scrollback —
+        // and the cells are drawn on top. This is the smallest arrangement in which "who
+        // paints the pane" is the only difference between two runs.
+        kraalLog("cell painter: pane=\(paneId) inner=\(geometry.innerRect.width)"
+            + "x\(geometry.innerRect.height) frame=\(surface.frame.width)x\(surface.frame.height)")
+        return AnyView(
+            ZStack(alignment: .topLeading) {
+                engine
+                PaneCellCanvas(
+                    frame: surface.frame,
+                    inner: geometry.innerRect,
+                    cellSize: SurfaceGeometry.points(for: store.terminalCellSize),
+                    palette: AnsiPalette.from(palette)
+                )
+                .allowsHitTesting(false)
+            }
+        )
     }
 
     /// Builds the popup's terminal view.
