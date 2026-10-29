@@ -212,12 +212,33 @@ public struct PaneCellCanvas: View {
         for column in run.columns {
             guard let cell = cell(column: column, row: run.row) else { continue }
             if cell.skip || cell.symbol.isEmpty { continue }
-            if let shapes = CellGlyphShapes.shapes(for: cell.symbol) {
+            if let level = CellGlyphShapes.shadeLevel(for: cell.symbol) {
+                let paperColor = paper(column: column, row: run.row) ?? palette.background
+                let box = origin(column: column, row: run.row)
+                context.fill(
+                    Path(CGRect(origin: box, size: cellSize)),
+                    with: .color(Self.mix(paperColor, key.ink, level))
+                )
+            } else if let shapes = CellGlyphShapes.shapes(for: cell.symbol) {
                 paint(shapes, ink: key.ink, column: column, row: run.row, in: &context)
             } else {
-                paintText(cell.symbol, key: key, column: column, row: run.row, in: &context)
+                paintText(
+                    cell.symbol, key: key, column: column, row: run.row,
+                    span: span(column: column, row: run.row), in: &context
+                )
             }
         }
+    }
+
+    /// How many cells this cell's glyph occupies: 1, or more when the daemon marks the cells
+    /// it covers as `skip`.
+    private func span(column: Int, row: Int) -> Int {
+        var width = 1
+        while column + width < columns,
+              let next = cell(column: column + width, row: row), next.skip {
+            width += 1
+        }
+        return width
     }
 
     /// Braille dots, block elements and box rules, drawn as geometry in the cell's own rect.
@@ -270,6 +291,7 @@ public struct PaneCellCanvas: View {
         key: Resolved,
         column: Int,
         row: Int,
+        span: Int = 1,
         in context: inout GraphicsContext
     ) {
         var text = Text(symbols)
@@ -282,11 +304,19 @@ public struct PaneCellCanvas: View {
             text = text.strikethrough()
         }
         let box = origin(column: column, row: row)
-        context.draw(
-            text,
-            at: CGPoint(x: box.x, y: box.y + cellSize.height * Self.baselineInset),
-            anchor: .topLeading
-        )
+        let top = CGPoint(x: box.x, y: box.y + cellSize.height * Self.baselineInset)
+        if span > 1 {
+            // A wide glyph owns two cells but the fallback font that provides it does not
+            // necessarily advance two cells: left-aligned it leaves the gap on one side only.
+            // `anchor: .top` keeps the glyph's top where it was and centres it in its span.
+            context.draw(
+                text,
+                at: CGPoint(x: top.x + CGFloat(span) * cellSize.width / 2, y: top.y),
+                anchor: .top
+            )
+            return
+        }
+        context.draw(text, at: top, anchor: .topLeading)
     }
 
     /// ASCII with no combining marks: one advance per character, so the run can be one Text.
@@ -336,6 +366,16 @@ public struct PaneCellCanvas: View {
     }
 
     private static let baselineInset: CGFloat = 0.1
+
+    /// `paper` and `ink` mixed by `level` of ink, which is how a terminal draws `░▒▓`.
+    static func mix(_ paper: UInt32, _ ink: UInt32, _ level: CGFloat) -> Color {
+        func channel(_ shift: UInt32) -> Double {
+            let background = Double((paper >> shift) & 0xFF)
+            let foreground = Double((ink >> shift) & 0xFF)
+            return (background + (foreground - background) * level) / 255
+        }
+        return Color(red: channel(16), green: channel(8), blue: channel(0))
+    }
 
     /// `0xRRGGBB` as a colour.
     static func color(_ rgb: UInt32) -> Color {

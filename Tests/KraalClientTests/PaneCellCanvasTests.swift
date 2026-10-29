@@ -242,6 +242,41 @@ struct PaneCellCanvasTests {
         #expect(firstGreen > 15 && firstGreen < 60, "the first cell shows green \(firstGreen)")
     }
 
+    /// A wide glyph owns two cells, but the font that provides it does not necessarily
+    /// advance two cells. Left-aligned it leaves the whole gap on one side.
+    @Test("a wide glyph is centred in the cells it owns")
+    @MainActor
+    func wideGlyphIsCentred() throws {
+        let frame = Self.frame(columns: 4, rows: 1) { cells in
+            cells[0] = CellData(
+                symbol: "\u{4E16}", foreground: Self.white, background: Self.black,
+                modifier: 0, skip: false, hyperlink: nil
+            )
+            cells[1] = CellData(
+                symbol: "", foreground: Self.white, background: Self.black,
+                modifier: 0, skip: true, hyperlink: nil
+            )
+        }
+        let width = 4 * Self.cell.width
+        let image = try Self.pixels(
+            PaneCellCanvas(
+                frame: frame,
+                inner: SurfaceRect(originX: 0, originY: 0, width: 4, height: 1),
+                cellSize: Self.cell,
+                palette: Self.palette()
+            )
+            .frame(width: width, height: Self.cell.height)
+        )
+        let inked = (0 ..< Int(width)).filter { column in
+            (0 ..< image.height).contains { image.at(column: column, row: $0).brightness > 90 }
+        }
+        let lowest = try #require(inked.min())
+        let highest = try #require(inked.max())
+        let centre = (lowest + highest) / 2
+        let spanCentre = Int(Self.cell.width)          // the middle of two cells
+        #expect(abs(centre - spanCentre) <= 2, "glyph centre \(centre) is not near \(spanCentre)")
+    }
+
     @Test("a run of box drawing is one unbroken line, not a dashed one")
     @MainActor
     func boxDrawingHasNoGaps() throws {

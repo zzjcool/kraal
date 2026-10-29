@@ -56,6 +56,50 @@ struct CellGlyphShapesTests {
         }
     }
 
+    @Test("a double rule is two parallel strokes, a mixed corner mixes them")
+    func doubleRules() throws {
+        let horizontal = try #require(CellGlyphShapes.shapes(for: "\u{2550}"))
+        #expect(horizontal.count == 2, "═ is two strokes, not one thick one")
+        let heights = horizontal.compactMap { shape -> CGRect? in
+            if case let .rect(box) = shape { return box }
+            return nil
+        }
+        #expect(heights.allSatisfy { $0.width == 1 }, "a double rule spans the cell")
+        #expect(heights.map(\.midY).sorted() == [0.4, 0.6])
+
+        // ╒ is "down single and right double": two horizontal strokes to the right, one
+        // light vertical stroke down.
+        let mixed = try #require(CellGlyphShapes.shapes(for: "\u{2552}"))
+        #expect(mixed.count == 3)
+        let rects = mixed.compactMap { shape -> CGRect? in
+            if case let .rect(box) = shape { return box }
+            return nil
+        }
+        let horizontalRects = rects.filter { $0.height < $0.width }
+        let verticalRects = rects.filter { $0.height > $0.width }
+        #expect(horizontalRects.count == 2, "two horizontal strokes")
+        #expect(verticalRects.count == 1, "one vertical stroke")
+        #expect(horizontalRects.allSatisfy { $0.minX == 0.5 }, "both go right")
+        #expect(verticalRects.allSatisfy { $0.minY == 0.5 && $0.midX == 0.5 }, "one goes down")
+    }
+
+    @Test("shades are a mix level, not geometry")
+    func shades() throws {
+        #expect(CellGlyphShapes.shadeLevel(for: "\u{2591}") == 0.25)
+        #expect(CellGlyphShapes.shadeLevel(for: "\u{2592}") == 0.5)
+        #expect(CellGlyphShapes.shadeLevel(for: "\u{2593}") == 0.75)
+        #expect(CellGlyphShapes.shadeLevel(for: "M") == nil)
+        #expect(CellGlyphShapes.shapes(for: "\u{2592}") == nil, "a shade is a fill, not shapes")
+    }
+
+    @Test("a shade fills its cell between the two colours")
+    @MainActor
+    func shadeFillsTheCell() throws {
+        // 50% of white ink on a black page is exactly mid grey.
+        let half = PaneCellCanvas.mix(0x0000_0000, 0x00FF_FFFF, 0.5)
+        #expect(half == Color(red: 0.5, green: 0.5, blue: 0.5))
+    }
+
     @Test("letters are left to the font")
     func textFallsThrough() {
         #expect(CellGlyphShapes.shapes(for: "M") == nil)
