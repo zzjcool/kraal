@@ -424,6 +424,12 @@ private func reportShot(_ out: String, window: Any, note: String = "") -> Never 
 }
 
 /// Runs `screencapture` and reports whether it produced the file.
+/// `screencapture` of one window, usable from other files (`commandDrag` captures a burst
+/// of frames while the mouse button is held).
+func captureWindow(to path: String, number: Int) -> Bool {
+    capture(["-x", "-o", "-l", String(number), path])
+}
+
 private func capture(_ arguments: [String]) -> Bool {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
@@ -847,6 +853,7 @@ case "quit": commandQuit(args)
 case "click": commandClick(args)
 case "scroll": commandScroll(args)
 case "drag": commandDrag(args)
+case "diff": commandDiff(args)
 case "key": commandKey(args)
 case "menu": commandMenu(args)
 default:

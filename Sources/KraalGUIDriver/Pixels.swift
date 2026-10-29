@@ -248,3 +248,69 @@ func regionOfInterest(args: Arguments, image: CGImage) -> CGRect {
 
     return region
 }
+
+/// How different two captures are inside one region.
+///
+/// This is how a case asks "did the picture change while nothing should have changed":
+/// two frames of a pane whose geometry and content are identical must differ in zero
+/// pixels, and any difference is what a drag looks like when the compositor stretches a
+/// stale frame. `--rect` is in the first image's coordinates, top-down, the same form
+/// `pixels` takes.
+func commandDiff(_ args: Arguments) -> Never {
+    guard let firstPath = args.string("a"), let secondPath = args.string("b") else {
+        fail(.harness, "diff needs --a and --b")
+    }
+    guard let first = Bitmap(path: firstPath), let second = Bitmap(path: secondPath) else {
+        fail(.harness, "cannot read \(firstPath) or \(secondPath) as an image")
+    }
+    guard first.width == second.width, first.height == second.height else {
+        fail(.harness, "size mismatch: \(first.width)x\(first.height)"
+            + " vs \(second.width)x\(second.height)")
+    }
+    let region = regionOfInterest(args: args, image: first.image)
+    let tolerance = args.int("tolerance") ?? 0
+    var mismatched = 0
+    var total = 0
+    var maxDelta = 0
+    for row in Int(region.minY) ..< Int(region.maxY) {
+        for column in Int(region.minX) ..< Int(region.maxX) {
+            guard row >= 0, row < first.height, column >= 0, column < first.width else { continue }
+            total += 1
+            var delta = 0
+            for channel in 0 ..< 3 {
+                let index = (row * first.width + column) * 4 + channel
+                delta = max(delta, abs(Int(first.pixels[index]) - Int(second.pixels[index])))
+            }
+            maxDelta = max(maxDelta, delta)
+            if delta > tolerance { mismatched += 1 }
+        }
+    }
+    print("diff mismatch=\(mismatched) total=\(total) maxDelta=\(maxDelta)"
+        + " region=\(Int(region.width))x\(Int(region.height))")
+    exit(Exit.success.rawValue)
+}
+
+/// One image as top-down RGBA, in a layout the pixel comparisons can read directly.
+private struct Bitmap {
+    let image: CGImage
+    let pixels: [UInt8]
+    let width: Int
+    let height: Int
+
+    init?(path: String) {
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
+        self.image = image
+        width = image.width
+        height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        self.pixels = pixels
+    }
+}

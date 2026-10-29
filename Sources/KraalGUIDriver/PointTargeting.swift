@@ -227,7 +227,32 @@ func commandDrag(_ args: Arguments) -> Never {
     guard activateAndConfirm(app) else {
         fail(.harness, "could not bring '\(app.name)' to the front for a drag")
     }
-    SyntheticInput.drag(from: start, to: end, steps: args.int("steps") ?? 1)
+    // `--frames` turns the drag into a measurement: the button stays down after the last
+    // move while this many screenshots are taken, so a case can compare what the window
+    // looked like mid-drag against what it looks like at rest. Without it the drag is
+    // atomic and the only thing a case can check is where the divider ended up.
+    let frames = args.int("frames") ?? 0
+    let frameDirectory = args.string("frame-dir") ?? "/tmp/kraal-frames"
+    let frameInterval = args.int("frame-interval") ?? 60
+    if frames > 0 {
+        try? FileManager.default.createDirectory(
+            atPath: frameDirectory, withIntermediateDirectories: true
+        )
+    }
+    var captured = 0
+    SyntheticInput.drag(
+        from: start, to: end, steps: args.int("steps") ?? 1,
+        onHold: {
+            for index in 0 ..< frames {
+                let path = "\(frameDirectory)/frame-\(index).png"
+                if captureWindow(to: path, number: window.number) { captured += 1 }
+                usleep(UInt32(max(frameInterval, 10)) * 1000)
+            }
+        }
+    )
+    if frames > 0 {
+        print("frames=\(captured) dir=\(frameDirectory)")
+    }
     print("dragged window+(\(windowOffset(start, in: window))) -> "
         + "(\(windowOffset(end, in: window))) screen "
         + "(\(Int(start.x)),\(Int(start.y))) -> (\(Int(end.x)),\(Int(end.y)))")
