@@ -175,7 +175,7 @@ public struct PaneCellCanvas: View {
                     end = column + 1
                 }
                 paintRun(
-                    Run(symbols: symbols, key: key, column: column, row: row),
+                    Run(symbols: symbols, key: key, columns: column ..< end, row: row),
                     in: &context
                 )
                 column = end
@@ -187,14 +187,92 @@ public struct PaneCellCanvas: View {
     struct Run {
         var symbols: String
         var key: Resolved
-        var column: Int
+        /// The cell range the run covers, so the slow path can place each glyph itself.
+        var columns: Range<Int>
         var row: Int
     }
 
     private func paintRun(_ run: Run, in context: inout GraphicsContext) {
         let key = run.key
         guard !run.symbols.isEmpty else { return }
-        var text = Text(run.symbols)
+        if Self.isPlain(run.symbols) {
+            paintText(
+                run.symbols, key: key, column: run.columns.lowerBound, row: run.row,
+                in: &context
+            )
+            return
+        }
+        // Anything that is not plain ASCII is placed cell by cell. The reason is measured,
+        // not stylistic: a run is one `Text`, so every glyph after the first sits at the
+        // *font's* advance. `NSFont.monospacedSystemFont` advances at 0.6182 em, not the 0.6
+        // the font is sized by, so a 130-column TUI row ended 3 columns wide — its right
+        // border was cut off and its graphs (braille, box drawing) drifted apart while the
+        // box characters, which are drawn by the fallback font at yet another advance, split
+        // into dashes. Per-cell placement makes a cell's ink start where the cell starts.
+        for column in run.columns {
+            guard let cell = cell(column: column, row: run.row) else { continue }
+            if cell.skip || cell.symbol.isEmpty { continue }
+            if let shapes = CellGlyphShapes.shapes(for: cell.symbol) {
+                paint(shapes, ink: key.ink, column: column, row: run.row, in: &context)
+            } else {
+                paintText(cell.symbol, key: key, column: column, row: run.row, in: &context)
+            }
+        }
+    }
+
+    /// Braille dots, block elements and box rules, drawn as geometry in the cell's own rect.
+    ///
+    /// The alternative costs a visible seam per cell: a font's braille is narrower than a
+    /// cell, so a field of `⣿` came out as pairs of dots with a gap at every cell boundary
+    /// while the engine's was one even grid. `CellGlyphShapes` has that measurement.
+    private func paint(
+        _ shapes: [CellShape],
+        ink: UInt32,
+        column: Int,
+        row: Int,
+        in context: inout GraphicsContext
+    ) {
+        let box = origin(column: column, row: row)
+        for shape in shapes {
+            switch shape {
+            case let .rect(unit):
+                context.fill(
+                    Path(CGRect(
+                        x: box.x + unit.minX * cellSize.width,
+                        y: box.y + unit.minY * cellSize.height,
+                        width: unit.width * cellSize.width,
+                        height: unit.height * cellSize.height
+                    )),
+                    with: .color(Self.color(ink))
+                )
+            case let .dot(center, radius):
+                // A dot's radius is a fraction of the cell *width*; using the height would
+                // give ellipses on the 8.5 x 18.5 cell this terminal uses.
+                let point = CGPoint(
+                    x: box.x + center.x * cellSize.width,
+                    y: box.y + center.y * cellSize.height
+                )
+                let size = radius * cellSize.width
+                context.fill(
+                    Path(ellipseIn: CGRect(
+                        x: point.x - size, y: point.y - size, width: size * 2, height: size * 2
+                    )),
+                    with: .color(Self.color(ink))
+                )
+            }
+        }
+    }
+
+    /// Draws `symbols` as one `Text` at `column`, correcting the advance so glyph *n* starts
+    /// at `n * cellWidth` however the font rounds.
+    private func paintText(
+        _ symbols: String,
+        key: Resolved,
+        column: Int,
+        row: Int,
+        in context: inout GraphicsContext
+    ) {
+        var text = Text(symbols)
             .font(font(bold: key.bold, italic: key.italic))
             .foregroundColor(Self.color(key.ink))
         if key.underline {
@@ -203,12 +281,18 @@ public struct PaneCellCanvas: View {
         if key.strikethrough {
             text = text.strikethrough()
         }
-        let box = origin(column: run.column, row: run.row)
+        let box = origin(column: column, row: row)
         context.draw(
             text,
             at: CGPoint(x: box.x, y: box.y + cellSize.height * Self.baselineInset),
             anchor: .topLeading
         )
+    }
+
+    /// ASCII with no combining marks: one advance per character, so the run can be one Text.
+    private static func isPlain(_ symbols: String) -> Bool {
+        symbols.utf8.count == symbols.unicodeScalars.count
+            && symbols.unicodeScalars.allSatisfy { $0.isASCII }
     }
 
     private func paintCursor(in context: inout GraphicsContext) {
@@ -235,11 +319,15 @@ public struct PaneCellCanvas: View {
 
     // MARK: - Type
 
-    /// A monospaced advance is about 0.6 em, so this is the size whose cell is one cell wide.
-    /// The engine picks its font the same way; when the two disagree the text is a little
-    /// small or large but every column still lands on the same x.
+    /// The size whose advance is one cell wide.
+    ///
+    /// SwiftUI's `design: .monospaced` face advances at exactly 0.6 em — measured by drawing
+    /// 40 glyphs into a 1-pixel-per-point canvas at cell widths 8.0 and 8.5 and reading the
+    /// ink back: columns landed at 8.0/8.5 pt apart in both cases. (`NSFont`'s
+    /// `monospacedSystemFont` reports 0.6182 em for the same size, which is a different face
+    /// and is *not* what this draws — sizing by that number only makes the text 3% small.)
     private func font(bold: Bool, italic: Bool) -> Font {
-        let size = max(6, cellSize.width / 0.6)
+        let size = max(4, cellSize.width / 0.6)
         var font = Font.system(size: size, weight: bold ? .semibold : .regular, design: .monospaced)
         if italic {
             font = font.italic()

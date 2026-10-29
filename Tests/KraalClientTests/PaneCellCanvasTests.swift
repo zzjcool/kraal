@@ -198,6 +198,114 @@ struct PaneCellCanvasTests {
         #expect(green.green < 60, "palette entry 0 leaked into the background")
     }
 
+    /// The failure this pins was visible in the first TUI anyone ran: a 130-column `btop`
+    /// row ended about three columns to the right of where the daemon put it, so the box's
+    /// right border was clipped and the graphs fell apart. A run is drawn as one `Text`, so
+    /// glyph *n* starts at the font's advance — and `NSFont.monospacedSystemFont` advances at
+    /// 0.6182 em while the font was sized by 0.6, which is +3%.
+    @Test("the glyph in each cell keeps that cell's colour, all 40 columns long")
+    @MainActor
+    func advancesLandOnCellBoundaries() throws {
+        // Each column gets its own green, so "which glyph is this" is readable from the
+        // pixels. Drift shows up as a colour that is drawn outside its own cell — the
+        // version this pins had the last glyph of a 40-column run 1.5 cells too far right.
+        let columns = 40
+        let shade = { (column: Int) in TerminalColor.rgb(red: 0, green: UInt8(20 + column * 5), blue: 0).rawValue }
+        let frame = Self.frame(columns: columns, rows: 1) { cells in
+            for column in 0 ..< columns {
+                cells[column] = CellData(
+                    symbol: "M", foreground: shade(column), background: Self.black,
+                    modifier: 0, skip: false, hyperlink: nil
+                )
+            }
+        }
+        let width = CGFloat(columns) * Self.cell.width
+        let image = try Self.pixels(
+            PaneCellCanvas(
+                frame: frame,
+                inner: SurfaceRect(originX: 0, originY: 0, width: UInt16(columns), height: 1),
+                cellSize: Self.cell,
+                palette: Self.palette()
+            )
+            .frame(width: width, height: Self.cell.height)
+        )
+        func greenRange(_ column: Int) -> Int {
+            (0 ..< image.height).map { image.at(column: column, row: $0).green }.max() ?? 0
+        }
+        // The last column's own green (20 + 39 * 5 = 215) must be drawn inside the last cell.
+        let lastCell = (columns - 1) * Int(Self.cell.width)
+        let lastGreen = (lastCell ..< columns * Int(Self.cell.width)).map(greenRange).max() ?? 0
+        #expect(lastGreen > 190, "the last column's glyph is missing from its own cell")
+        // And the first cell must still hold the first column's green (25), not a later one:
+        // with drift the whole run slides right and the first cell shows a neighbour.
+        let firstGreen = (0 ..< Int(Self.cell.width)).map(greenRange).max() ?? 0
+        #expect(firstGreen > 15 && firstGreen < 60, "the first cell shows green \(firstGreen)")
+    }
+
+    @Test("a run of box drawing is one unbroken line, not a dashed one")
+    @MainActor
+    func boxDrawingHasNoGaps() throws {
+        let columns = 20
+        let frame = Self.frame(columns: columns, rows: 1) { cells in
+            for column in 0 ..< columns {
+                cells[column] = CellData(
+                    symbol: "\u{2500}", foreground: Self.white, background: Self.black,
+                    modifier: 0, skip: false, hyperlink: nil
+                )
+            }
+        }
+        let width = CGFloat(columns) * Self.cell.width
+        let image = try Self.pixels(
+            PaneCellCanvas(
+                frame: frame,
+                inner: SurfaceRect(originX: 0, originY: 0, width: UInt16(columns), height: 1),
+                cellSize: Self.cell,
+                palette: Self.palette()
+            )
+            .frame(width: width, height: Self.cell.height)
+        )
+        // Every column of the rule must carry ink: terminals draw these as a rect for exactly
+        // this reason, and a fallback font's side bearings turn the rule into dashes.
+        let emptyColumns = (0 ..< Int(width)).filter { column in
+            (0 ..< image.height).allSatisfy { image.at(column: column, row: $0).brightness < 60 }
+        }
+        #expect(emptyColumns.isEmpty, "columns with no ink: \(emptyColumns.prefix(8))")
+    }
+
+    @Test("a wide glyph's second cell does not shift the cell after it")
+    @MainActor
+    func wideGlyphKeepsColumnsAligned() throws {
+        let frame = Self.frame(columns: 4, rows: 1) { cells in
+            cells[0] = CellData(
+                symbol: "\u{4E16}", foreground: Self.white, background: Self.black,
+                modifier: 0, skip: false, hyperlink: nil
+            )
+            cells[1] = CellData(
+                symbol: "", foreground: Self.white, background: Self.black,
+                modifier: 0, skip: true, hyperlink: nil
+            )
+            cells[2] = CellData(
+                symbol: "M", foreground: Self.white, background: Self.black,
+                modifier: 0, skip: false, hyperlink: nil
+            )
+        }
+        let width = 4 * Self.cell.width
+        let image = try Self.pixels(
+            PaneCellCanvas(
+                frame: frame,
+                inner: SurfaceRect(originX: 0, originY: 0, width: 4, height: 1),
+                cellSize: Self.cell,
+                palette: Self.palette()
+            )
+            .frame(width: width, height: Self.cell.height)
+        )
+        let thirdCell = (2 * Int(Self.cell.width) ..< 3 * Int(Self.cell.width))
+        let ink = thirdCell.flatMap { column in
+            (0 ..< image.height).map { image.at(column: column, row: $0).brightness }
+        }
+        #expect(ink.max() ?? 0 > 120, "the cell after the wide glyph is empty")
+    }
+
     @Test("the renderer is off unless asked, and one variable turns it on")
     func policyIsOffByDefault() {
         CellPainterPolicy.apply([:])
