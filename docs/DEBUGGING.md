@@ -505,3 +505,131 @@ bundle id，按面积排序时被测的那个只是恰好更小。
 配套的一条：**收集完证据先确认"这是谁的窗口"**。这次是通过截图内容里的
 `herdr-home` / pi 横幅反推出来的，属于事后追认；应该在看图之前就核对
 （`winid <pid>` 输出为空就说明没有窗口，而不是"随便来一个"）。
+
+---
+
+## §16 鼠标上报的行号整体偏 2 行：先量出来，再谈原因（2026-10-30）
+
+用户报告：「TUI 下面选中的位置好像传递不对，我看选中会有两个地方」。截图里同一个 pane 有
+两条高亮带：上面一条棕色 `#413725`（≈ gruvbox dark 的 `selection_background`），下面一条
+浅灰 `#939B9F`。Kraal 自己**从不画选中高亮**（`Palette.selectionBackground` 只有定义，
+没有任何 view 用它），所以两条带子里必有一条是那个 TUI 自己按「程序被告知的行」画的。
+
+于是先量「程序被告知的行」对不对，而不是猜。做法：把探针起在一个**鼠标上报**的 pane 里，
+用**已知行**去点它（`pane_cell_point`：容器原点、格大小、以及 daemon 自己给的 `WxH@x,y`
+终端矩形全部取自 app 的 `layout: container=` 日志行），然后读程序收到的 SGR 行号。
+
+`./Scripts/gui.sh run mouse-tui-row`（**故意不进 `all_cases`**，它现在是红的）：
+
+```
+clicked rows 1,8,15, program got 3,10
+```
+
+- 点第 1 行 → 程序收到 `\e[<0;20;3M`
+- 点第 8 行 → 收到 `;10M`
+- 点第 15 行 → **什么也没收到**（算出来是第 17 行，而 pane 只有 16 行，被引擎丢掉了）
+
+三条数据共同指向一个**常量偏移 +2 行（36pt）**，而不是缩放：两个点完全一致，第三个点因为
+越界而消失。用户看到的「两个地方」正是这个：TUI 按被告知的行（+2）画它自己的高亮，而引擎
+自己的选中（棕色）画在指针真实所在的行。
+
+### 为什么这个偏移原来查不出来
+
+`mouse-tui` 只断言行号**落在 pane 内**（`row < pane_rows`）和「一次点击只有一次 press」。
++2 行的偏移让这两个断言都通过 —— 文档里 §2 那句「样本要能区分对错」的另一个版本：断言
+的对象必须精确到「哪一行」，否则它测的不是这件事。
+
+### 已排掉的三个干扰
+
+1. **`--clicks 3` 不是三击**（合成事件没有 `mouseEventClickState`）——与本题无关，但
+   `mouse-selection` 一类的用例会因此假绿。
+2. **拖拽没有 motion 上报是正确行为**：`tui-mouse-probe.py` 只申请 `?1000h`（按下/抬起），
+   所以「drag=0」不是 bug。要测拖拽得先让探针申请 `?1002h`。
+3. **`pane_body_point` 的容器原点是错的**（它用 `window - container`，实际容器不是贴底，
+   差 25pt），这才是先前「看起来偏 3 行」的来源之一。`pane_cell_point` 改用日志里的
+   `containerOrigin` 与 `cell`，不再自算。
+
+### 现在的状态
+
+偏移**已复现、可重复**，`mouse-tui-row` 是它的门禁（红）。根因未定：36pt = 2 行，而引擎的
+surface 层是 928x288pt（16 行），说明**引擎自己的视图坐标系**与 pane 被绘制的矩形不是同一个
+原点（`PaneSurfaceHostView` 那段「SwiftUI 的 `.position` 不动 AppKit 视图」的注释正是这条路
+上）。下一步用临时日志把引擎 NSView 的 `frame/bounds`（窗口坐标）打出来，与 `pane.innerRect`
+的绘制矩形对比，定位那 36pt，再修 —— 修完 `mouse-tui-row` 应当变绿，然后把它加进
+`all_cases`。
+
+### §16 续：自己跑完那三个实验，偏移定位到「引擎认为 surface 是 18 行」
+
+**一、内容有没有放错位置** —— 没有。`probe-split-view` 往上下两个 pane 各灌 `seq`（上
+`1-40`、下 `100-140`）再截图：上半个 pane 是 26-40 + 提示符，下半个是 126-140 + 提示符，
+**各在各的格子里**，第一行文字落在 y≈97，和 `containerOrigin=221,71` + 居中 8 +
+内边距 1 行 = 97 完全一致。
+
+顺带纠正我上一节写错的一句话：`settled: origin=…` 是 **窗口左下原点**的坐标
+（p1 `375` → 顶部 = 760-375-288 = 97 ✓；p2 `51` → 421 ✓）。我先前把它当左上读，得出
+「视图偏了 46pt」的结论是**错的**，那是坐标翻转的老坑（`docs/DEBUGGING.md` §8 同源）。
+
+**二、app 交给引擎的坐标对不对** —— 对。临时在 `PaneSurfaceHostView` 的 `mouseDown` 里
+打点，并打开 `TerminalDebugLog` 的 `.input`：
+
+```
+mouse-in: window=385,338 local=152,287 flipped=false bounds=928x288 viewBL=233,51
+surface mousePos x=152.00 y=1.00
+surface mousePos x=152.00 y=127.00
+surface mousePos x=152.00 y=253.00      ← 这三下分别点的是第 1、8、15 行
+```
+
+288pt 高、18pt 一格 → `1/127/253` 正好是第 1/8/15 行 **顶部附近**，所以翻转换算这一层
+是对的（`bounds.height - local.y` 在这条 `flipped=false` 的视图上成立）。
+
+**三、程序收到什么** —— 第 3、10、什么都没收到。
+
+三条合起来，我当时写下的结论是：「偏移发生在 Ghostty 内部把 y 换成单元格的那一步」，
+模型是「引擎认为 surface 是 324pt（18 行）、内容贴底」。**这个结论是错的**，虽然它把三个
+数据点都拟合上了。错在第一步：我以为那条 SGR 序列是引擎写的。
+
+**四、谁写了那串 SGR** —— 是我们自己。把 `AppStore.sendMouse`（`pane.mouse` 那条 wire）
+临时短路掉再跑一次同一用例：程序**一个事件都收不到**。也就是说 TUI 收到的那条
+`\e[<0;20;3M` 是 daemon 按 Kraal 发过去的 `ClientMousePosition` 写进 pty 的，引擎自己
+并不产生它（程序的 stdin/stdout 就是 daemon 的 pty，只有 daemon 能写）。于是问题从「引擎
+内部」缩回到**本仓库自己算的那对 (column,row)**。
+
+**五、那对坐标错在哪** —— 临时在 `MouseForwarder.paneLocation` 里打点，把命中矩形和
+pane-relative 坐标打出来：
+
+```
+pane-hit: pane=w1:p2 topDown=385,548 rect=232,375 928x288 point=152,173 contentH=760
+```
+
+`point.y=173` / 18pt = 第 10 行 —— 正是程序收到的那一行（那一击点的是第 8 行，真实
+`point.y` 应为 127）。多出来的 46pt 来自 `rect.minY=375`：下半个 pane 的真实槽位是
+`containerOrigin 71 + 8 + 19*18 = 421`，命中矩形比它**高了 46pt**。
+
+根因和 §8 是同一个错误的第二次出现，只是换了个函数：`contentView` 是
+`NSHostingView`，`isFlipped == true`，`contentView.convert(bounds, from: self)` 给出的
+`container` **已经是自上而下**，而 `PaneFrameMath.rect` 又按「AppKit 自下而上」算了
+`contentHeight - (minY + height)`，于是翻转了两次：
+
+```
+错：760 - (71 + 664) + 350 = 375
+对：      71          + 350 = 421
+```
+
+影响不止「TUI 高亮画错行」：命中矩形整体上移 46pt，意味着**每个 pane 底部 46pt 的点击
+根本不属于它**（`pane.mouse` 里越界的行被引擎丢弃，和用户「选中出现两个地方」的截图
+一一对应）。
+
+修法：`PaneFrameMath.rect` 增加 `isFlipped` 参数（flipped 时容器原点不再做减法），
+调用方传 `contentView.isFlipped`；`PaneFrameMath` 拆到 `Sources/KraalUI/PaneFrameMath.swift`
+（900 行限制）。A/B 注入：把参数改回常量 `false` → `program got 3,10` ✗；改回
+`contentView.isFlipped` → `program got 1,8,15` ✓。
+
+### 顺手挖出的第四个坑：`driver type` 会静默什么都不打
+
+第一次跑 `probe-split-view` 时两个 pane 都是空的、截图字节数一模一样。原因不是 app：
+`kraal-gui type --text` 走「取 AX 焦点元素 → 设 `AXValue`」这条路，而**终端视图会接受
+`AXValue` 然后什么也不做**，于是它打印 `typed via AX` 就退出了 —— 后面真正可用的合成
+键盘事件永远不会执行。
+
+修法是把写入读回来核对，不匹配就走合成事件（`Sources/KraalGUIDriver/main.swift`）。这
+意味着**在这之前，任何靠 `type` 往终端里打字的用例都可能是在测空气**。

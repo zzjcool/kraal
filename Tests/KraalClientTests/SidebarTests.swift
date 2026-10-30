@@ -448,6 +448,40 @@ struct PaneFrameMathTests {
         #expect(rect.minY == 163)
     }
 
+    /// A flipped container is already top-down and must not be inverted again.
+    ///
+    /// Measured on a live split (2026-10-30): the panes area sits at `y=71` in a flipped
+    /// 760 pt content view, the lower pane's frame is 350 pt into it, and the hit
+    /// rectangle came out at 375 — `760 - (71 + 664) + 350` — i.e. 46 pt too high. Every
+    /// `pane.mouse` position inherited that error, so a TUI was told row 3 for a click on
+    /// row 1 and refused clicks in the pane's bottom 46 pt.
+    @Test("a flipped container is not converted from the bottom a second time")
+    func flippedContainerIsAlreadyTopDown() {
+        let container = CGRect(x: 221, y: 71, width: 959, height: 664)
+        let pane = CGRect(x: 0, y: 350, width: 928, height: 288)
+        let rect = PaneFrameMath.rect(
+            container: container,
+            pane: pane,
+            contentHeight: 760,
+            isFlipped: true
+        )
+        #expect(rect.minY == 421)
+        #expect(rect.maxY == 709)
+    }
+
+    @Test("a non-flipped container still converts from the bottom")
+    func bottomUpContainerConverts() {
+        // Same geometry as the test above, stated in a bottom-left container: its top is
+        // 760 - (25 + 664) = 71, so the pane lands on the same 421.
+        let rect = PaneFrameMath.rect(
+            container: CGRect(x: 221, y: 25, width: 959, height: 664),
+            pane: CGRect(x: 0, y: 350, width: 928, height: 288),
+            contentHeight: 760,
+            isFlipped: false
+        )
+        #expect(rect.minY == 421)
+    }
+
     /// The bug behind a "global" misalignment: the pane offset was added to a
     /// bottom-origin container offset, so every pane in the window shifted by the
     /// same constant. This pins the two edges that define the pane: its top sits

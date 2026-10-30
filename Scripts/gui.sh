@@ -459,6 +459,50 @@ container_origin() {
     printf '%s' "$line" | sed -n 's/.*containerOrigin=\(-\{0,1\}[0-9]*\),\(-\{0,1\}[0-9]*\).*/\1 \2/p'
 }
 
+# The screen point at the centre of a pane's terminal cell.
+#
+# Everything comes from the app's own `layout: container=` line and the daemon's pane
+# rects: the daemon says which cells belong to a pane (`WxH@x,y` — the terminal *inside*
+# its allocation, so the border is already excluded), the app says where the container
+# sits and how big a cell is.
+#
+# It exists because "the row the program received" could not be checked without it. The
+# older `pane_body_point` derives the container origin as `window - container`, which is
+# 25 pt wrong here (the container is not flush to the bottom) and made a correct mapping
+# look three rows off.
+pane_cell_point() {
+    local pane_id="$1" row="$2" column="$3"
+    local window_text layout_text container
+    window_text=$(driver window 2>/dev/null) || return 1
+    layout_text=$(pane_layout 2>/dev/null) || return 1
+    container=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
+    [ -n "$container" ] || { echo "no 'layout: container=' line" >&2; return 1; }
+    python3 -c '
+import json, re, sys
+
+pane_id, row, column = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+window_text, layout_text, line = sys.argv[4], sys.argv[5], sys.argv[6]
+
+win = re.search(r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", window_text)
+origin = re.search(r"containerOrigin=(-?\d+),(-?\d+)", line)
+cell = re.search(r"cell=([\d.]+)x([\d.]+)", line)
+if not (win and origin and cell):
+    sys.exit(1)
+win_x, win_y = int(win.group(1)), int(win.group(2))
+cont_x, cont_y = int(origin.group(1)), int(origin.group(2))
+cell_w, cell_h = float(cell.group(1)), float(cell.group(2))
+
+match = re.search(r"(?:^|[\s\[,])" + re.escape(pane_id) + r"=(\d+)x(\d+)@(\d+),(\d+)", line)
+if not match:
+    sys.exit(1)
+_x, _y, term_x, term_y = (int(v) for v in match.groups())
+
+x = win_x + cont_x + (term_x + column - 0.5) * cell_w
+y = win_y + cont_y + (term_y + row - 0.5) * cell_h
+print(f"{int(x)},{int(y)}")
+' "$pane_id" "$row" "$column" "$window_text" "$layout_text" "$container"
+}
+
 # ---------------------------------------------------------------- lifecycle
 
 cmd_probe() {
@@ -3293,6 +3337,213 @@ for pane in json.load(sys.stdin)["result"]["panes"]:
     }
 }
 
+# Experiment hook: the pane inset is the daemon's to decide (`ui.pane_borders`), and the
+# offset under investigation is exactly one border row plus the divider's first row. If
+# pinning the borders off changes the reported rows, the inset handling is the cause; if
+# it does not, it is not. Overridable so one case can run both arms.
+# TEMPORARY probe: is each pane's engine view where the pane is drawn?
+#
+# Fills the two halves of a split with text that names itself, screenshots the window and
+# copies it out, so the picture can be compared with the geometry the app reports. If the
+# halves are swapped or shifted, this is where it shows; if they are right, the mouse
+# offset lives in the engine's coordinate mapping rather than in view placement.
+# Commands are `seq` only: `type --text` falls back to the AX path for text it cannot
+# type positionally (`|`, capitals) and that path writes nowhere in a terminal, which is
+# how the first version of this probe produced two empty panes and looked like a bug in
+# the app.
+case_probe_split_view() {
+    requires() { echo focus; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+            sleep 1
+        fi
+        if [ "$(pane_count)" = "1" ]; then
+            herdr pane split "$(first_pane_id)" --direction down >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "2" ] || return 1
+        sleep 2
+        return 0
+    }
+    action() {
+        local top bottom point
+        top=$(printf '%s\n' "$(pane_ids)" | head -1)
+        bottom=$(printf '%s\n' "$(pane_ids)" | tail -1)
+        printf '%s %s\n' "$top" "$bottom" >"$host_dir/panes.txt"
+
+        # Focus through the daemon as well as by clicking: the first click on an
+        # unfocused pane is consumed by the focus change, and keystrokes typed after it go
+        # to whichever pane was focused before.
+        point=$(pane_cell_point "$top" 6 10 2>"$host_dir/pcp-top.err") \
+            || { echo "pane_cell_point(top): $(cat "$host_dir/pcp-top.err")"; return 1; }
+        driver click --at-screen "$point" >"$host_dir/click-top.txt" 2>&1 \
+            || { cat "$host_dir/click-top.txt"; return 1; }
+        herdr pane focus --pane "$top" >/dev/null 2>&1 || true
+        sleep 0.4
+        driver type --text "seq 1 40" >"$host_dir/type-top.txt" 2>&1 \
+            || { cat "$host_dir/type-top.txt"; return 1; }
+        driver key --name return >/dev/null 2>&1 || return 1
+        sleep 0.8
+
+        point=$(pane_cell_point "$bottom" 6 10 2>"$host_dir/pcp-bottom.err") \
+            || { echo "pane_cell_point(bottom): $(cat "$host_dir/pcp-bottom.err")"; return 1; }
+        driver click --at-screen "$point" >"$host_dir/click-bottom.txt" 2>&1 \
+            || { cat "$host_dir/click-bottom.txt"; return 1; }
+        herdr pane focus --pane "$bottom" >/dev/null 2>&1 || true
+        sleep 0.4
+        driver type --text "seq 100 140" >"$host_dir/type-bottom.txt" 2>&1 \
+            || { cat "$host_dir/type-bottom.txt"; return 1; }
+        driver key --name return >/dev/null 2>&1 || return 1
+        sleep 1.5
+
+        driver shot -o "$VM_ROOT/split-view.png" >"$host_dir/shot.txt" 2>&1
+        case "$BACKEND" in
+        local) cp "$VM_ROOT/split-view.png" "$host_dir/split-view.png" 2>/dev/null ;;
+        vm)
+            tart exec -i "$VM" /bin/bash -lc "cat $VM_ROOT/split-view.png" \
+                >"$host_dir/split-view.png" 2>/dev/null
+            ;;
+        esac
+        return 0
+    }
+    assert() {
+        local shot="$host_dir/split-view.png"
+        check "the window was captured" \
+            "$([ -s "$shot" ] && echo 0 || echo 1)" "$(ls -l "$shot" 2>/dev/null | awk '{print $5}') bytes"
+    }
+}
+
+case_mouse_tui_row_config() {
+    printf 'ui.pane_borders = "%s"\n' "${KRAAL_MOUSE_ROW_BORDERS:-never}" | write_config
+}
+
+case_mouse_tui_row() {
+    requires() { echo focus; }
+    fixture() {
+        # A fresh daemon has no panes at all (`daemon up, panes=0`), so the
+        # workspace has to be created before there is anything to split.
+        if [ "$(pane_count)" -eq 0 ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+            sleep 2
+        fi
+        # Split so there is a pane that is *not* focused: routing to the wrong pane
+        # is one of the failures this case has to be able to see.
+        # Positional pane id, not `--target-pane-id`: that flag does not exist and
+        # the split was silently skipped, which the case reported as "the program
+        # never claimed mouse reporting" (a downstream symptom of a fixture that
+        # never ran). `herdr pane split --help` is the authority.
+        herdr pane split "$(first_pane_id)" --direction down >/dev/null 2>&1 || true
+        # Focus the *other* pane after splitting. `pane split` focuses the new pane,
+        # and clicking a pane that is already focused cannot show the bug this case
+        # is about: the first click on an unfocused pane is either swallowed by a
+        # focus change or forwarded, and only the second one ever worked.
+        sleep 2
+        local target
+        target=$(printf '%s\n' "$(pane_ids)" | tail -1)
+        if [ -z "$target" ]; then
+            echo "no pane to probe after the split"
+            return 1
+        fi
+        # host_dir, not dir: `dir` is a *guest* path under the vm backend, and this
+        # shell is the host. Writing to it here failed with "No such file or
+        # directory" for a directory that existed — on the other machine.
+        if ! printf '%s' "$target" >"$host_dir/target-pane.txt"; then
+            echo "cannot record the target pane"
+            return 1
+        fi
+        # Deliberately focus the *other* pane. `pane split` leaves the new pane
+        # focused, and a click on an already-focused pane cannot show the bug: an
+        # unfocused view forwards nothing, so the click is swallowed and the pane
+        # never becomes focused either.
+        herdr pane focus --pane "$(first_pane_id)" >/dev/null 2>&1 || true
+        sleep 1
+        # The probe claims mouse reporting the way a real TUI does, records every
+        # byte, and leaves the pane usable. It runs for exactly as long as the case
+        # needs, then exits on its own so the pane is not left in raw mode.
+        herdr pane run "$target" \
+            "python3 $VM_ROOT/tui-mouse-probe.py 45 $dir/mouse-events.txt" \
+            >/dev/null 2>&1 || return 1
+        # The program claiming the mouse is what makes this case meaningful, and the
+        # only observer that can see it is the program itself: the CLI's JSON API
+        # (`session.snapshot`) carries workspace/tab/pane metadata and no mouse
+        # state at all. The probe writes its claim to a marker file for the same
+        # reason — asking the daemon would mean speaking Kraal's bincode protocol
+        # from bash.
+        local tries=0
+        while [ "$tries" -lt 40 ]; do
+            if tart exec "$VM" /bin/bash -lc "test -s $dir/mouse-events.txt.ready" 2>/dev/null; then
+                return 0
+            fi
+            tries=$((tries + 1))
+            sleep 0.25
+        done
+        echo "probe never started (pane $target)"
+        return 1
+    }
+    action() {
+        driver window >"$host_dir/window.txt" 2>&1
+        driver ax --json --depth 30 >"$host_dir/ax.json" 2>&1
+        local target
+        target=$(cat "$host_dir/target-pane.txt")
+        # Three clicks at three *known* rows, so the row the program is told can be
+        # compared with the row the pointer was on. The old case clicked the pane's
+        # centre, which only proves "some row inside the pane".
+        local wanted_rows="1 8 15" row point_text
+        : >"$host_dir/expected-rows.txt"
+        for row in $wanted_rows; do
+            point_text=$(pane_cell_point "$target" "$row" 20) || {
+                echo "cannot compute a point for row $row"
+                return 1
+            }
+            printf '%s\n' "$row" >>"$host_dir/expected-rows.txt"
+            printf '%s\n' "$point_text" >>"$host_dir/row-points.txt"
+            driver click --at-screen "$point_text" >>"$host_dir/click.txt" 2>&1
+            sleep 0.5
+        done
+    }
+    assert() {
+        local events="$host_dir/mouse-events.txt"
+        if [ "$BACKEND" = "vm" ]; then
+            tart exec -i "$VM" /bin/bash -lc "cat $dir/mouse-events.txt 2>/dev/null" \
+                >"$events" 2>/dev/null
+        else
+            cp "$dir/mouse-events.txt" "$events" 2>/dev/null
+        fi
+        local rows wanted
+        rows=$(python3 - "$events" <<'PYEOF'
+import ast
+import sys
+
+rows = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line:
+        continue
+    for chunk in ast.literal_eval(line).split(b"\x1b[<")[1:]:
+        if not chunk or chunk[-1:] != b"M":
+            continue
+        try:
+            pieces = chunk[:-1].split(b";")
+            if int(pieces[0]) >= 64:
+                continue          # wheel
+            rows.append(int(pieces[2]))
+        except (IndexError, ValueError):
+            continue
+print(",".join(str(r) for r in rows))
+PYEOF
+)
+        printf '%s\n' "$rows" >"$host_dir/received-rows.txt"
+        wanted=$(paste -sd, - <"$host_dir/expected-rows.txt")
+        # Zero tolerance: the pointer was placed at the centre of a specific cell, so the
+        # program has to be told that cell. A mapping that is off by a border row, a
+        # divider, a tab bar or a backing scale passes every count-based check and fails
+        # only here.
+        check "the program was told the row the pointer was on" \
+            "$([ -n "$rows" ] && [ "$rows" = "$wanted" ] && echo 0 || echo 1)" \
+            "clicked rows $wanted, program got ${rows:-nothing}"
+    }
+}
+
 # Right-clicking a pane on an **SSH** machine must raise the pane menu (issue #89).
 #
 # The report: a local pane shows Kraal's pane menu, an SSH pane shows nothing. The
@@ -4729,7 +4980,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
