@@ -46,7 +46,7 @@ Rex（Superlogical 的终端应用）的 CLI 是「一个 agent 能不能独自�
 | `capture --format=text\|vt` | `herdr pane read --source visible\|recent\|recent-unwrapped\|detection --format text\|ansi` ✓ | 用 herdr |
 | `capture --format=html` | 无 | **已补**：`kraal capture --format text\|ansi\|html`（§4c） |
 | `run --wait` 退出码 | `herdr pane wait-output` + `herdr agent wait` 部分覆盖 | 差一个「等命令结束并给退出码」的动词 |
-| `events --json` | herdr 有事件 schema（`subscription_event`），CLI 无 `events` 动词 | 中优先 |
+| `events --json` | herdr 定义了 `events.subscribe` + `subscription_event`，CLI 无 `events` 动词 | **已补**：`kraal events`（§4e） |
 | `api call METHOD` | herdr 只有 `api snapshot/schema`，无通用 call | 中优先（要做就是 herdr 的活） |
 | **客户端动作目录** | **无**（ax 只能盲点） | **本轮已补**：`kraal-gui actions` |
 | **按名调用客户端动作** | **无** | **本轮已补**：`kraal-gui do` |
@@ -183,16 +183,49 @@ kraal run --wait --output json -- sh -c 'exit 7'   # {"exit_code":7,"pane_id":"w
 注入验证：`exit(status)` 改成 `exit(0)` → `✗ a failing command's status comes back as the CLI's status`。
 纯函数单测 6 条（`Tests/KraalCLITests/KraalRunTests.swift`：引号、哨兵解析、herdr 形状）。
 
+## 4e. 第五个切片：`kraal events --type …`
+
+```bash
+kraal events --list                                   # 正在跑的 herdr 认识哪些事件（27 种）
+kraal events --type pane.created --count 1          # 等到第一条就退出（脚本友好）
+kraal events --type pane.exited --type layout.updated
+```
+
+herdr 的 socket 协议就是**按行分隔的 JSON**，订阅方法也早就在 schema 里，只是 CLI 只暴露了
+`api snapshot` / `api schema`。这份改动自己说协议：一行请求，然后原样打印每一行。
+
+```
+→ {"id":"kraal-events","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.created"}]}}
+← {"id":"kraal-events","result":{"type":"subscription_started"}}
+← {"data":{"pane":{… "pane_id":"w7:p9" …},"type":"pane_created"},"event":"pane_created"}
+```
+
+要点：
+
+- `--list` **问运行中的 herdr 要清单**（`api schema` 里的 `Subscription.oneOf`），不在二进制里
+  硬编码——herdr 每个版本都会加事件种类，写死的清单会开始骗人。
+- socket 路径先看 `HERDR_SOCKET_PATH`，再问 `herdr status --json`（`server.socket`）。
+- `--count` 让「等到 N 条就退出」可测，比抢时间窗稳；`--timeout` 是兜底（0 = 一直流）。
+- 订阅被拒（`invalid_request`）时把 daemon 的原话打出来，而不是静默空转。
+
+`./Scripts/gui.sh run events-json`：7 条断言，顺序本身是断言的一部分——**先等到 ack，再制造
+事件**（先触发再订阅在慢机器上会以错误的理由通过）。注入验证：把 subscriptions 改成空数组 →
+`✗ creating a pane produces a pane_created frame`。
+
+**踩到的坑**：`--timeout` 是全局 flag，第一版只写进了 `Options.timeout`，`EventOptions.timeout`
+还是 0 → 「2 秒后退出」变成了「永远流」，用例挂死 30 分钟。现在 `--timeout` 一次写三处
+（probe / `run --wait` / `events`），并在注释里说明为什么共用一个 flag。
+
 ## 5. 下一步（按价值排序）
 
 1. ~~`skill` 自描述指南~~（§4b 已做）
 2. ~~`capture --format=html`~~（§4c 已做）
 3. ~~`run --wait` 拿退出码~~（§4d 已做）
-4. **`events --json`**：herdr 的 `subscription_event` 已经定义好了，但 CLI 没有 `events`
-   动词；要做就得自己连 JSON socket 并订阅（未开始）。
-5. **多客户端**（`-C CLIENT`）：Kraal 有 Machines 面板；`client ls` / `-C <mac> do` 需要
-   app 侧一个控制通道（URL scheme 最省事，但要考虑「不留探索区」：绝不能让外部命令
-   在用户正在用的窗口里 split）。
+4. ~~`events --json`~~（§4e 已做）
+5. **多客户端**（`-C CLIENT`）：**部分完成**——`kraal-gui clients --json` + `--client PID`
+   已经能区分同机的多个实例（§4b）。剩下的「控制另一台 Mac 上的 Kraal」需要一个 app 侧
+   控制通道（URL scheme 最省事），而且必须保证外部命令绝不在用户正在用的窗口里 split，
+   那是协议决定，未开始。
 
 ## 6. 未验证 / 不做
 
