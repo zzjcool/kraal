@@ -215,21 +215,27 @@ struct TargetApp {
     ///   "could not bring Kraal to the front" while the real instance was sitting
     ///   right there. Ranking by "has a window" makes an ambiguous host — three
     ///   Kraal processes during a debugging session — resolve to the right one.
-    static func find(name: String) -> TargetApp? {
-        let candidates = NSWorkspace.shared.runningApplications.filter {
+    /// Every live instance whose name matches, best-candidate ordering left to the caller.
+    ///
+    /// `find` ranks by "has a window"; `clients` needs the whole list because a second
+    /// instance is exactly what `--client PID` exists for (Rex: `rex client ls`).
+    static func all(name: String) -> [TargetApp] {
+        NSWorkspace.shared.runningApplications.filter {
             !$0.isTerminated
                 && ($0.activationPolicy == .regular || $0.activationPolicy == .accessory)
                 && ($0.localizedName ?? "").localizedCaseInsensitiveContains(name)
+        }.map {
+            TargetApp(application: $0, element: AXUIElementCreateApplication($0.processIdentifier))
         }
+    }
+
+    static func find(name: String) -> TargetApp? {
+        let candidates = all(name: name)
         guard !candidates.isEmpty else { return nil }
         let ranked = candidates
-            .map { (app: $0, windows: KraalGUIDriver.windows(of: $0.processIdentifier).count) }
+            .map { (app: $0, windows: KraalGUIDriver.windows(of: $0.pid).count) }
             .sorted { $0.windows > $1.windows }
-        guard let best = ranked.first else { return nil }
-        return TargetApp(
-            application: best.app,
-            element: AXUIElementCreateApplication(best.app.processIdentifier)
-        )
+        return ranked.first?.app
     }
 
     func windows() -> [AXUIElement] {

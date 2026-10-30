@@ -827,45 +827,7 @@ func commandMenu(_ args: Arguments) -> Never {
 
 let argv = Array(CommandLine.arguments.dropFirst())
 guard let command = argv.first else {
-    let usage = """
-    usage: kraal-gui <command> [options]
-
-      probe                          check AX + Screen Recording; exit 2 if not ready
-      ax [--out FILE] [--depth N]    dump the accessibility tree
-      press --title|--desc|--id|--value X
-                                     AXPress an element (does NOT activate the app)
-      wait  --title X [--timeout S]  poll until the element exists
-      window                         print window frame + window number
-      shot  -o FILE [--full]         screenshot one window
-      type  --text S                 type text (AX first, CGEvent fallback)
-      click --at X,Y | --at-screen X,Y [--right] [--clicks N] [--no-activate]
-                                     synthetic click; --at is window-relative,
-                                     --at-screen is absolute (AX frame space)
-      drag  --from X,Y --to X,Y [--steps N]
-                                     synthetic drag, both points window-relative
-      scroll --at X,Y | --at-screen X,Y [--lines N]
-                                     synthetic wheel at a point; the app decides
-                                     which pane is under it, unlike pane.scroll
-      key   --name N | --char C [--mod cmd,shift]
-                                     key chord (needs the app frontmost);
-                                     --name escape|return|tab|space|backspace|
-                                     forwardDelete|up|down|left|right|home|end|
-                                     pageUp|pageDown|f1..f12
-      menu  --menu T --item T [--index N]
-                                     open a menu bar menu, then press an item
-      actions [--json]               list the menu items the app offers
-      do    --path "M > I" | --item I [--json]
-                                     press one of them (rex: `rex -C CLIENT do`)
-      launch --app PATH [--env K=V] [--wait-window T] [--match NAME]
-      quit                           terminate the app under test
-
-    Coordinates: `kraal-gui window` and `ax --json` frames are screen coordinates;
-    `--at`/`drag` offsets are relative to that window's top-left corner. A point
-    outside the window is refused (exit 2) instead of being clamped to its edge.
-
-    exit codes: 0 ok · 1 assertion · 2 harness · 3 crash
-    """
-    print(usage)
+    print(usageText())
     exit(Exit.harness.rawValue)
 }
 
@@ -890,6 +852,9 @@ case "key": commandKey(args)
 case "menu": commandMenu(args)
 case "actions": commandActions(args)
 case "do": commandDo(args)
+case "clients": commandClients(args)
+case "help": commandHelp(args)
+case "skill": commandSkill(args)
 default:
     fail(.harness, "unknown command '\(command)'")
 }

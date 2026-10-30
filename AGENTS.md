@@ -118,6 +118,7 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 ./Scripts/test-baseline.sh --compare     # 名单里是否有「其实已经绿了」的陈旧条目
 ./Scripts/gui.sh run split-right         # 单个 UI 用例（需已 build-app.sh）
 ./Scripts/gui.sh run client-actions      # 客户端动作目录：actions 列、do 按名触发
+./Scripts/gui.sh skill                   # agent 指南（从命令表生成，含活的动作目录）
 ./Scripts/gui.sh list                    # 现有用例
 
 ./Scripts/bench.sh                       # 性能探针（release；见 docs/PERFORMANCE.md）

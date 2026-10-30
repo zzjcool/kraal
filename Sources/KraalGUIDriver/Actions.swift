@@ -96,7 +96,7 @@ func actionApp(_ args: Arguments) -> TargetApp {
 
 /// `kraal-gui actions [--json]`
 func commandActions(_ args: Arguments) -> Never {
-    let app = actionApp(args)
+    let app = resolveClient(args)
     let catalog = menuActions(app, timeout: args.double("timeout") ?? 5)
     guard !catalog.isEmpty else {
         fail(.harness, "the menu bar of '\(app.name)' reported no items")
@@ -200,7 +200,7 @@ func pressMenuItem(_ app: TargetApp, menu: String, item: String, timeout: Double
 /// then has to be answered with `type` + `key --name return`, because the driver
 /// cannot know what to type.
 func commandDo(_ args: Arguments) -> Never {
-    let app = actionApp(args)
+    let app = resolveClient(args)
     let timeout = args.double("timeout") ?? 5
     let catalog = menuActions(app, timeout: timeout)
 
