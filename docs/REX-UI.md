@@ -118,6 +118,30 @@ Kraal 的 `AppCommand` 有 58 条、标题与菜单一致，但**只有标题可
   "max"→Toggle Pane Zoom、"kill"→三个 Close、双词 AND、"tzm" 子序列、
   每条命令都有关键字、每条命令都能用自己的 id 词搜到。
 
+**主题目录 = Ghostty 的开源主题文件**（2026-10-30 追加）。
+
+- `Sources/KraalUI/Resources/themes/` 里是 **51 个 Ghostty 主题文件**，逐字复制，
+  `ATTRIBUTION.md` 记来源与许可（Ghostty / iTerm2-Color-Schemes，MIT）。
+- `Sources/KraalProtocol/GhosttyTheme.swift`：解析 `palette = N=#hex` /
+  `background` / `foreground` / `cursor-*` / `selection-*`；**只缺 required 键才返回
+  nil**（背景、前景、16 色必填），坏文件被跳过而不是半应用。
+- `Sources/KraalUI/Palette+Ghostty.swift`：**19 个界面角色全部从这 6+16 个颜色
+  推出来**（surface = 背景向文字混 5/9/14%，overlay/subtext 反向混，状态色 = ANSI）。
+  这就是 §2 里 Rex 的做法，只是角色少一些。
+- `Sources/KraalUI/ThemePicker.swift` + `Change Theme…` 命令：带色卡预览的选择器，
+  搜索复用 `PaletteSearch`；选中写 `UserDefaults["KraalThemeName"]`，
+  `KRAAL_THEME` 环境变量优先（门禁用）。第一行是「Follow config.toml」= 撤销。
+- 终端侧：`PaneTerminalPool.ghostty` / `PaneTerminal(ghostty:)` 把前景、光标、
+  **16 个调色板色**交给引擎（`withForeground` / `withCursorColor` / `withPalette`）。
+  没选主题时仍走原来那条：只有背景与选中色。
+- 日志：`theme: applied X (source=ghostty|config appearance=…)`、
+  `terminal theme: <name> fg=… bg=… ansi1=… ansi4=…`。
+
+测试：`GhosttyThemeTests` 8 条（格式/坏文件/短 hex/亮度）、
+`GhosttyThemeCatalogTests` 10 条（**51 个文件全部解析**、id 唯一、深浅分组、
+名字各种拼写、派生角色单调、**每个主题 fg/bg 亮度差 >0.25**、pick 覆盖 config、
+未知 pick 回退）。
+
 **没有借的，以及为什么：**
 
 - **主题文件本身**：Rex 的 `themes.json` 是它的资产，直接拷进 Kraal 会有授权问题。
@@ -132,9 +156,8 @@ Kraal 的 `AppCommand` 有 58 条、标题与菜单一致，但**只有标题可
 1. **字号三键**（`font.increase/decrease/reset`）：`TerminalConfiguration.withFontSize`
    已可用，`PaneTerminalPool` 已有「改了就丢模型重建」的模式（背景色/选中色
    都是这么做的）。门禁：改字号前后日志里的 `cell=` 变化 + 截图几何变化。
-2. **主题选择器**：面板里列出 18 个已有名字，选中后写 herdr 的 `config.toml`
-   并 `Reload Config`。风险是**改用户的配置文件**（注释会丢），要先做
-   「只改 `[theme] name` 行」的定点写入并备份；在做到这件事之前，宁可没有。
+2. ~~主题选择器~~ 已完成（见 §5），且**没有**动用户的 `config.toml`：
+   选中的主题只是客户端覆盖，`config.toml` 仍是默认值的来源。
 3. **密度切换**（紧凑/舒适）：侧栏行高 + 选项卡高度，两档，存 UserDefaults。
 4. **语义角色补齐**：把 `danger/success/warning/info` 家族加进 `Palette`，
    现在这些状态色是散在视图里的 `.red`/`.green`。

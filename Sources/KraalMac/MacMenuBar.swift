@@ -34,6 +34,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         var showCommands: () -> Void = {}
         var showShortcuts: () -> Void = {}
         var showSettings: () -> Void = {}
+        var showThemePicker: () -> Void = {}
         var showDebugInfo: () -> Void = {}
         var enterCopyMode: (String) -> Void = { _ in }
     }
@@ -152,6 +153,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
     private func viewMenu(_ menu: NSMenu) {
         menu.addItem(command: .toggleSidebar, target: self)
         menu.addItem(command: .toggleStatusBar, target: self)
+        menu.addItem(command: .changeTheme, target: self)
         menu.addItem(.separator())
 
         menu.addItem(command: .splitRight, target: self)
@@ -303,6 +305,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
             showCommands: actions.showCommands,
             showShortcuts: actions.showShortcuts,
             showSettings: actions.showSettings,
+            showThemePicker: actions.showThemePicker,
             targetPaneId: targetPaneId,
             enterCopyMode: { [weak self] paneId in self?.actions.enterCopyMode(paneId) }
         )

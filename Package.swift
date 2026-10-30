@@ -50,6 +50,10 @@ let package = Package(
         .target(
             name: "KraalUI",
             dependencies: ["KraalProtocol", "KraalTransport", "KraalClient", "KraalSidebar"],
+            // Ghostty's theme files, copied verbatim (see Resources/themes/ATTRIBUTION.md).
+            // Resources rather than a generated table: 51 files of six lines each are
+            // easier to diff against upstream than 51 structs of 23 hex literals.
+            resources: [.copy("Resources/themes")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(

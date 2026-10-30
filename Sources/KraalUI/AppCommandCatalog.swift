@@ -69,7 +69,7 @@ public extension AppCommand {
              .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
              .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown, .previousPane, .nextPane:
             .pane
-        case .toggleSidebar, .toggleStatusBar, .commandPalette, .reloadConfig,
+        case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme, .reloadConfig,
              .keyboardShortcuts, .reconnect, .settings:
             .view
         }
@@ -125,6 +125,7 @@ public extension AppCommand {
         .toggleSidebar: ["sidebar", "sidenav", "hide", "show", "panel", "toggle"],
         .toggleStatusBar: ["status", "footer", "bar", "hide", "show", "toggle"],
         .commandPalette: ["palette", "command", "run", "search", "find", "goto", "quick", "open"],
+        .changeTheme: ["theme", "skin", "colour", "color", "scheme", "palette", "appearance"],
         .reloadConfig: ["reload", "refresh", "config", "theme", "reconnect"],
         .keyboardShortcuts: ["keys", "shortcuts", "bindings", "hotkeys", "keyboard"],
         .reconnect: ["reconnect", "connection", "disconnect", "retry", "network", "socket"],

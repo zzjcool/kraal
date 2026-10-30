@@ -164,6 +164,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 showCommands: { [windowActions] in windowActions.showCommandPalette() },
                 showShortcuts: { [windowActions] in windowActions.showShortcuts() },
                 showSettings: { [windowActions] in windowActions.showSettings() },
+                showThemePicker: { [windowActions] in windowActions.showThemePicker() },
                 showDebugInfo: { [windowActions] in windowActions.showDebugInfo() },
                 enterCopyMode: { [weak self] paneId in self?.copyMode?.enter(paneId: paneId) }
             )
@@ -367,7 +368,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 self?.routeInput(target: target, data: data)
             },
             background: theme.palette.terminalBackgroundHex,
-            selectionBackground: theme.palette.selectionBackgroundHex
+            selectionBackground: theme.palette.selectionBackgroundHex,
+            ghostty: theme.ghostty
         )
         // Logged because it is the only evidence a GUI case can assert on: whether the
         // terminals took the theme's background or libghostty's default is not visible
@@ -382,7 +384,29 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             pool?.background = palette.terminalBackgroundHex
             pool?.selectionBackground = palette.selectionBackgroundHex
         }
+        // A picked theme carries the foreground, cursor and sixteen ANSI colours too.
+        // `nil` (the config.toml path) leaves them to the engine, which is what every
+        // version before the picker did.
+        theme.onTerminalTheme = { [weak self, weak pool] picked in
+            self?.logTerminalTheme(picked)
+            pool?.ghostty = picked
+        }
+        logTerminalTheme(theme.ghostty)
         return pool
+    }
+
+    /// The picked theme, in one line a GUI case can assert on.
+    ///
+    /// Not visible in any view hierarchy: the ANSI entries go straight into the
+    /// engine's configuration, and the only way to tell a gruvbox terminal from a
+    /// Catppuccin one without a screenshot is what was built here.
+    private func logTerminalTheme(_ theme: GhosttyTheme?) {
+        guard let theme else {
+            kraalLog("terminal theme: none (following config.toml)")
+            return
+        }
+        kraalLog("terminal theme: \(theme.name) fg=\(theme.foreground) bg=\(theme.background)"
+            + " ansi1=\(theme.ansi[1]) ansi4=\(theme.ansi[4])")
     }
 
     /// Records the colour the terminals were built with, for the GUI gate.
