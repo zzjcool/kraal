@@ -68,14 +68,27 @@ public final class PaneTerminalPool {
         }
     }
 
+    /// The theme picked in the app, when there is one.
+    ///
+    /// Retires the models on change for the same reason: a theme is a
+    /// construction-time configuration command in libghostty.
+    public var ghostty: GhosttyTheme? {
+        didSet {
+            guard ghostty != oldValue else { return }
+            models.removeAll()
+        }
+    }
+
     public init(
         onInput: @escaping @Sendable (String, Data) -> Void,
         background: String? = nil,
-        selectionBackground: String? = nil
+        selectionBackground: String? = nil,
+        ghostty: GhosttyTheme? = nil
     ) {
         self.onInput = onInput
         self.background = background
         self.selectionBackground = selectionBackground
+        self.ghostty = ghostty
     }
 
     /// Points the pool at the machine whose panes it is about to be asked for.
@@ -108,7 +121,8 @@ public final class PaneTerminalPool {
             machine: key.machine,
             isPopup: isPopup,
             background: background,
-            selectionBackground: selectionBackground
+            selectionBackground: selectionBackground,
+            ghostty: ghostty
         ) { [weak self] data in
             self?.onInput(paneId, data)
         }

@@ -19,6 +19,7 @@ public struct RootView: View {
     @State private var showConnection = false
     @State private var showShortcuts = false
     @State private var showSettings = false
+    @State private var showThemePicker = false
     @State private var showDebugInfo = false
     /// The rename dialog raised by a command; the palette presents its own.
     @State private var prompt: CommandPrompt?
@@ -77,6 +78,7 @@ public struct RootView: View {
             showCommands: { showCommands = true },
             showShortcuts: { showShortcuts = true },
             showSettings: { showSettings = true },
+            showThemePicker: { showThemePicker = true },
             enterCopyMode: { onEnterCopyMode($0) }
         )
     }
@@ -136,6 +138,10 @@ public struct RootView: View {
         content
             .sheet(isPresented: $showCommands) {
             CommandPalette(env: commandEnvironment)
+                .environment(store)
+        }
+        .sheet(isPresented: $showThemePicker) {
+            ThemePicker()
                 .environment(store)
         }
         .sheet(isPresented: $showConnection) {
@@ -210,6 +216,7 @@ public struct RootView: View {
         .onChange(of: windowActions.sidebarToggleCount) { sidebarVisible.toggle() }
         .onChange(of: windowActions.statusBarToggleCount) { statusBarVisible.toggle() }
         .onChange(of: windowActions.commandPaletteCount) { showCommands = true }
+        .onChange(of: windowActions.themePickerCount) { showThemePicker = true }
         .onChange(of: windowActions.shortcutsCount) { showShortcuts = true }
         .onChange(of: windowActions.settingsCount) { showSettings = true }
         .onChange(of: windowActions.debugInfoCount) { showDebugInfo = true }

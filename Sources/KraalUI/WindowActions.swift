@@ -30,6 +30,7 @@ public final class WindowActions {
     /// tab to show.
     public private(set) var settingsCount = 0
     public private(set) var debugInfoCount = 0
+    public private(set) var themePickerCount = 0
 
     public init() {}
 
@@ -39,4 +40,5 @@ public final class WindowActions {
     public func showShortcuts() { shortcutsCount += 1 }
     public func showSettings() { settingsCount += 1 }
     public func showDebugInfo() { debugInfoCount += 1 }
+    public func showThemePicker() { themePickerCount += 1 }
 }

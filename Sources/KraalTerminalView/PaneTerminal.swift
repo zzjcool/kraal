@@ -238,6 +238,13 @@ public final class PaneTerminalModel {
         /// each cell's own foreground, which is what the engine does when
         /// `selection-foreground` is unset.
         selectionBackground: String? = nil,
+        /// A theme picked in the app: its foreground, cursor and sixteen colours.
+        ///
+        /// Passed as the whole theme rather than five parameters because the engine
+        /// takes them as one construction-time configuration, and the pick is a
+        /// single user decision — the same reason ``selectionBackground`` travels
+        /// with ``background``.
+        ghostty: GhosttyTheme? = nil,
         onInput: @escaping @Sendable (Data) -> Void
     ) {
         self.paneId = paneId
@@ -255,17 +262,18 @@ public final class PaneTerminalModel {
         //
         // Both arms get the same value: the theme is Kraal's, not the platform's, so
         // the terminal must not change colour when macOS switches appearance.
+        let pickedBackground = background ?? ghostty.map { "#\($0.background)" }
         let theme: TerminalTheme
-        if let background {
+        if let pickedBackground {
             let arm = TerminalConfiguration { builder in
-                builder.withBackground(background)
+                builder.withBackground(pickedBackground)
                 // In the same arm as the background: that arm *replaces*
                 // `TerminalTheme.default`, so the two colours travel together. It also
                 // means the `background == nil` branch above keeps the default theme's own
                 // `selection-background` (#C9D0D9 light / #303030 dark) — which is why a
                 // selection colour is only written when the theme supplied a background.
-                if let selectionBackground {
-                    builder.withSelectionBackground(selectionBackground)
+                if let selection = selectionBackground ?? ghostty?.selectionBackground {
+                    builder.withSelectionBackground(selection.hasPrefix("#") ? selection : "#\(selection)")
                 }
             }
             theme = TerminalTheme(light: arm, dark: arm)
@@ -292,6 +300,23 @@ public final class PaneTerminalModel {
                 // footer or a command line almost always does — measured, it left 38.2% of
                 // samples with the band where this leaves 8.5%.
                 builder.withCustom("window-padding-color", "extend-always")
+                // A picked theme owns the whole colour scheme, not just the two
+                // colours above: the sixteen ANSI entries are what the daemon's SGR
+                // indices resolve to, and a gruvbox background under Catppuccin
+                // accents reads as a bug in the client. `config.toml` themes never
+                // reach here with a palette — the daemon resolves those itself.
+                if let ghostty {
+                    builder.withForeground("#\(ghostty.foreground)")
+                    if let cursor = ghostty.cursor {
+                        builder.withCursorColor("#\(cursor)")
+                    }
+                    if let cursorText = ghostty.cursorText {
+                        builder.withCursorText("#\(cursorText)")
+                    }
+                    for (index, color) in ghostty.ansi.enumerated() {
+                        builder.withPalette(index, color: "#\(color)")
+                    }
+                }
             }
         )
         let relay = EngineReportRelay()

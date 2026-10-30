@@ -102,6 +102,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
     case toggleSidebar = "toggle_sidebar"
     case toggleStatusBar = "toggle_status_bar"
     case commandPalette = "command_palette"
+    case changeTheme = "change_theme"
     case reloadConfig = "reload_config"
     case settings = "settings"
     case keyboardShortcuts = "keybindings"
@@ -147,6 +148,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
         case .toggleSidebar: return "Toggle Sidebar"
         case .toggleStatusBar: return "Toggle Status Bar"
         case .commandPalette: return "Command Palette"
+        case .changeTheme: return "Change Theme…"
         case .reloadConfig: return "Reload Config"
         case .settings: return "Settings…"
         case .keyboardShortcuts: return "Keyboard Shortcuts"
@@ -294,6 +296,9 @@ public struct CommandEnvironment {
     /// machines are configuration, and a File-menu dialog put them next to the
     /// everyday workspace actions.
     public var showSettings: () -> Void
+    /// Opens the theme picker. A closure for the same reason as the palette: the
+    /// sheet is the window's, not a command's.
+    public var showThemePicker: () -> Void
     /// The pane a context menu was raised over, when there was one.
     ///
     /// A right-click means "the pane under the pointer", not "whatever is
@@ -321,6 +326,7 @@ public struct CommandEnvironment {
         showCommands: @escaping () -> Void = {},
         showShortcuts: @escaping () -> Void = {},
         showSettings: @escaping () -> Void = {},
+        showThemePicker: @escaping () -> Void = {},
         targetPaneId: String? = nil,
         enterCopyMode: @escaping (String) -> Void = { _ in }
     ) {
@@ -330,6 +336,7 @@ public struct CommandEnvironment {
         self.showCommands = showCommands
         self.showShortcuts = showShortcuts
         self.showSettings = showSettings
+        self.showThemePicker = showThemePicker
         self.targetPaneId = targetPaneId
         self.enterCopyMode = enterCopyMode
     }
@@ -378,7 +385,7 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
          .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown:
         performPaneAction(command, on: store, target: env.targetPaneId)
 
-    case .toggleSidebar, .toggleStatusBar, .commandPalette,
+    case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme,
          .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
         performViewAction(command, on: store, env: env)
     }
@@ -507,6 +514,7 @@ private func performViewAction(
     case .toggleSidebar: env.toggleSidebar()
     case .toggleStatusBar: env.toggleStatusBar()
     case .commandPalette: env.showCommands()
+    case .changeTheme: env.showThemePicker()
     case .reloadConfig: store.reloadServerConfig()
     case .keyboardShortcuts: env.showShortcuts()
     case .settings: env.showSettings()

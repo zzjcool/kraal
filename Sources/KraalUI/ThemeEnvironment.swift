@@ -20,6 +20,7 @@
 //
 
 import AppKit
+import KraalProtocol
 import SwiftUI
 
 private struct PaletteKey: EnvironmentKey {
@@ -49,6 +50,13 @@ public final class ThemeStore {
     public private(set) var config: ThemeConfig
     /// The appearance the current palette was chosen for.
     public private(set) var appearance: HostAppearance
+    /// The Ghostty theme the user picked in the app, when there is one.
+    ///
+    /// `nil` means "follow `config.toml`", which is the behaviour every version
+    /// before the picker had. A pick says the opposite: the chrome and the terminal
+    /// are this theme, whatever the daemon's config says — the same split Rex has
+    /// between its `client.theme.change` and the server's own settings.
+    public private(set) var ghostty: GhosttyTheme?
 
     /// Called after every palette swap, for owners that need a colour outside SwiftUI.
     ///
@@ -56,6 +64,13 @@ public final class ThemeStore {
     /// construction-time configuration command, so it cannot read the environment
     /// palette and has to be rebuilt instead.
     public var onPaletteChange: ((Palette) -> Void)?
+    /// Called after every theme swap with the picked Ghostty theme, so the
+    /// terminals can take its foreground, cursor and sixteen colours.
+    ///
+    /// Separate from ``onPaletteChange`` because a `config.toml` theme has no ANSI
+    /// palette on this side: the daemon resolves it, and passing `nil` leaves the
+    /// engine's own colours alone.
+    public var onTerminalTheme: ((GhosttyTheme?) -> Void)?
 
     @ObservationIgnored private var appearanceObserver: NSKeyValueObservation?
 
@@ -78,7 +93,41 @@ public final class ThemeStore {
         self.palette = palette
         self.themeName = name
         self.appearance = resolvedAppearance
-        kraalLog("theme: applied \(name) (appearance=\(resolvedAppearance.rawValue))")
+        self.ghostty = Self.savedTheme(environment: environment)
+        if let ghostty {
+            // A saved pick wins over the config; `apply` below is what keeps the
+            // two from disagreeing after a reload.
+            self.palette = Palette.derived(from: ghostty)
+            self.themeName = ghostty.name
+        }
+        let source = ghostty == nil ? "config" : "ghostty"
+        kraalLog("theme: applied \(themeName) (source=\(source) appearance=\(resolvedAppearance.rawValue))")
+    }
+
+    /// The theme name saved by the picker, resolved to a bundled theme.
+    ///
+    /// `KRAAL_THEME` comes first so a GUI case can pin a theme without writing to
+    /// the user's defaults — a test that edits `UserDefaults.standard` leaves the
+    /// developer's own pick changed behind it.
+    static func savedTheme(environment: [String: String]) -> GhosttyTheme? {
+        let candidate = environment["KRAAL_THEME"]
+            ?? UserDefaults.standard.string(forKey: themeDefaultsKey)
+        guard let candidate, !candidate.isEmpty else { return nil }
+        let theme = GhosttyThemeCatalog.named(candidate) ?? GhosttyThemeCatalog.identified(by: candidate)
+        if theme == nil { kraalLog("theme: \(candidate) is not a bundled theme; following config.toml") }
+        return theme
+    }
+
+    static let themeDefaultsKey = "KraalThemeName"
+
+    /// Applies the theme the user picked, or goes back to `config.toml` with `nil`.
+    ///
+    /// Persisting here rather than in the picker keeps the rule in one place: what
+    /// is saved is what is applied, and a relaunch lands on the same theme.
+    public func selectTheme(_ pick: GhosttyTheme?) {
+        UserDefaults.standard.set(pick?.id, forKey: Self.themeDefaultsKey)
+        kraalLog("theme: picked \(pick?.name ?? "config.toml")")
+        apply(configuration: config)
     }
 
     /// Starts following the system's light/dark setting.
@@ -106,11 +155,22 @@ public final class ThemeStore {
     /// Swaps in a newly loaded config.
     public func apply(configuration: ThemeConfig) {
         config = configuration
-        let resolved = ThemeResolver.resolve(configuration, appearance: appearance)
-        palette = resolved.palette
-        themeName = resolved.name
-        kraalLog("theme: applied \(resolved.name) (appearance=\(appearance.rawValue))")
+        // The pick is re-read rather than trusted: `selectTheme` is not the only
+        // writer (a test can set `KRAAL_THEME`, a relaunch reads defaults), and a
+        // stale `ghostty` here is how a reload would silently undo the user's pick.
+        ghostty = Self.savedTheme(environment: ProcessInfo.processInfo.environment)
+        if let ghostty {
+            palette = Palette.derived(from: ghostty)
+            themeName = ghostty.name
+            kraalLog("theme: applied \(ghostty.name) (source=ghostty appearance=\(appearance.rawValue))")
+        } else {
+            let resolved = ThemeResolver.resolve(configuration, appearance: appearance)
+            palette = resolved.palette
+            themeName = resolved.name
+            kraalLog("theme: applied \(resolved.name) (source=config appearance=\(appearance.rawValue))")
+        }
         onPaletteChange?(palette)
+        onTerminalTheme?(ghostty)
     }
 
     /// Re-reads `config.toml` from disk.
