@@ -1355,6 +1355,102 @@ PY
     }
 }
 
+# `kraal capture`: the format layer Rex has and herdr does not.
+#
+# herdr already prints a pane (`pane read`), so what is under test here is the
+# transform: text has no escapes, ansi keeps them, html is a document with colour
+# spans. Daemon-only — no window is needed to read a pane, which is the point of
+# having the capture path bypass the endpoint socket.
+case_capture_formats() {
+    requires() { :; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ]
+    }
+    action() {
+        local pane="${KRAAL_CAPTURE_PANE:-$(first_pane_id)}"
+        printf '%s\n' "$pane" >"$host_dir/pane.txt"
+        # A red line is the smallest thing whose colour could be lost: plain text
+        # must drop it, ansi must keep it, html must turn it into a span.
+        # `ls -G` and not `printf '\033[31m…'`: every quoting layer between this file and
+        # the pane's shell eats something (measured twice — the `herdr` shim joins its
+        # arguments and lets the guest's bash re-parse them, so single quotes vanish and
+        # zsh answers "bad pattern"; and `pane run` drops everything after a `;`).
+        # A command that needs no quoting at all removes the whole class of failure,
+        # and `ls -G` still puts real colour on the screen: directories are blue.
+        herdr pane run "$pane" "ls -G /" >/dev/null 2>&1 || return 1
+        local tries=0
+        while [ "$tries" -lt 20 ]; do
+            if herdr pane read "$pane" --source visible --format text 2>/dev/null | grep -q Applications; then
+                break
+            fi
+            tries=$((tries + 1))
+            sleep 0.2
+        done
+        # The scratch daemon lives behind `HOME`/`HERDR_SOCKET_PATH`, which the
+        # `herdr` shim below sets per call. A child process (`kraal`) does not
+        # inherit them, so it has to be told the same way — otherwise it reports on
+        # the developer's *own* session, where this pane id does not exist.
+        capture() {
+            case "$BACKEND" in
+            local)
+                env HOME="$HERDR_HOME" HERDR_SOCKET_PATH="$API_SOCKET" \
+                    KRAAL_HERDR_BIN="$(type -P herdr)" \
+                    "$ROOT/.build/out/Products/Debug/kraal" capture "$@"
+                ;;
+            vm)
+                # The guest has neither `herdr` on PATH nor the host's socket, so both
+                # are passed explicitly — the same two variables the app itself needs.
+                tart exec "$VM" /bin/bash -lc \
+                    "HOME=$HERDR_HOME HERDR_SOCKET_PATH=$API_SOCKET KRAAL_HERDR_BIN=$VM_ROOT/bin/herdr $VM_ROOT/kraal capture $*"
+                ;;
+            esac
+        }
+        capture --pane "$pane" --format text >"$host_dir/text.txt" 2>"$host_dir/text.err" \
+            || { cat "$host_dir/text.err"; return 1; }
+        capture --pane "$pane" --format ansi >"$host_dir/ansi.txt" 2>"$host_dir/ansi.err" \
+            || { cat "$host_dir/ansi.err"; return 1; }
+        capture --pane "$pane" --format html >"$host_dir/capture.html" 2>"$host_dir/html.err" \
+            || { cat "$host_dir/html.err"; return 1; }
+        capture --pane "$pane" --format bogus >"$host_dir/bogus.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/bogus.txt"
+        capture --pane w9:p99 --format text >"$host_dir/missing.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/missing.txt"
+        return 0
+    }
+    assert() {
+        check "text carries the words and no escape sequences" \
+            "$(grep -q Applications "$host_dir/text.txt" && ! grep -q $'\033' "$host_dir/text.txt" \
+                && echo 0 || echo 1)" \
+            "$(grep -c Applications "$host_dir/text.txt") lines with the word"
+        check "ansi keeps the escape sequences text dropped" \
+            "$(grep -q $'\033\[' "$host_dir/ansi.txt" && echo 0 || echo 1)" \
+            "$(grep -c $'\033\[' "$host_dir/ansi.txt") escape sequences"
+        check "html turns the colour into a span" \
+            "$(grep -q Applications "$host_dir/capture.html" \
+                && grep -q '<span style="color:#' "$host_dir/capture.html" \
+                && ! grep -q $'\033' "$host_dir/capture.html" \
+                && echo 0 || echo 1)" \
+            "$(grep -o 'color:#[0-9a-f]*' "$host_dir/capture.html" | sort -u | head -3 | tr '\n' ' ')"
+        check "html is a stand-alone document" \
+            "$(grep -q '<!doctype html>' "$host_dir/capture.html" \
+                && grep -q '<pre style=' "$host_dir/capture.html" \
+                && grep -q '</pre>' "$host_dir/capture.html" \
+                && echo 0 || echo 1)" \
+            "$(wc -c <"$host_dir/capture.html" | tr -d ' ') bytes"
+        check "an unknown format is refused, with the alternatives named" \
+            "$(grep -q 'exit=1' "$host_dir/bogus.txt" \
+                && grep -q 'text, ansi or html' "$host_dir/bogus.txt" \
+                && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/bogus.txt")"
+        check "a missing pane is refused with herdr's own message" \
+            "$(grep -q 'exit=1' "$host_dir/missing.txt" && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/missing.txt")"
+    }
+}
+
 # Split Down: proves the direction is honoured rather than hard-coded.
 # Pins the theme, like `case_drag_divider_app_setup`: the divider assertion below
 # compares against `paneGapColor`, which only means something if the theme is known.
@@ -5084,7 +5180,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split client-actions split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #

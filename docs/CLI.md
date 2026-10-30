@@ -44,7 +44,7 @@ Rex（Superlogical 的终端应用）的 CLI 是「一个 agent 能不能独自�
 | session/window/block 资源 | herdr 的 workspace/tab/pane ✓ | 用 herdr，不重写 |
 | `--json` + 稳定 ID | herdr 有 | 同上 |
 | `capture --format=text\|vt` | `herdr pane read --source visible\|recent\|recent-unwrapped\|detection --format text\|ansi` ✓ | 用 herdr |
-| `capture --format=html` | 无 | **Kraal 独有价值**：自绘 cell painter 已知道每个格子的颜色/样式，能渲染成 HTML（未做） |
+| `capture --format=html` | 无 | **已补**：`kraal capture --format text\|ansi\|html`（§4c） |
 | `run --wait` 退出码 | `herdr pane wait-output` + `herdr agent wait` 部分覆盖 | 差一个「等命令结束并给退出码」的动词 |
 | `events --json` | herdr 有事件 schema（`subscription_event`），CLI 无 `events` 动词 | 中优先 |
 | `api call METHOD` | herdr 只有 `api snapshot/schema`，无通用 call | 中优先（要做就是 herdr 的活） |
@@ -116,11 +116,41 @@ kraal-gui clients --json       # 正在跑的实例（pid / 窗口数），配�
 `clients` 的 pid 与窗口 owner 一致、`skill` 读到活目录且带守则）。注入验证：把
 `liveActionReport` 改成返回固定字符串 → `✗ skill reads the live action catalog`。
 
+## 4c. 第三个切片：`kraal capture`
+
+```bash
+kraal capture --pane w1:p1 --format text      # 纯文本，没有转义序列
+kraal capture --pane w1:p1 --format ansi      # 保留 SGR
+kraal capture --pane w1:p1 --format html > screen.html
+```
+
+不重写 `herdr pane read`：它已经在做「打印一个 pane 的屏幕 + scrollback」，这里只是格式层。
+**html 是它给不出的那个格式**，也是真正有用的那个——纯文本恰好丢掉了 bug 报告需要的东西：
+哪一行被高亮、哪个词是红的。
+
+实现要点（`Sources/KraalProtocol/ANSIToHTML.swift`）：herdr 已经把主题解成 truecolor
+（`ESC[38;2;126;136;142m`），所以这是一次纯文本变换；16 色 / 256 色仍按 xterm 调色板兜底
+（实测 `ls -G` 输出的就是基本色 `#000080` 蓝 / `#800080` 紫）。**故意不做终端模拟器**：
+`pane read` 是一行一行打印、带 `\r\n`，光标移动/擦除不会出现；SGR 之外的一律丢弃而不是
+假装能解释，因为一个默默解释错的半模拟器比忽略更危险。
+
+两个当场踩到的坑，都写进了代码注释：
+
+1. **Swift 把 `\r\n` 折成一个 `Character`**，所以 `character == "\r"` 永远不成立——第一版
+   把 `^M` 直接写进了 HTML。改成按 `UnicodeScalar` 遍历（`docs/DEBUGGING.md` §17）。
+2. **引号在到达 pane 之前会被吃掉两次**：`herdr pane run` 会 shell-split 它的参数，
+   而 `gui.sh` 的 `herdr` 包装在 vm 后端还要把参数拼进 `tart exec bash -lc "…"` 再解析一次。
+   实测 `printf '\033[31mX\033[0m'` 变成 `zsh: bad pattern: 033[31mX033[0m`。
+   所以用例改用 `ls -G /`（一个字符都不用引的命令），断言红蓝配色。
+
+`./Scripts/gui.sh run capture-formats`：6 条断言（文本无转义、ansi 有转义、html 有颜色 span
+且无转义、html 是完整文档、非法格式与非存在 pane 都以 exit 1 被拒）。注入验证：把
+`Style.css` 改成返回空串 → `✗ html turns the colour into a span`。
+
 ## 5. 下一步（按价值排序）
 
 1. ~~`skill` 自描述指南~~（§4b 已做）
-2. **`capture --format=html`**。Kraal 已经有每格的样式（`PaneCellCanvas` / `SurfaceANSIRenderer`），
-   把它渲染成 HTML 是 Rex 没有、而 Kraal 结构上能做到的事。
+2. ~~`capture --format=html`~~（§4c 已做）
 3. **`run --wait` 拿退出码**：`herdr pane run` 有进程信息，缺「等结束 + 返回码」的动词。
 4. **`events --json`**：herdr 的 `subscription_event` 已经定义好了。
 5. **多客户端**（`-C CLIENT`）：Kraal 有 Machines 面板；`client ls` / `-C <mac> do` 需要
