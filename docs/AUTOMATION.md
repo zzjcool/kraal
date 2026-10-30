@@ -1059,3 +1059,32 @@ terminal。怎么证明它在屏幕上真的生效：
 
 结论：宽度方向没有可测的抖动，用例删掉，不留在门禁里假装有覆盖（同
 `drag-divider-vertical` 那次的教训）。
+
+### 鼠标行号门禁（`mouse-tui-row`，2026-10-30 起进 `all_cases`）
+
+这条用例回答的是「程序被告知的行号，是不是指针所在的那一行」。做法：`tui-mouse-probe.py`
+申请 `?1000h ?1006h`，用例按**精确单元格**点第 1、8、15 行（`pane_cell_point` 从
+`layout: container=` 的 `containerOrigin`/`cell` 和 daemon 的 `WxH@x,y` 算屏幕点），
+解析程序收到的 `\e[<b;x;yM` 里的 y。
+
+```
+✓ the program was told the row the pointer was on (clicked rows 1,8,15, program got 1,8,15)
+```
+
+断言是**零容忍**的：只断言「行号落在 pane 内」是抓不到 bug 的——实测偏移 +2 行完全落在
+16 行之内。修之前它稳定红在 `program got 3,10`（第 15 行被算成第 17 行、越界丢弃），
+根因见 `docs/DEBUGGING.md` §16（`PaneFrameMath.rect` 对 flipped 容器的二次翻转，命中
+矩形高了 46pt）。
+
+**这条门禁还顺手证明了另一件事**：TUI 收到的鼠标序列是 **Kraal 自己**经 `pane.mouse`
+发出去的（短路 `sendMouse` 后程序一个事件都收不到），所以行号在这里就能测，不需要窗口
+前端、也不需要引擎侧的内部状态。
+
+### `driver type --text` 曾经什么都不打（2026-10-30 修）
+
+旧实现取 AX 焦点元素设 `AXValue`：终端视图会**接受这个值然后忽略**，于是它打印
+`typed via AX` 并以 0 退出，合成键盘事件的兜底永远不会执行。现在写入后会读回核对
+（`value == text || value.hasSuffix(text)`），不匹配才走合成事件。
+
+推论：**在此之前任何「先 `type` 再断言终端里出现某内容」的用例都可能一直在测空气**。
+新增用例如果要打字符，别只看 `driver type` 的退出码，断言内容本身。

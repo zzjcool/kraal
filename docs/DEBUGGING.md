@@ -584,19 +584,45 @@ surface mousePos x=152.00 y=253.00      ← 这三下分别点的是第 1、8、
 
 **三、程序收到什么** —— 第 3、10、什么都没收到。
 
-三条合起来：**偏移发生在 Ghostty 内部把 y 换成单元格的那一步**。能同时解释三个数据点的
-唯一模型是「引擎认为自己的 surface 是 **324pt（18 行）**，终端内容贴在这 18 行的**底部**
-（偏移 36pt）」：
+三条合起来，我当时写下的结论是：「偏移发生在 Ghostty 内部把 y 换成单元格的那一步」，
+模型是「引擎认为 surface 是 324pt（18 行）、内容贴底」。**这个结论是错的**，虽然它把三个
+数据点都拟合上了。错在第一步：我以为那条 SGR 序列是引擎写的。
+
+**四、谁写了那串 SGR** —— 是我们自己。把 `AppStore.sendMouse`（`pane.mouse` 那条 wire）
+临时短路掉再跑一次同一用例：程序**一个事件都收不到**。也就是说 TUI 收到的那条
+`\e[<0;20;3M` 是 daemon 按 Kraal 发过去的 `ClientMousePosition` 写进 pty 的，引擎自己
+并不产生它（程序的 stdin/stdout 就是 daemon 的 pty，只有 daemon 能写）。于是问题从「引擎
+内部」缩回到**本仓库自己算的那对 (column,row)**。
+
+**五、那对坐标错在哪** —— 临时在 `MouseForwarder.paneLocation` 里打点，把命中矩形和
+pane-relative 坐标打出来：
 
 ```
-row = floor((y + 36) / 18) + 1
-y=1   → 3     ✓
-y=127 → 10    ✓
-y=253 → 17    → 超过 16 行，被丢弃  ✓
+pane-hit: pane=w1:p2 topDown=385,548 rect=232,375 928x288 point=152,173 contentH=760
 ```
 
-324pt 不是随手来的数：它就是 **pane 的 allocation（18 行）**，而 pane 里的终端只有 16 行。
-也就是说 surface 的尺寸是在「拿到 allocation」时定的，之后视图缩到 16 行时**没有跟着缩**。
+`point.y=173` / 18pt = 第 10 行 —— 正是程序收到的那一行（那一击点的是第 8 行，真实
+`point.y` 应为 127）。多出来的 46pt 来自 `rect.minY=375`：下半个 pane 的真实槽位是
+`containerOrigin 71 + 8 + 19*18 = 421`，命中矩形比它**高了 46pt**。
+
+根因和 §8 是同一个错误的第二次出现，只是换了个函数：`contentView` 是
+`NSHostingView`，`isFlipped == true`，`contentView.convert(bounds, from: self)` 给出的
+`container` **已经是自上而下**，而 `PaneFrameMath.rect` 又按「AppKit 自下而上」算了
+`contentHeight - (minY + height)`，于是翻转了两次：
+
+```
+错：760 - (71 + 664) + 350 = 375
+对：      71          + 350 = 421
+```
+
+影响不止「TUI 高亮画错行」：命中矩形整体上移 46pt，意味着**每个 pane 底部 46pt 的点击
+根本不属于它**（`pane.mouse` 里越界的行被引擎丢弃，和用户「选中出现两个地方」的截图
+一一对应）。
+
+修法：`PaneFrameMath.rect` 增加 `isFlipped` 参数（flipped 时容器原点不再做减法），
+调用方传 `contentView.isFlipped`；`PaneFrameMath` 拆到 `Sources/KraalUI/PaneFrameMath.swift`
+（900 行限制）。A/B 注入：把参数改回常量 `false` → `program got 3,10` ✗；改回
+`contentView.isFlipped` → `program got 1,8,15` ✓。
 
 ### 顺手挖出的第四个坑：`driver type` 会静默什么都不打
 
