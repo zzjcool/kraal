@@ -31,6 +31,13 @@ public final class WindowActions {
     public private(set) var settingsCount = 0
     public private(set) var debugInfoCount = 0
     public private(set) var themePickerCount = 0
+    /// Bumped when the terminal font size changes.
+    ///
+    /// A size is a construction-time command in libghostty, so the terminals are
+    /// rebuilt — and rebuilding the pool's models is not enough on its own: the
+    /// views hold the models they were handed, and nothing else about the tree
+    /// changes, so without an identity change they keep drawing the old surfaces.
+    public private(set) var fontChangeCount = 0
 
     public init() {}
 
@@ -41,4 +48,5 @@ public final class WindowActions {
     public func showSettings() { settingsCount += 1 }
     public func showDebugInfo() { debugInfoCount += 1 }
     public func showThemePicker() { themePickerCount += 1 }
+    public func fontChanged() { fontChangeCount += 1 }
 }

@@ -103,6 +103,9 @@ public enum AppCommand: String, Sendable, CaseIterable {
     case toggleStatusBar = "toggle_status_bar"
     case commandPalette = "command_palette"
     case changeTheme = "change_theme"
+    case increaseFontSize = "increase_font_size"
+    case decreaseFontSize = "decrease_font_size"
+    case resetFontSize = "reset_font_size"
     case reloadConfig = "reload_config"
     case settings = "settings"
     case keyboardShortcuts = "keybindings"
@@ -149,6 +152,9 @@ public enum AppCommand: String, Sendable, CaseIterable {
         case .toggleStatusBar: return "Toggle Status Bar"
         case .commandPalette: return "Command Palette"
         case .changeTheme: return "Change Theme…"
+        case .increaseFontSize: return "Increase Font Size"
+        case .decreaseFontSize: return "Decrease Font Size"
+        case .resetFontSize: return "Reset Font Size"
         case .reloadConfig: return "Reload Config"
         case .settings: return "Settings…"
         case .keyboardShortcuts: return "Keyboard Shortcuts"
@@ -299,6 +305,9 @@ public struct CommandEnvironment {
     /// Opens the theme picker. A closure for the same reason as the palette: the
     /// sheet is the window's, not a command's.
     public var showThemePicker: () -> Void
+    /// Moves the terminal's font size. The pool belongs to the app target, and a
+    /// size change retires its models, so the command only *asks*.
+    public var adjustFontSize: (FontScale.Change) -> Void
     /// The pane a context menu was raised over, when there was one.
     ///
     /// A right-click means "the pane under the pointer", not "whatever is
@@ -327,6 +336,7 @@ public struct CommandEnvironment {
         showShortcuts: @escaping () -> Void = {},
         showSettings: @escaping () -> Void = {},
         showThemePicker: @escaping () -> Void = {},
+        adjustFontSize: @escaping (FontScale.Change) -> Void = { _ in },
         targetPaneId: String? = nil,
         enterCopyMode: @escaping (String) -> Void = { _ in }
     ) {
@@ -337,6 +347,7 @@ public struct CommandEnvironment {
         self.showShortcuts = showShortcuts
         self.showSettings = showSettings
         self.showThemePicker = showThemePicker
+        self.adjustFontSize = adjustFontSize
         self.targetPaneId = targetPaneId
         self.enterCopyMode = enterCopyMode
     }
@@ -386,6 +397,7 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
         performPaneAction(command, on: store, target: env.targetPaneId)
 
     case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme,
+         .increaseFontSize, .decreaseFontSize, .resetFontSize,
          .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
         performViewAction(command, on: store, env: env)
     }
@@ -515,6 +527,9 @@ private func performViewAction(
     case .toggleStatusBar: env.toggleStatusBar()
     case .commandPalette: env.showCommands()
     case .changeTheme: env.showThemePicker()
+    case .increaseFontSize: env.adjustFontSize(.increase)
+    case .decreaseFontSize: env.adjustFontSize(.decrease)
+    case .resetFontSize: env.adjustFontSize(.reset)
     case .reloadConfig: store.reloadServerConfig()
     case .keyboardShortcuts: env.showShortcuts()
     case .settings: env.showSettings()

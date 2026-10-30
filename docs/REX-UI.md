@@ -118,6 +118,17 @@ Kraal 的 `AppCommand` 有 58 条、标题与菜单一致，但**只有标题可
   "max"→Toggle Pane Zoom、"kill"→三个 Close、双词 AND、"tzm" 子序列、
   每条命令都有关键字、每条命令都能用自己的 id 词搜到。
 
+**字号三键**（`Increase / Decrease / Reset Font Size`，Rex 的 `client.font.*`）：
+
+- `KraalUI/FontScale.swift`：基准 13pt（libghostty 自己的默认）、步长 1、范围 8…32，
+  纯函数。
+- `PaneTerminalPool.fontSize` → `withFontSize`；改了丢模型重建（和背景/主题同一套）。
+- 关键坑：**清掉模型不够** —— 视图手里还握着旧的模型引用，没有别的变化就不会重新取。
+  `WindowActions.fontChangeCount` → `RootView` 给 `PaneLayoutView` 的 `.id()`
+  换一个身份，树重建才会走到 `pool.model(for:)`。第一次跑门禁时 cell 8.5 → 8.5，
+  就是这一步缺着。
+- 日志：`terminal font: 15 (change=increase)`；门禁断言 `layout:` 里的 `cell=`。
+
 **主题目录 = Ghostty 的开源主题文件**（2026-10-30 追加）。
 
 - `Sources/KraalUI/Resources/themes/` 里是 **51 个 Ghostty 主题文件**，逐字复制，
@@ -153,9 +164,8 @@ Kraal 的 `AppCommand` 有 58 条、标题与菜单一致，但**只有标题可
 
 ## 6. 下一步（按性价比排）
 
-1. **字号三键**（`font.increase/decrease/reset`）：`TerminalConfiguration.withFontSize`
-   已可用，`PaneTerminalPool` 已有「改了就丢模型重建」的模式（背景色/选中色
-   都是这么做的）。门禁：改字号前后日志里的 `cell=` 变化 + 截图几何变化。
+1. ~~字号三键~~ 已完成（见 §5）：门禁 `font-size` 断言 cell `8.0 → 9.0 → 8.0`，
+   并抓到了「清模型不重建视图」这个真 bug。
 2. ~~主题选择器~~ 已完成（见 §5），且**没有**动用户的 `config.toml`：
    选中的主题只是客户端覆盖，`config.toml` 仍是默认值的来源。
 3. **密度切换**（紧凑/舒适）：侧栏行高 + 选项卡高度，两档，存 UserDefaults。

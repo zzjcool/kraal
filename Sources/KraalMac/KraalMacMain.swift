@@ -22,6 +22,9 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// the key monitor that drives it. Lives here rather than in the store because
     /// it is per-window view state.
     private var copyMode: CopyModeController?
+    /// Kept so the font commands can retire the models; the pool also reaches the
+    /// views as a parameter, which is not something a menu item can use.
+    private var terminalPool: PaneTerminalPool?
     private let store = AppStore(target: KraalAppDelegate.initialTarget)
     private var mouseForwarder: MouseForwarder?
     /// Terminals, kept so the pane menu can reach a pane's selection and clipboard.
@@ -115,6 +118,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             self.popupView(store: store, popup: popup, pool: pool)
         } onEnterCopyMode: { [weak self] paneId in
             self?.copyMode?.enter(paneId: paneId)
+        } onAdjustFontSize: { [weak self] change in
+            self?.adjustFontSize(change)
         }
         // Injected on the view rather than on the hosting view, so sheets and
         // popovers inherit it too.
@@ -165,6 +170,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 showShortcuts: { [windowActions] in windowActions.showShortcuts() },
                 showSettings: { [windowActions] in windowActions.showSettings() },
                 showThemePicker: { [windowActions] in windowActions.showThemePicker() },
+                adjustFontSize: { [weak self] change in self?.adjustFontSize(change) },
                 showDebugInfo: { [windowActions] in windowActions.showDebugInfo() },
                 enterCopyMode: { [weak self] paneId in self?.copyMode?.enter(paneId: paneId) }
             )
@@ -369,7 +375,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             },
             background: theme.palette.terminalBackgroundHex,
             selectionBackground: theme.palette.selectionBackgroundHex,
-            ghostty: theme.ghostty
+            ghostty: theme.ghostty,
+            fontSize: Self.storedFontSize()
         )
         // Logged because it is the only evidence a GUI case can assert on: whether the
         // terminals took the theme's background or libghostty's default is not visible
@@ -392,6 +399,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             pool?.ghostty = picked
         }
         logTerminalTheme(theme.ghostty)
+        terminalPool = pool
         return pool
     }
 
@@ -416,6 +424,36 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         // the surfaces with.
         kraalLog("terminal background: \(palette.terminalBackgroundHex ?? "nil")"
             + " selection: \(palette.selectionBackgroundHex ?? "nil")")
+    }
+
+    // MARK: - Font size
+
+    /// The size saved by ⌘+ / ⌘- / ⌘0, or `nil` when the user has never pressed them.
+    ///
+    /// `nil` rather than 13 so a pane that was never resized keeps the engine's own
+    /// default — if libghostty's default ever changes, a user who never touched the
+    /// commands follows it.
+    static func storedFontSize() -> Float? {
+        guard UserDefaults.standard.object(forKey: fontSizeDefaultsKey) != nil else { return nil }
+        return FontScale.clamp(UserDefaults.standard.float(forKey: fontSizeDefaultsKey))
+    }
+
+    static let fontSizeDefaultsKey = "KraalFontSize"
+
+    /// Applies one of the three size commands.
+    ///
+    /// The size is written to defaults *and* to the pool: the pool is what rebuilds
+    /// the terminals, and writing only the defaults would make the next press read
+    /// the same value and do nothing until relaunch.
+    private func adjustFontSize(_ change: FontScale.Change) {
+        let current = Self.storedFontSize() ?? FontScale.base
+        let size = FontScale.next(current, change: change)
+        UserDefaults.standard.set(size, forKey: Self.fontSizeDefaultsKey)
+        terminalPool?.fontSize = size
+        windowActions.fontChanged()
+        // The gate asserts this line: the cell size is the only visible effect, and
+        // it lives in the `layout:` line the renderer already writes.
+        kraalLog("terminal font: \(FontScale.label(size)) (change=\(change))")
     }
 
     private func makeThemeStore() -> ThemeStore {

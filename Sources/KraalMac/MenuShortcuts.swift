@@ -35,6 +35,13 @@ enum MenuShortcuts {
             // selection). This opens the mode that can reach the pane's history.
             .copyMode: Shortcut(key: "f", modifiers: .command),
 
+            // Ghostty's own chords, because a terminal user already has them in
+            // their fingers. ⌘+ is shift+equals on a US layout, which is why the
+            // key is "=" and not "+".
+            .increaseFontSize: Shortcut(key: "=", modifiers: .command),
+            .decreaseFontSize: Shortcut(key: "-", modifiers: .command),
+            .resetFontSize: Shortcut(key: "0", modifiers: .command),
+
             .splitRight: Shortcut(key: "d", modifiers: .command),
             .splitDown: Shortcut(key: "d", modifiers: [.command, .shift]),
             .toggleZoom: Shortcut(key: "return", modifiers: [.command, .shift]),

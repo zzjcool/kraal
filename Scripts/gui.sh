@@ -5395,7 +5395,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch font-size status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -6325,6 +6325,74 @@ print(','.join(f'{c}>{v - 3},{c}<{v + 4}' for c, v in zip('rgb', (r, g, b))))")
         esac
     done
     return 0
+}
+
+# Font size: ⌘+ / ⌘- / ⌘0 (issue #213, borrowed from Rex's `client.font.*`).
+#
+# The only visible effect is the cell size, which the renderer reports itself in
+# its `layout:` line (`cell=8.0x18.0`). That is the assertion: a menu item that
+# logs "ok" and does nothing keeps the cell the same, which is exactly the bug
+# this case exists for.
+#
+# Reset has to come back to the *same* cell, not merely to a different one: the
+# value is restorable, and a reset that landed on 13.5 would quietly fail the
+# promise the menu makes.
+# The renderer's own report of the cell it draws with: `layout: ... cell=8.0x18.0`.
+#
+# Not derived from the window size or from the font size we asked for: the claim is
+# "the engine is now drawing at a different size", and the only honest witness is
+# the engine's own measurement.
+cell_size() {
+    local line
+    line=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
+    [ -n "$line" ] || { echo "no 'layout: container=' line" >&2; return 1; }
+    printf '%s' "$line" | grep -o 'cell=[0-9.]*x[0-9.]*' | sed 's/^cell=//' | cut -dx -f1
+}
+
+case_font_size() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ]
+    }
+    action() {
+        # One baseline, two increases, one reset. `do` is quoted for shellcheck
+        # only (SC1010); bash passes the literal argument.
+        cell_size >"$host_dir/cell-before.txt" 2>&1 || return 1
+        driver 'do' --item "Increase Font Size" >"$host_dir/inc1.txt" 2>&1 \
+            || { cat "$host_dir/inc1.txt"; return 1; }
+        sleep 1
+        driver 'do' --item "Increase Font Size" >"$host_dir/inc2.txt" 2>&1 \
+            || { cat "$host_dir/inc2.txt"; return 1; }
+        sleep 1
+        cell_size >"$host_dir/cell-bigger.txt" 2>&1 || return 1
+        driver 'do' --item "Reset Font Size" >"$host_dir/reset.txt" 2>&1 \
+            || { cat "$host_dir/reset.txt"; return 1; }
+        sleep 1
+        cell_size >"$host_dir/cell-after.txt" 2>&1 || return 1
+        return 0
+    }
+    assert() {
+        local log_path="$host_dir/kraal.log"
+        local before bigger after
+        before=$(cat "$host_dir/cell-before.txt")
+        bigger=$(cat "$host_dir/cell-bigger.txt")
+        after=$(cat "$host_dir/cell-after.txt")
+        check "the app reports a cell size" \
+            "$([ -n "$before" ] && echo 0 || echo 1)" "cell=$before"
+        # 13 -> 15: the cell has to grow, and 2pt of font is more than rounding.
+        check "two increases made the cell bigger" \
+            "$(awk -v a="$before" -v b="$bigger" 'BEGIN { exit !(b > a + 0.4) }' && echo 0 || echo 1)" \
+            "$before -> $bigger"
+        check "reset put the cell back" \
+            "$(awk -v a="$before" -v b="$after" 'BEGIN { exit !(b == a) }' && echo 0 || echo 1)" \
+            "$before -> $after"
+        check "the size the app applied is logged" \
+            "$(grep -o 'terminal font: [0-9.]*' "$log_path" | tr '\n' ' ' | grep -q 'terminal font: 15' && echo 0 || echo 1)" \
+            "$(grep -o 'terminal font: [0-9.]*' "$log_path" | tr '\n' ' ')"
+    }
 }
 
 case_theme_applied() {

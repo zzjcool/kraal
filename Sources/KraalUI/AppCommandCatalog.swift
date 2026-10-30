@@ -69,8 +69,9 @@ public extension AppCommand {
              .swapPaneLeft, .swapPaneRight, .swapPaneUp, .swapPaneDown,
              .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown, .previousPane, .nextPane:
             .pane
-        case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme, .reloadConfig,
-             .keyboardShortcuts, .reconnect, .settings:
+        case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme,
+             .increaseFontSize, .decreaseFontSize, .resetFontSize,
+             .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
             .view
         }
     }
@@ -126,6 +127,9 @@ public extension AppCommand {
         .toggleStatusBar: ["status", "footer", "bar", "hide", "show", "toggle"],
         .commandPalette: ["palette", "command", "run", "search", "find", "goto", "quick", "open"],
         .changeTheme: ["theme", "skin", "colour", "color", "scheme", "palette", "appearance"],
+        .increaseFontSize: ["font", "text", "size", "bigger", "larger", "zoom", "read"],
+        .decreaseFontSize: ["font", "text", "size", "smaller", "tinier", "zoom"],
+        .resetFontSize: ["font", "text", "size", "default", "normal", "reset"],
         .reloadConfig: ["reload", "refresh", "config", "theme", "reconnect"],
         .keyboardShortcuts: ["keys", "shortcuts", "bindings", "hotkeys", "keyboard"],
         .reconnect: ["reconnect", "connection", "disconnect", "retry", "network", "socket"],

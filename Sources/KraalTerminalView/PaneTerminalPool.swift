@@ -68,6 +68,16 @@ public final class PaneTerminalPool {
         }
     }
 
+    /// The terminal font size, in points. Construction-time like everything else
+    /// in the engine's configuration: a change retires the models, which is what
+    /// makes "⌘+ then look at the pane" show the new size immediately.
+    public var fontSize: Float? {
+        didSet {
+            guard fontSize != oldValue else { return }
+            models.removeAll()
+        }
+    }
+
     /// The theme picked in the app, when there is one.
     ///
     /// Retires the models on change for the same reason: a theme is a
@@ -83,12 +93,14 @@ public final class PaneTerminalPool {
         onInput: @escaping @Sendable (String, Data) -> Void,
         background: String? = nil,
         selectionBackground: String? = nil,
-        ghostty: GhosttyTheme? = nil
+        ghostty: GhosttyTheme? = nil,
+        fontSize: Float? = nil
     ) {
         self.onInput = onInput
         self.background = background
         self.selectionBackground = selectionBackground
         self.ghostty = ghostty
+        self.fontSize = fontSize
     }
 
     /// Points the pool at the machine whose panes it is about to be asked for.
@@ -122,7 +134,8 @@ public final class PaneTerminalPool {
             isPopup: isPopup,
             background: background,
             selectionBackground: selectionBackground,
-            ghostty: ghostty
+            ghostty: ghostty,
+            fontSize: fontSize
         ) { [weak self] data in
             self?.onInput(paneId, data)
         }

@@ -245,6 +245,8 @@ public final class PaneTerminalModel {
         /// single user decision — the same reason ``selectionBackground`` travels
         /// with ``background``.
         ghostty: GhosttyTheme? = nil,
+        /// The font size, in points. `nil` keeps the engine's own default (13).
+        fontSize: Float? = nil,
         onInput: @escaping @Sendable (Data) -> Void
     ) {
         self.paneId = paneId
@@ -300,6 +302,9 @@ public final class PaneTerminalModel {
                 // footer or a command line almost always does — measured, it left 38.2% of
                 // samples with the band where this leaves 8.5%.
                 builder.withCustom("window-padding-color", "extend-always")
+                if let fontSize {
+                    builder.withFontSize(fontSize)
+                }
                 // A picked theme owns the whole colour scheme, not just the two
                 // colours above: the sixteen ANSI entries are what the daemon's SGR
                 // indices resolve to, and a gruvbox background under Catppuccin

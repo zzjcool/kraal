@@ -30,6 +30,8 @@ public struct RootView: View {
     /// Opens copy mode for a pane; supplied by the app target, which owns the
     /// mode bar. A no-op in previews and tests, where there is no copy mode.
     private let onEnterCopyMode: (String) -> Void
+    /// Moves the terminal font size; the pool lives in the app target.
+    private let onAdjustFontSize: (FontScale.Change) -> Void
 
     /// Window-level intents raised by the AppKit menu bar. Optional so previews
     /// and tests can build the view without an AppKit host.
@@ -54,7 +56,8 @@ public struct RootView: View {
         paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView,
         popupPaneContent: @escaping (AppStore, ClientShellPopupSurface, PopupGeometry) -> AnyView
             = { _, _, _ in AnyView(Color(nsColor: .textBackgroundColor)) },
-        onEnterCopyMode: @escaping (String) -> Void = { _ in }
+        onEnterCopyMode: @escaping (String) -> Void = { _ in },
+        onAdjustFontSize: @escaping (FontScale.Change) -> Void = { _ in }
     ) {
         _store = State(initialValue: store)
         self.windowActions = windowActions ?? WindowActions()
@@ -62,6 +65,7 @@ public struct RootView: View {
         self.paneContent = paneContent
         self.popupPaneContent = popupPaneContent
         self.onEnterCopyMode = onEnterCopyMode
+        self.onAdjustFontSize = onAdjustFontSize
     }
 
     /// The command palette's view of the window, so a palette row and a menu item
@@ -79,6 +83,7 @@ public struct RootView: View {
             showShortcuts: { showShortcuts = true },
             showSettings: { showSettings = true },
             showThemePicker: { showThemePicker = true },
+            adjustFontSize: { onAdjustFontSize($0) },
             enterCopyMode: { onEnterCopyMode($0) }
         )
     }
@@ -117,6 +122,9 @@ public struct RootView: View {
                             popupPaneContent(store, popup, geometry)
                         }
                     )
+                    // A font-size change retires the pool's models; a new identity
+                    // is what makes the panes ask for them again.
+                    .id(windowActions.fontChangeCount)
                     .environment(store)
                     Divider()
                 }
