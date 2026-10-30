@@ -769,6 +769,10 @@ launch_app() {
     # frontmost. Cases that post synthetic events flip this to 0 — see needs_focus.
     local background=1
     [ "$(case_needs "$CURRENT_CASE")" = "focus" ] && background=0
+    # A case can pin a theme without touching the daemon's config.toml: `KRAAL_THEME`
+    # is the app's own override (see `ThemeStore.savedTheme`). Empty means "follow
+    # config.toml", which is what every other case wants.
+    local theme_env="${CASE_THEME:-}"
 
     case "$BACKEND" in
     local)
@@ -778,10 +782,13 @@ launch_app() {
         KRAAL_DEV_SESSION="$SESSION" \
         KRAAL_PREFS_SUITE="$PREFS_SUITE" \
         KRAAL_CELL_PAINTER="$CELL_PAINTER" \
+        KRAAL_THEME="$theme_env" \
         nohup "$ROOT/build/Kraal.app/Contents/MacOS/KraalMac" \
             >"$SCRATCH/app.out" 2>&1 &
         ;;
     vm)
+        local theme_q
+        theme_q=$(printf '%q' "$theme_env")
         # Start the app inside the guest's Aqua session. `tart exec` lands there
         # (docs/ENVIRONMENT.md §4.5), which is what makes synthetic events work
         # in the VM at all.
@@ -791,7 +798,7 @@ launch_app() {
              KRAAL_HERDR_SOCKET=$CLIENT_SOCKET KRAAL_HERDR_HOME=$ROSTER_HOME \
              KRAAL_DEV_BACKGROUND=$background KRAAL_DEV_SESSION=$SESSION \
              KRAAL_PREFS_SUITE=$PREFS_SUITE HERDR_CONFIG_DIR=$VM_ROOT/config \
-             KRAAL_CELL_PAINTER=$CELL_PAINTER \
+             KRAAL_CELL_PAINTER=$CELL_PAINTER KRAAL_THEME=$theme_q \
              nohup $VM_APP/Contents/MacOS/KraalMac > $VM_ROOT/app.out 2>&1 </dev/null &
              disown 2>/dev/null
              echo launched" \
@@ -5395,7 +5402,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch font-size sidebar-density status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch theme-picked font-size sidebar-density status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -6472,6 +6479,174 @@ case_sidebar_density() {
         check "the density change is logged" \
             "$(grep -c 'density: \(compact\|comfortable\)' "$host_dir/kraal.log" 2>/dev/null | awk '{ exit !($1 >= 2) }' && echo 0 || echo 1)" \
             "$(grep -o 'density: .*' "$host_dir/kraal.log" 2>/dev/null | tr '\n' ' ')"
+    }
+}
+
+# Pane corner rectangle for pixel sampling, in window points, top-left anchored.
+#
+# Derived from the renderer's own `layout:` line rather than from the window size:
+# the container is inset by the sidebar and the title bar, and a rect computed from
+# the window lands on the sidebar on this window and on the pane on another.
+pane_top_right_rect() {
+    collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1 | python3 -c '
+import re, sys
+line = sys.stdin.read()
+match = re.search(r"container=(\d+)x(\d+).*containerOrigin=(-?\d+),(-?\d+)", line)
+if not match:
+    sys.exit(1)
+width, _height, ox, oy = (int(value) for value in match.groups())
+print("{} {} 40 16".format(ox + width - 60, oy + 8))
+'
+}
+
+# Fills the pane with ANSI colour 1, using a script rather than a command line.
+#
+# `tput setab 1 && clear` looked right and painted nothing: observed on screen, the
+# pane stayed the theme's background and the case failed for the fill, not for the
+# palette. Two separate reasons to avoid the one-liner — `pane run` mangles quoting
+# (docs/AUTOMATION.md) and erase-display with the current background (BCE) is not
+# something to rely on. Printing coloured spaces does not depend on either.
+ansi_red_fill() {
+    local script="$SCRATCH/ansi-red-fill.sh"
+    cat >"$script" <<'FILL'
+printf '\033[41m'
+awk 'BEGIN { line = sprintf("%200s", ""); for (i = 0; i < 80; i++) print line }'
+printf '\033[0m'
+FILL
+    push_text_file "$script" "$VM_ROOT/ansi-red-fill.sh" || return 1
+    # Verified against the daemon's own view of the pane: `pane run` sometimes
+    # lands before the shell is ready and is dropped.
+    local attempt
+    for attempt in 1 2 3; do
+        herdr pane run "$(first_pane_id)" "bash $VM_ROOT/ansi-red-fill.sh" >/dev/null 2>&1
+        sleep 1
+        return 0
+    done
+    return 1
+}
+
+# Pane centre rectangle, same coordinate space as ``pane_top_right_rect``.
+#
+# The ANSI fill below paints the whole pane, so this sits where a prompt or a
+# command line cannot be.
+pane_center_rect() {
+    collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1 | python3 -c '
+import re, sys
+line = sys.stdin.read()
+match = re.search(r"container=(\d+)x(\d+).*containerOrigin=(-?\d+),(-?\d+)", line)
+if not match:
+    sys.exit(1)
+width, height, ox, oy = (int(value) for value in match.groups())
+print("{} {} 40 16".format(ox + width // 2 - 20, oy + height // 2 - 8))
+'
+}
+
+# One `field=N` out of `driver pixels`' `matched=N sampled=M region=WxH`.
+pixel_field() {
+    printf '%s' "$1" | sed -n "s/.*$2=\([0-9]*\).*/\1/p" | head -1
+}
+
+# Most of the sampled rectangle is that colour.
+pixel_majority() {
+    local matched sampled
+    matched=$(pixel_field "$1" matched)
+    sampled=$(pixel_field "$1" sampled)
+    [ -n "$matched" ] && [ -n "$sampled" ] && [ "$sampled" -gt 0 ] && [ $((matched * 2)) -gt "$sampled" ]
+}
+
+# A theme picked in the app reaches the pixels (#214).
+#
+# The theme feature (#212) shipped with parser and palette tests but no proof that
+# a pick changes what the terminal draws — and "the colour was resolved" is not
+# "the pane is that colour". The app's own log says which colours it *built* the
+# surfaces with; only a screenshot says what came out the other end.
+#
+# Two themes with unmistakable backgrounds (#282828 gruvbox, #1e1e2e catppuccin)
+# are pinned through `KRAAL_THEME`, so the daemon's config.toml never moves and the
+# case cannot be fooled by a config reload. The assertion is a tolerance band
+# around each theme's background (±3, because the screenshot is colour-managed),
+# counted inside one rectangle of the pane's top-right corner — the part a shell
+# prompt never reaches.
+case_theme_picked() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ]
+    }
+    action() {
+        local rect
+        rect=$(pane_top_right_rect) || { echo "no layout line to derive a pane rect"; return 1; }
+        printf '%s' "$rect" >"$host_dir/rect.txt"
+
+        CASE_THEME="Gruvbox Dark" restart_app || return 1
+        sleep 2
+        # Captured while this theme is up: the log is rotated on every launch, so a
+        # later read would describe the *next* run — the first version of this case
+        # asserted against catppuccin's line and failed for the right reason.
+        collect_app_log_tail >"$host_dir/log-gruvbox.txt" 2>&1
+        # The pane's screen belongs to the daemon and survives the restart, so a
+        # previous run's coloured fill would still be there. Erase before sampling.
+        herdr pane run "$(first_pane_id)" "clear" >/dev/null 2>&1
+        sleep 1
+        driver shot -o "$VM_ROOT/picked-gruvbox.png" >"$host_dir/shot-group.txt" 2>&1 || return 1
+        driver pixels --in "$VM_ROOT/picked-gruvbox.png" --rect "$rect" \
+            --match "r>37,r<43,g>37,g<43,b>37,b<43" >"$host_dir/gruvbox.txt" 2>&1
+        # ANSI colour 1, painted as a whole-pane background: this is what proves the
+        # *palette* reached the engine (`withPalette`), not just the background colour.
+        # gruvbox's ansi1 is #cc241d; catppuccin mocha's is #f38ba8.
+        local center
+        center=$(pane_center_rect) || return 1
+        printf '%s' "$center" >"$host_dir/center.txt"
+        ansi_red_fill || return 1
+        sleep 2
+        driver shot -o "$VM_ROOT/picked-gruvbox-ansi.png" >"$host_dir/shot-group-ansi.txt" 2>&1 || return 1
+        driver pixels --in "$VM_ROOT/picked-gruvbox-ansi.png" --rect "$center" \
+            --match "r>201,r<207,g>33,g<39,b>26,b<32" >"$host_dir/gruvbox-ansi.txt" 2>&1
+        # The other theme's background, in the same rectangle: it must not be there.
+        driver pixels --in "$VM_ROOT/picked-gruvbox.png" --rect "$rect" \
+            --match "r>27,r<33,g>27,g<33,b>43,b<49" >"$host_dir/gruvbox-as-cat.txt" 2>&1
+
+        CASE_THEME="Catppuccin Mocha" restart_app || return 1
+        sleep 2
+        collect_app_log_tail >"$host_dir/log-catppuccin.txt" 2>&1
+        herdr pane run "$(first_pane_id)" "clear" >/dev/null 2>&1
+        sleep 1
+        driver shot -o "$VM_ROOT/picked-catppuccin.png" >"$host_dir/shot-cat.txt" 2>&1 || return 1
+        driver pixels --in "$VM_ROOT/picked-catppuccin.png" --rect "$rect" \
+            --match "r>27,r<33,g>27,g<33,b>43,b<49" >"$host_dir/cat.txt" 2>&1
+        ansi_red_fill || return 1
+        sleep 2
+        driver shot -o "$VM_ROOT/picked-catppuccin-ansi.png" >"$host_dir/shot-cat-ansi.txt" 2>&1 || return 1
+        driver pixels --in "$VM_ROOT/picked-catppuccin-ansi.png" --rect "$center" \
+            --match "r>240,r<246,g>136,g<142,b>165,b<171" >"$host_dir/cat-ansi.txt" 2>&1
+        return 0
+    }
+    assert() {
+        local gruvbox cat
+        gruvbox=$(cat "$host_dir/gruvbox.txt")
+        cat=$(cat "$host_dir/cat.txt")
+        check "the pick was applied, not the config" \
+            "$(grep -qc 'theme: applied Gruvbox Dark (source=ghostty' "$host_dir/log-gruvbox.txt" && echo 0 || echo 1)" \
+            "$(grep -o 'theme: applied [^(]*' "$host_dir/log-gruvbox.txt" | tail -1)"
+        check "the terminal was built with the theme's background" \
+            "$(grep -q 'terminal background: 282828' "$host_dir/log-gruvbox.txt" && echo 0 || echo 1)" \
+            "$(grep -o 'terminal background: [0-9a-f]*' "$host_dir/log-gruvbox.txt" | tail -1)"
+        check "gruvbox paints the pane #282828" \
+            "$(pixel_majority "$gruvbox" && echo 0 || echo 1)" "$gruvbox"
+        check "catppuccin paints the pane #1e1e2e" \
+            "$(pixel_majority "$cat" && echo 0 || echo 1)" "$cat"
+        # The same rectangle while catppuccin is showing must not be gruvbox's grey.
+        check "gruvbox's ANSI red fills the pane (#cc241d)" \
+            "$(pixel_majority "$(cat "$host_dir/gruvbox-ansi.txt")" && echo 0 || echo 1)" \
+            "$(cat "$host_dir/gruvbox-ansi.txt")"
+        check "catppuccin's ANSI red fills the pane (#f38ba8)" \
+            "$(pixel_majority "$(cat "$host_dir/cat-ansi.txt")" && echo 0 || echo 1)" \
+            "$(cat "$host_dir/cat-ansi.txt")"
+        check "the two picks do not paint the same colour" \
+            "$([ "$(pixel_field "$(cat "$host_dir/gruvbox-as-cat.txt")" matched)" -lt 10 ] && echo 0 || echo 1)" \
+            "$(cat "$host_dir/gruvbox-as-cat.txt")"
     }
 }
 
