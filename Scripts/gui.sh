@@ -3136,6 +3136,14 @@ case_machines_roster_app_setup() {
 # sent correctly and ignored by the program all look like "clicking does nothing".
 # So the program itself records the bytes it received, and the assertion is on
 # those bytes.
+# Experiment hook: the pane inset is the daemon's to decide (`ui.pane_borders`), and the
+# offset under investigation is exactly one border row plus the divider's first row. If
+# pinning the borders off changes the reported rows, the inset handling is the cause; if
+# it does not, it is not. Overridable so one case can run both arms.
+case_mouse_tui_row_config() {
+    printf 'ui.pane_borders = "%s"\n' "${KRAAL_MOUSE_ROW_BORDERS:-never}" | write_config
+}
+
 case_mouse_tui_row() {
     requires() { echo focus; }
     fixture() {
