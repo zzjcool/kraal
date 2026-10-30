@@ -626,6 +626,14 @@ start_daemon() {
     local) cat "$SCRATCH/herdr-server.log" >&2 ;;
     vm) tart exec "$VM" /bin/bash -lc "cat $VM_ROOT/herdr-server.log" >&2 ;;
     esac
+    # A guest that VZ stopped mid-run is an environment failure, not a broken product:
+    # return 2 so `run_case` can restart the VM and retry instead of aborting the whole
+    # suite. Measured 2026-10-30: the third VZ death of the day killed the run between
+    # two cases, after `die` here exited the script with no result at all.
+    if [ "$BACKEND" = "vm" ] && ! vm_running; then
+        bad "the guest went away before the daemon could start (VZ stopped the VM)"
+        return 2
+    fi
     die "daemon did not come up (api=$API_SOCKET client=$CLIENT_SOCKET)"
 }
 stop_daemon() {
@@ -1424,7 +1432,7 @@ case_capture_formats() {
             || { cat "$host_dir/ansi.err"; return 1; }
         kraal_cli capture --pane "$pane" --format html >"$host_dir/capture.html" 2>"$host_dir/html.err" \
             || { cat "$host_dir/html.err"; return 1; }
-        capture --pane "$pane" --format bogus >"$host_dir/bogus.txt" 2>&1
+        kraal_cli capture --pane "$pane" --format bogus >"$host_dir/bogus.txt" 2>&1
         echo "exit=$?" >>"$host_dir/bogus.txt"
         kraal_cli capture --pane w9:p99 --format text >"$host_dir/missing.txt" 2>&1
         echo "exit=$?" >>"$host_dir/missing.txt"
@@ -4338,11 +4346,21 @@ case_kitty_graphics() {
         local sampled region
         sampled=$(printf '%s' "$pixels_line" | sed -n 's/.*sampled=\([0-9]*\).*/\1/p')
         region=$(printf '%s' "$pixels_line" | sed -n 's/.*region=\([0-9]*x[0-9]*\).*/\1/p')
-        local want_want
-        want_want=$(printf '%s' "$rect_line" | awk '{ printf "%d", $3 * $4 }')
+        # The screenshot is in device pixels, the pane rect in points. At scale 1 they
+        # match; on a 2x guest display the image is four times the rect, and comparing
+        # them directly failed with sampled=1769580 want=442395 — exactly 4x
+        # (measured 2026-10-30, after the VM came back at a different resolution).
+        local rect_w rect_h scale=1 region_h
+        rect_w=$(printf '%s' "$rect_line" | awk '{ printf "%d", $3 }')
+        rect_h=$(printf '%s' "$rect_line" | awk '{ printf "%d", $4 }')
+        region_h="${region#*x}"
+        if [ "${rect_h:-0}" -gt 0 ] && [ "${region_h:-0}" -gt "$rect_h" ] 2>/dev/null; then
+            scale=$((region_h / rect_h))
+        fi
+        local want_want=$((rect_w * rect_h * scale * scale))
         check "the sampled area is the whole pane rect" \
             "$([ -n "$sampled" ] && [ "$sampled" -eq "$want_want" ] && echo 0 || echo 1)" \
-            "sampled=${sampled:-<none>} want=$want_want (region=${region:-?})"
+            "sampled=${sampled:-<none>} want=$want_want (region=${region:-?} scale=${scale})"
 
         local matched
         matched=$(printf '%s' "$pixels_line" | sed -n 's/.*matched=\([0-9]*\).*/\1/p')
@@ -4954,7 +4972,30 @@ run_case_once() {
     # two saved machines, the app had already listed an empty roster, and the
     # assertion failed with "endpoints: 0 saved machine(s)" even though the roster
     # on disk had both. That is issue #69's reload gap seen from the harness side.
-    app_setup() { "case_${name//-/_}_app_setup" 2>/dev/null || true; }
+    # A failing setup is a *harness* problem, never a product one, so it stops the
+    # case with exit 2 and prints why. It used to be `|| true` with stderr sent to
+    # /dev/null: measured 2026-10-30, `machines-reachability`'s two-machine fixture
+    # never got created (the app logged "machines: loaded 0 remote + 1 local") and the
+    # case reported five product-looking ✗ about a Machines panel that had nothing to
+    # draw. That is `docs/DEBUGGING.md` §2 seen from the harness side.
+    app_setup() {
+        local hook="case_${name//-/_}_app_setup"
+        # Most cases have no setup hook; asking bash to run a function that does not
+        # exist is a 127, and treating *that* as a fixture failure failed 31 cases at
+        # once (measured 2026-10-30). "No hook" and "a hook that failed" are different
+        # facts and must stay different.
+        if ! declare -F "$hook" >/dev/null 2>&1; then
+            return 0
+        fi
+        local output status=0
+        output=$("$hook" 2>&1) || status=$?
+        if [ "$status" -ne 0 ]; then
+            printf '%s\n' "$output" >&2
+            return 2
+        fi
+        [ -n "$output" ] && printf '%s\n' "$output"
+        return 0
+    }
 
     # A fresh defaults domain per case, so one case cannot hand the next a
     # pre-dragged divider or a pre-set agent ordering. The stale domain from an
@@ -5042,8 +5083,14 @@ run_case_once() {
     # wrong: by then `launch_app` has already started, and restarting the daemon
     # under a live app leaves it connected to a socket nobody is listening on.
     daemon_config
-    start_daemon
-    app_setup
+    if ! start_daemon; then
+        # 2 = environment (see start_daemon); `run_case` restarts the VM and retries.
+        return 2
+    fi
+    if ! app_setup; then
+        echo "app_setup for '$name' failed (harness: fixture state could not be prepared)" >&2
+        return 2
+    fi
     if ! launch_app; then
         # 3 = the guest went away; `run_case` restarts it and runs the case again.
         return 3
@@ -6529,11 +6576,26 @@ cmd_run() {
         vm_start
         vm_deploy
     fi
-    local failed=0
+    # A case returning 1 is a product failure; 2 is the rig (a fixture that could not
+    # be prepared, the guest dying twice, an environment without focus). The run must
+    # keep both: reporting a harness failure as exit 1 sends an agent off to "fix" code
+    # that is fine — `docs/DEBUGGING.md` §2 is entirely about that mistake. A product
+    # failure outranks an environment one when both happen.
+    local failed=0 code
     if [ $# -eq 0 ]; then
-        for c in $(all_cases); do run_case "$c" || failed=1; done
+        for c in $(all_cases); do
+            run_case "$c" || {
+                code=$?
+                { [ "$code" = "1" ] || [ "$failed" = "0" ]; } && failed=$code
+            }
+        done
     else
-        for c in "$@"; do run_case "$c" || failed=1; done
+        for c in "$@"; do
+            run_case "$c" || {
+                code=$?
+                { [ "$code" = "1" ] || [ "$failed" = "0" ]; } && failed=$code
+            }
+        done
     fi
     return "$failed"
 }

@@ -1088,3 +1088,43 @@ terminal。怎么证明它在屏幕上真的生效：
 
 推论：**在此之前任何「先 `type` 再断言终端里出现某内容」的用例都可能一直在测空气**。
 新增用例如果要打字符，别只看 `driver type` 的退出码，断言内容本身。
+
+### 夹具准备失败是**环境**失败，不是产品失败（2026-10-30）
+
+`machines-reachability` 在一次整套运行里挂出五条 ✗（面板里既没有 `reachable` 也没有
+`unreachable`），看着像 Machines 面板坏了。实际是它的 `_app_setup` 没把两台机器建出来——
+app 日志写着 `machines: loaded 0 remote + 1 local`。而 harness 当时是这样调用 setup 的：
+
+```bash
+app_setup() { "case_${name//-/_}_app_setup" 2>/dev/null || true; }
+```
+
+`|| true` + `2>/dev/null`：失败被吞掉，原因被丢掉，剩下五条看起来像产品的断言失败。这正是
+`docs/DEBUGGING.md` §2 说的那种「没有样本的错误」，只不过发生在 harness 侧。
+
+现在：
+
+- `app_setup` 收集输出与退出码，失败时打印它的原话并让用例以 **exit 2（环境）** 结束；
+- `cmd_run` 保留区分：用例返回 1 = 产品失败，2 = 环境失败；两者同时出现时 1 优先。整套跑
+  完的退出码因此能告诉 agent「该去改代码，还是该去看机器」。
+
+注入验证：给 `case_machines_reachability_app_setup` 开头加 `return 1` → 用例立刻停在
+
+```
+INJECTED: the fixture cannot prepare its two machines
+app_setup for 'machines-reachability' failed (harness: fixture state could not be prepared)
+```
+
+`exit=2`、`✗` 计数 0（不再有任何产品口径的断言）。去掉注入后同一条用例 5/5 全绿，日志里
+`machines: status 2 row(s) -> reach-a=reachable, reach-b=error`。
+
+### 新增的 `kraal` 用例共用一个 `kraal_cli`
+
+`capture-formats` / `run-wait` / `events-json` 三条用例都要在**这个 run 的 daemon** 上调
+`kraal`，而三件事随 backend 变：socket 路径（vm 下是 guest 路径）、`herdr` 二进制（guest
+没有 PATH，要用 `KRAAL_HERDR_BIN`）、以及引号（vm 下参数要拼进 `tart exec bash -lc "…"`，
+引号会被解析两次）。所以有 `kraal_cli`：`local` 直接 `env …`，`vm` 用 `printf %q` 逐个转义
+再拼给 guest 的 bash。
+
+教训记在 `docs/DEBUGGING.md` §17：**要测「终端里有颜色」，选一个不需要引号的命令
+（`ls -G /`）**，比研究几层引用更省时间——第一版用例就是在引号上耗掉的。
