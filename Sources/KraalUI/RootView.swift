@@ -20,10 +20,15 @@ public struct RootView: View {
     @State private var showShortcuts = false
     @State private var showSettings = false
     @State private var showDebugInfo = false
+    /// The rename dialog raised by a command; the palette presents its own.
+    @State private var prompt: CommandPrompt?
     @State private var sidebarVisible = true
     @State private var statusBarVisible = true
     /// Mirror of `store.pendingGroupClose` that the alert is presented from.
     @State private var pendingGroupPrompt: AppStore.PendingGroupClose?
+    /// Opens copy mode for a pane; supplied by the app target, which owns the
+    /// mode bar. A no-op in previews and tests, where there is no copy mode.
+    private let onEnterCopyMode: (String) -> Void
 
     /// Window-level intents raised by the AppKit menu bar. Optional so previews
     /// and tests can build the view without an AppKit host.
@@ -47,13 +52,33 @@ public struct RootView: View {
         copyModeBanner: CopyModeBanner? = nil,
         paneContent: @escaping (AppStore, String, PaneSurfacePane) -> AnyView,
         popupPaneContent: @escaping (AppStore, ClientShellPopupSurface, PopupGeometry) -> AnyView
-            = { _, _, _ in AnyView(Color(nsColor: .textBackgroundColor)) }
+            = { _, _, _ in AnyView(Color(nsColor: .textBackgroundColor)) },
+        onEnterCopyMode: @escaping (String) -> Void = { _ in }
     ) {
         _store = State(initialValue: store)
         self.windowActions = windowActions ?? WindowActions()
         self.copyModeBanner = copyModeBanner
         self.paneContent = paneContent
         self.popupPaneContent = popupPaneContent
+        self.onEnterCopyMode = onEnterCopyMode
+    }
+
+    /// The command palette's view of the window, so a palette row and a menu item
+    /// take the same path: `perform` decides what a command means, not the caller.
+    ///
+    /// The palette used to call `store.splitPane` / `store.toggleZoom` directly and
+    /// offer four actions. Everything here is what the menu bar's environment does,
+    /// minus the parts that only exist after the window exists (debug info).
+    private var commandEnvironment: CommandEnvironment {
+        CommandEnvironment(
+            prompt: { prompt = $0 },
+            toggleSidebar: { sidebarVisible.toggle() },
+            toggleStatusBar: { statusBarVisible.toggle() },
+            showCommands: { showCommands = true },
+            showShortcuts: { showShortcuts = true },
+            showSettings: { showSettings = true },
+            enterCopyMode: { onEnterCopyMode($0) }
+        )
     }
 
     private var content: some View {
@@ -110,7 +135,7 @@ public struct RootView: View {
         // type checker time out after the menu gained its extra modifiers.
         content
             .sheet(isPresented: $showCommands) {
-            CommandPalette()
+            CommandPalette(env: commandEnvironment)
                 .environment(store)
         }
         .sheet(isPresented: $showConnection) {

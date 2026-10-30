@@ -18,6 +18,19 @@ struct CommandPalette: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var highlighted = 0
+    /// Rename prompts raised by a palette command (`Rename Tab…` and friends).
+    ///
+    /// They are presented from the sheet rather than from the window behind it:
+    /// a sheet that dims the window and then waits for an alert on the window is a
+    /// sheet the user has to dismiss to answer.
+    @State private var prompt: CommandPrompt?
+    /// The same closures the menu bar dispatches through, so a palette command
+    /// and its menu item are one code path — not two that can disagree.
+    private let env: CommandEnvironment
+
+    init(env: CommandEnvironment = CommandEnvironment()) {
+        self.env = env
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -84,73 +97,47 @@ struct CommandPalette: View {
         // needs. Rounded and rimmed so it reads as a pane of glass on top of the
         // window rather than a second sheet.
         .glassPanel(.hud, radius: KraalTheme.Radius.overlay)
+        .renamePrompt($prompt)
         .onChange(of: query) { _, _ in highlighted = 0 }
     }
 
-    private struct Item: Identifiable {
+    private struct Item: Identifiable, PaletteSearchable {
         let id: String
         let title: String
         let symbol: String
         let hint: String?
+        /// The family the row belongs to, shown nowhere and matched weakly.
+        var category: String = ""
+        /// Synonyms and machine names: what the title does not say.
+        var keywords: [String] = []
         let action: () -> Void
+
+        var paletteTitle: String { title }
+        var paletteKeywords: [String] { keywords }
+        var paletteCategory: String { category }
     }
 
+    /// Every row, ranked. See `PaletteSearch` for the weights.
+    ///
+    /// The palette used to hold four built-ins; the app knows 58 commands, and a
+    /// palette that hides them makes the menu the only way to reach half the app.
     private var items: [Item] {
-        var all: [Item] = []
+        PaletteSearch.rank(navigatorItems + commandItems, query: query)
+    }
 
-        // Go To comes first, and it is the only part of this palette that spans
-        // machines: with six configured, "the pane running the tests" has to be
-        // reachable without knowing which machine it is on. Upstream keys the
-        // same overlay off ⌘K on the client side
-        // (`client/shell/overlay_input.rs:194-210`).
-        all.append(contentsOf: navigatorItems)
-
-        for command in store.commands {
-            let title = command.description ?? command.commandId
-            all.append(Item(
-                id: command.commandId,
-                title: title,
-                symbol: "terminal",
-                hint: command.bindingLabel.isEmpty ? nil : command.bindingLabel,
-                action: { store.invoke(commandId: command.commandId) }
-            ))
+    /// One row per command, dispatched exactly as the menu dispatches it.
+    private var commandItems: [Item] {
+        AppCommand.allCases.map { command in
+            Item(
+                id: "command.\(command.rawValue)",
+                title: command.title,
+                symbol: command.category.symbol,
+                hint: command.category.title,
+                category: command.category.title,
+                keywords: command.keywords,
+                action: { perform(command, on: store, env: env) }
+            )
         }
-
-        if let paneId = store.visiblePanes.first?.paneId {
-            all.append(Item(
-                id: "builtin.split",
-                title: "Split Pane",
-                symbol: "rectangle.split.2x1",
-                hint: nil,
-                action: { store.splitPane(paneId: paneId) }
-            ))
-            all.append(Item(
-                id: "builtin.zoom",
-                title: "Toggle Zoom",
-                symbol: "rectangle.expand.vertical",
-                hint: nil,
-                action: { store.toggleZoom(paneId: paneId) }
-            ))
-        }
-
-        all.append(Item(
-            id: "builtin.newTab",
-            title: "New Tab",
-            symbol: "plus.rectangle",
-            hint: nil,
-            action: { store.createTab() }
-        ))
-        all.append(Item(
-            id: "builtin.newWorkspace",
-            title: "New Workspace",
-            symbol: "plus.square.on.square",
-            hint: nil,
-            action: { store.createWorkspace() }
-        ))
-
-        let needle = query.lowercased().trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else { return all }
-        return all.filter { $0.title.lowercased().contains(needle) }
     }
 
     /// Every jumpable pane/tab/workspace across all machines, as palette rows.
@@ -179,6 +166,10 @@ struct CommandPalette: View {
                 title: target.isCurrent ? "\(target.title) (current)" : target.title,
                 symbol: symbol(for: target.kind),
                 hint: hint(for: target),
+                category: hint(for: target),
+                // The machine name is in the hint and not in the title, so
+                // "scratch" has to match a pane called "npm" on the scratch box.
+                keywords: [target.machineLabel, target.kind.rawValue],
                 action: { store.goTo(target) }
             )
         }
