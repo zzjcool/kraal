@@ -1251,6 +1251,65 @@ print(splits[0]["direction"])
     }
 }
 
+# The Rex-shaped client action surface: `actions` lists what the app offers, `do`
+# presses one. Assertions are daemon-side (pane count) because "kraal-gui printed
+# pressed" is exactly the kind of evidence docs/DEBUGGING.md §0.2 forbids.
+case_client_actions() {
+    requires() { echo ax; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "1" ]
+    }
+    action() {
+        driver actions --json >"$host_dir/actions.json" 2>"$host_dir/actions.err" \
+            || { cat "$host_dir/actions.err"; return 1; }
+        # Quoted for shellcheck only: SC1010 reads a bare `do` after a command as the
+        # reserved word. Bash passes the literal argument either way.
+        driver 'do' --item "Split Right" >"$host_dir/do.txt" 2>&1 \
+            || { cat "$host_dir/do.txt"; return 1; }
+        # The same item name under the wrong menu must fail rather than press it.
+        driver 'do' --path "File > Split Right" >"$host_dir/wrong-menu.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/wrong-menu.txt"
+        driver 'do' --item "No Such Action" >"$host_dir/missing.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/missing.txt"
+        sleep 1
+        return 0
+    }
+    assert() {
+        local before="$1" after
+        after=$(pane_count)
+        check "do splits the pane (daemon state, not the driver's word)" \
+            "$([ "$after" = "$((before + 1))" ] && echo 0 || echo 1)" "$before -> $after" || return 1
+
+        local catalog
+        catalog=$(python3 - "$host_dir/actions.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+items = data["actions"]
+split = [a for a in items if a["title"] == "Split Right"]
+if not split:
+    print("no 'Split Right' in the catalog"); raise SystemExit(1)
+if not split[0]["enabled"]:
+    print("'Split Right' is listed but disabled"); raise SystemExit(1)
+print(f"{len(items)} actions, Split Right at {split[0]['path']}")
+PY
+) || { check "actions lists Split Right as enabled" 1 "$catalog"; return 1; }
+        check "actions lists Split Right as enabled" 0 "$catalog"
+
+        check "a path under the wrong menu is refused" \
+            "$(grep -q 'exit=2' "$host_dir/wrong-menu.txt" && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/wrong-menu.txt")"
+        check "an unknown action is refused" \
+            "$(grep -q 'exit=2' "$host_dir/missing.txt" && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/missing.txt")"
+        check "do reports the path a human would have pressed" \
+            "$(grep -q 'pressed "View > Split Right"' "$host_dir/do.txt" && echo 0 || echo 1)" \
+            "$(cat "$host_dir/do.txt")"
+    }
+}
+
 # Split Down: proves the direction is honoured rather than hard-coded.
 # Pins the theme, like `case_drag_divider_app_setup`: the divider assertion below
 # compares against `paneGapColor`, which only means something if the theme is known.
@@ -4980,7 +5039,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #

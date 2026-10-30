@@ -853,6 +853,9 @@ guard let command = argv.first else {
                                      pageUp|pageDown|f1..f12
       menu  --menu T --item T [--index N]
                                      open a menu bar menu, then press an item
+      actions [--json]               list the menu items the app offers
+      do    --path "M > I" | --item I [--json]
+                                     press one of them (rex: `rex -C CLIENT do`)
       launch --app PATH [--env K=V] [--wait-window T] [--match NAME]
       quit                           terminate the app under test
 
@@ -885,6 +888,8 @@ case "drag": commandDrag(args)
 case "diff": commandDiff(args)
 case "key": commandKey(args)
 case "menu": commandMenu(args)
+case "actions": commandActions(args)
+case "do": commandDo(args)
 default:
     fail(.harness, "unknown command '\(command)'")
 }
