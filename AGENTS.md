@@ -117,6 +117,7 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 ./Scripts/test-baseline.sh               # 已知红名单（现在是空的）+ 全量跑；verify.sh 用它
 ./Scripts/test-baseline.sh --compare     # 名单里是否有「其实已经绿了」的陈旧条目
 ./Scripts/gui.sh run split-right         # 单个 UI 用例（需已 build-app.sh）
+./Scripts/gui.sh run client-actions      # 客户端动作目录：actions 列、do 按名触发
 ./Scripts/gui.sh list                    # 现有用例
 
 ./Scripts/bench.sh                       # 性能探针（release；见 docs/PERFORMANCE.md）
@@ -390,6 +391,7 @@ PR 正文和提交信息同样要求**证据**：不只是「修好了」，而�
 | `docs/DESIGN.md` | 协议与架构设计 |
 | `docs/ENVIRONMENT.md` | **实测的环境事实**：版本、隔离方式、多机验证、Tart VM、TCC |
 | `docs/AUTOMATION.md` | GUI 验证闭环：方案、实测数据、未验证项 |
+| `docs/CLI.md` | **对外接口**：Rex 借鉴清单、`kraal-gui actions/do`、缺口与路线 |
 | `docs/DEBUGGING.md` | **怎么验证一件事是真的**（排查教训） |
 | `docs/PERFORMANCE.md` | **怎么量出一件事有多贵**（基准方法学 + 实测数据） |
 | `docs/IOS-PORT.md` | **iOS 移植做到哪一步了**：实测编译矩阵、阻塞项优先级、最小改动配方 |
