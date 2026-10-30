@@ -147,12 +147,49 @@ kraal capture --pane w1:p1 --format html > screen.html
 且无转义、html 是完整文档、非法格式与非存在 pane 都以 exit 1 被拒）。注入验证：把
 `Style.css` 改成返回空串 → `✗ html turns the colour into a span`。
 
+## 4d. 第四个切片：`kraal run --wait`（拿退出码）
+
+```bash
+kraal run --wait -- npm test                       # 退出码 = npm test 的退出码
+kraal run --split down --label Logs -- tail -f app.log
+kraal run --wait --output json -- sh -c 'exit 7'   # {"exit_code":7,"pane_id":"w1:p3"}
+```
+
+这是 herdr CLI **结构上给不出**的那一件事：它能起命令、能读 pane，但没有「命令的退出码」，
+脚本因此无法按成败分支。
+
+做法不是让 daemon 长出这个功能，而是把命令打进 shell 时**追加一个哨兵**：
+
+```
+<命令>; printf '\n[kraal-exit:%s]\n' "$?"
+```
+
+然后用 `herdr pane wait-output --regex '\[kraal-exit:([0-9]+)\]'` 等它出现，再从
+`pane read` 里读回数字（**取最后一个**，这样同一条命令重跑不会读到上一次的状态）。
+管道里每一段都是已有的、已有的测试覆盖过的动词。
+
+三个实现细节，都是踩出来的：
+
+1. **命令只穿过一层 shell**（pane 里那个），所以转义全部由 `shellQuote`（POSIX 单引号 +
+   `'\''`）负责。这和 test harness 不同：那里还要再穿一层 `tart exec bash -lc`，引号会被
+   吃掉两次（§4c、`DEBUGGING.md` §17）。
+2. **新 tab 先有 pane 后有 shell**，这个空档里打字会丢（`gui.sh` 早就有同样的注释）。所以
+   发文本前用 `pane process-info` 轮询「前台进程已存在」，而不是 sleep。
+3. **herdr 的返回是嵌套的**：`{"id":"cli:tab:create","result":{…}}`，而且 split 给
+   `pane_id`、new tab 给 `pane_ids` 列表。`firstPaneId` 递归找，不猜形状。
+
+`./Scripts/gui.sh run run-wait`：6 条断言（成功退出 0、失败命令的 7 变成 CLI 的退出码、
+命令输出确实进了它自己的 pane、不带 `--wait` 时命令照样跑起来、缺命令/坏方向的拒绝信息）。
+注入验证：`exit(status)` 改成 `exit(0)` → `✗ a failing command's status comes back as the CLI's status`。
+纯函数单测 6 条（`Tests/KraalCLITests/KraalRunTests.swift`：引号、哨兵解析、herdr 形状）。
+
 ## 5. 下一步（按价值排序）
 
 1. ~~`skill` 自描述指南~~（§4b 已做）
 2. ~~`capture --format=html`~~（§4c 已做）
-3. **`run --wait` 拿退出码**：`herdr pane run` 有进程信息，缺「等结束 + 返回码」的动词。
-4. **`events --json`**：herdr 的 `subscription_event` 已经定义好了。
+3. ~~`run --wait` 拿退出码~~（§4d 已做）
+4. **`events --json`**：herdr 的 `subscription_event` 已经定义好了，但 CLI 没有 `events`
+   动词；要做就得自己连 JSON socket 并订阅（未开始）。
 5. **多客户端**（`-C CLIENT`）：Kraal 有 Machines 面板；`client ls` / `-C <mac> do` 需要
    app 侧一个控制通道（URL scheme 最省事，但要考虑「不留探索区」：绝不能让外部命令
    在用户正在用的窗口里 split）。

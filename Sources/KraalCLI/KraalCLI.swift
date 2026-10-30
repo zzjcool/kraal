@@ -31,6 +31,7 @@ struct Options {
     var text: String?
     var timeout: Double = 20
     var capture = CaptureOptions()
+    var run = RunOptions()
 
     enum Command {
         case probe
@@ -41,6 +42,7 @@ struct Options {
         case sendText
         case paste
         case capture
+        case run
     }
 }
 
@@ -105,6 +107,14 @@ func parse() -> Options {
             return arguments[index]
         }
 
+        // Everything after `--` is the command `run` starts, verbatim: no flag
+        // parsing past that point, which is what makes `kraal run -- git -c x=y …`
+        // safe to type.
+        if argument == "--" {
+            options.run.command = Array(arguments[index...])
+            break
+        }
+
         if let keyPath = valueFlags[argument] {
             options[keyPath: keyPath] = nextValue()
             continue
@@ -129,6 +139,8 @@ func parse() -> Options {
             }
         case "--trim":
             options.capture.trim = true
+        case "--wait":
+            options.run.wait = true
         case "--methods":
             options.showMethods = true
         case "--json":
@@ -161,6 +173,7 @@ func parseCommandWord(_ argument: String, options: inout Options) -> Bool {
     case "send-text": options.command = .sendText
     case "paste": options.command = .paste
     case "capture": options.command = .capture
+    case "run": options.command = .run
     default: return false
     }
     return true
@@ -180,6 +193,10 @@ func parseCaptureFlag(
     case "--lines": options.capture.lines = nextValue().flatMap(Int.init) ?? options.capture.lines
     case "--background": options.capture.background = nextValue() ?? options.capture.background
     case "--foreground": options.capture.foreground = nextValue() ?? options.capture.foreground
+    case "--label": options.run.label = nextValue() ?? options.run.label
+    case "--cwd": options.run.cwd = nextValue() ?? options.run.cwd
+    case "--split": options.run.split = nextValue() ?? options.run.split
+    case "--output": options.run.output = nextValue() ?? options.run.output
     default: return false
     }
     return true
@@ -199,6 +216,8 @@ func printUsage() {
       kraal capture                   print a pane's screen + scrollback as
                                        text | ansi | html; runs `herdr pane read`,
                                        so it needs no Kraal window
+      kraal run [--wait] -- CMD …     start CMD in a new tab (or --split right|down)
+                                       and, with --wait, exit with its status
 
     TARGET
       --socket <path>     unix socket (default: this Mac's herdr-client.sock)
@@ -218,6 +237,14 @@ func printUsage() {
       --text <string>     text for `send-text`
       --json '{...}'      literal JSON object for `call`
       --timeout <seconds> overall wait (default 20)
+
+    RUN
+      --label <text>      label for the tab (or the split)
+      --cwd <path>        working directory
+      --split <dir>       right | down (default: a new tab)
+      --wait              block until the command exits, then exit with its status
+      --output <fmt>      text | json (default text)
+      --timeout <seconds> how long --wait waits (default 120)
 
     CAPTURE
       --pane <pane_id>    pane to capture (default: $HERDR_PANE_ID)
@@ -316,6 +343,9 @@ struct KraalCLI {
         if options.command == .capture {
             runCapture(options)
         }
+        if options.command == .run {
+            runCommand(options)
+        }
         let target: HerdrTarget
         do {
             target = try resolveTarget(options)
@@ -399,7 +429,7 @@ struct KraalCLI {
         case .keys, .sendText, .paste:
             await runInput(options: options, connection: connection)
 
-        case .capture:
+        case .capture, .run:
             break   // handled before connecting; see `main`
         }
     }

@@ -887,6 +887,32 @@ run_py() {
     esac
 }
 
+# Runs the `kraal` CLI against this run's daemon, wherever the backend puts it.
+#
+# Three things differ per backend and all three have bitten: the daemon socket
+# (`HERDR_SOCKET_PATH`, a guest path under `vm`), the herdr binary (the guest has a
+# copy at `$VM_ROOT/bin` and nothing on PATH — hence `KRAAL_HERDR_BIN`), and quoting:
+# the `herdr` shim joins its arguments and lets the guest's bash re-parse them, so
+# arguments here are escaped with `printf %q` before they go through `tart exec`.
+kraal_cli() {
+    local executable="$ROOT/.build/out/Products/Debug/kraal"
+    case "$BACKEND" in
+    local)
+        env HOME="$HERDR_HOME" HERDR_SOCKET_PATH="$API_SOCKET" \
+            KRAAL_HERDR_BIN="$(type -P herdr)" "$executable" "$@"
+        ;;
+    vm)
+        local quoted="" argument
+        for argument in "$@"; do
+            quoted="$quoted $(printf '%q' "$argument")"
+        done
+        # shellcheck disable=SC2086  # %q already quoted every argument
+        tart exec "$VM" /bin/bash -lc \
+            "HOME=$HERDR_HOME HERDR_SOCKET_PATH=$API_SOCKET KRAAL_HERDR_BIN=$VM_ROOT/bin/herdr $VM_ROOT/kraal$quoted"
+        ;;
+    esac
+}
+
 # `herdr pane layout` is the geometry oracle. `pane list` has no sizes at all,
 # which is why the first version of this script could not tell a correct split
 # from one that produced two panes with the wrong ratio.
@@ -1389,34 +1415,18 @@ case_capture_formats() {
             tries=$((tries + 1))
             sleep 0.2
         done
-        # The scratch daemon lives behind `HOME`/`HERDR_SOCKET_PATH`, which the
-        # `herdr` shim below sets per call. A child process (`kraal`) does not
-        # inherit them, so it has to be told the same way — otherwise it reports on
-        # the developer's *own* session, where this pane id does not exist.
-        capture() {
-            case "$BACKEND" in
-            local)
-                env HOME="$HERDR_HOME" HERDR_SOCKET_PATH="$API_SOCKET" \
-                    KRAAL_HERDR_BIN="$(type -P herdr)" \
-                    "$ROOT/.build/out/Products/Debug/kraal" capture "$@"
-                ;;
-            vm)
-                # The guest has neither `herdr` on PATH nor the host's socket, so both
-                # are passed explicitly — the same two variables the app itself needs.
-                tart exec "$VM" /bin/bash -lc \
-                    "HOME=$HERDR_HOME HERDR_SOCKET_PATH=$API_SOCKET KRAAL_HERDR_BIN=$VM_ROOT/bin/herdr $VM_ROOT/kraal capture $*"
-                ;;
-            esac
-        }
-        capture --pane "$pane" --format text >"$host_dir/text.txt" 2>"$host_dir/text.err" \
+        # The CLI does not inherit the shim's daemon environment, so `kraal_cli`
+        # spells it out — otherwise the capture reports on the developer's own
+        # session, where this pane id does not exist.
+        kraal_cli capture --pane "$pane" --format text >"$host_dir/text.txt" 2>"$host_dir/text.err" \
             || { cat "$host_dir/text.err"; return 1; }
-        capture --pane "$pane" --format ansi >"$host_dir/ansi.txt" 2>"$host_dir/ansi.err" \
+        kraal_cli capture --pane "$pane" --format ansi >"$host_dir/ansi.txt" 2>"$host_dir/ansi.err" \
             || { cat "$host_dir/ansi.err"; return 1; }
-        capture --pane "$pane" --format html >"$host_dir/capture.html" 2>"$host_dir/html.err" \
+        kraal_cli capture --pane "$pane" --format html >"$host_dir/capture.html" 2>"$host_dir/html.err" \
             || { cat "$host_dir/html.err"; return 1; }
         capture --pane "$pane" --format bogus >"$host_dir/bogus.txt" 2>&1
         echo "exit=$?" >>"$host_dir/bogus.txt"
-        capture --pane w9:p99 --format text >"$host_dir/missing.txt" 2>&1
+        kraal_cli capture --pane w9:p99 --format text >"$host_dir/missing.txt" 2>&1
         echo "exit=$?" >>"$host_dir/missing.txt"
         return 0
     }
@@ -1448,6 +1458,86 @@ case_capture_formats() {
         check "a missing pane is refused with herdr's own message" \
             "$(grep -q 'exit=1' "$host_dir/missing.txt" && echo 0 || echo 1)" \
             "$(head -1 "$host_dir/missing.txt")"
+    }
+}
+
+# `kraal run --wait`: the one thing herdr cannot express — a command's exit status.
+#
+# The command is typed into a shell with a `[kraal-exit:N]` printer appended, and
+# `herdr pane wait-output --regex` waits for that marker. Everything asserted here is
+# on the daemon's side (the pane's own text) or in the CLI's exit status, because
+# "the CLI printed started" is exactly the evidence AGENTS.md §0.2 forbids.
+case_run_wait() {
+    requires() { :; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" -ge 1 ]
+    }
+    action() {
+        # A command that succeeds, one that fails with a distinctive status, and one
+        # that is not waited for.
+        kraal_cli run --wait --output json --label ok -- sh -c 'printf "MARK-OK\\n"; exit 0' \
+            >"$host_dir/ok.json" 2>&1
+        echo "exit=$?" >>"$host_dir/ok.json"
+        kraal_cli run --wait --output json --label boom -- sh -c 'printf "MARK-FAIL\\n"; exit 7' \
+            >"$host_dir/fail.json" 2>&1
+        echo "exit=$?" >>"$host_dir/fail.json"
+        kraal_cli run --output json -- sh -c 'printf "MARK-NOWAIT\\n"' \
+            >"$host_dir/nowait.json" 2>&1
+        echo "exit=$?" >>"$host_dir/nowait.json"
+        # Refusals that need no daemon work at all.
+        kraal_cli run --output json >"$host_dir/no-command.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/no-command.txt"
+        kraal_cli run --split sideways -- true >"$host_dir/bad-split.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/bad-split.txt"
+        # The not-waited-for pane must still have printed its line: `run` without
+        # `--wait` is only useful if the command actually started.
+        local pane tries=0
+        # `JSONSerialization` writes `"pane_id":"w1:p3"` — no spaces. Reading the
+        # pretty-printed shape here is what made the first version of this case look
+        # like a product failure when the feature already worked.
+        pane=$(sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' "$host_dir/nowait.json")
+        printf '%s\n' "$pane" >"$host_dir/nowait-pane.txt"
+        while [ "$tries" -lt 25 ]; do
+            if herdr pane read "$pane" --source visible --format text 2>/dev/null | grep -q MARK-NOWAIT; then
+                break
+            fi
+            tries=$((tries + 1))
+            sleep 0.2
+        done
+        return 0
+    }
+    assert() {
+        check "a successful command reports exit 0, and so does the CLI" \
+            "$(grep -q '"exit_code":0' "$host_dir/ok.json" && grep -q '^exit=0$' "$host_dir/ok.json" \
+                && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/ok.json")"
+        check "a failing command's status comes back as the CLI's status" \
+            "$(grep -q '"exit_code":7' "$host_dir/fail.json" && grep -q '^exit=7$' "$host_dir/fail.json" \
+                && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/fail.json")"
+        check "the failing run's own output is in its pane" \
+            "$(grep -q MARK-FAIL "$host_dir/fail.json" \
+                || herdr pane read "$(sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' "$host_dir/fail.json")" \
+                    --source recent --format text 2>/dev/null | grep -q MARK-FAIL \
+                && echo 0 || echo 1)" \
+            "$(sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' "$host_dir/fail.json")"
+        check "without --wait the command still starts in its own pane" \
+            "$(herdr pane read "$(cat "$host_dir/nowait-pane.txt")" --source visible --format text \
+                2>/dev/null | grep -q MARK-NOWAIT && echo 0 || echo 1)" \
+            "pane $(cat "$host_dir/nowait-pane.txt")"
+        check "run without a command is refused, with an example" \
+            "$(grep -q 'exit=1' "$host_dir/no-command.txt" \
+                && grep -q 'kraal run --wait -- npm test' "$host_dir/no-command.txt" \
+                && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/no-command.txt")"
+        check "an unknown split direction is refused" \
+            "$(grep -q 'exit=1' "$host_dir/bad-split.txt" \
+                && grep -q 'right or down' "$host_dir/bad-split.txt" \
+                && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/bad-split.txt")"
     }
 }
 
@@ -5180,7 +5270,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
