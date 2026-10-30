@@ -189,6 +189,10 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 PATH="$HOME/.pi-lens/bin:$PATH" swiftlint --quiet Sources Tests
 ```
 
+**主题已补像素门禁**（`theme-picked`，见 `docs/AUTOMATION.md` §20）：两个主题各跑一次，
+窗格底色 2560/2560 命中、ANSI 红 2560/2560 命中、交叉 0/2560；把 `ghostty: nil`
+注入后两条 ANSI 断言变红。
+
 **未验证的部分**：命令面板在真实窗口里的样子（sheet 的文本框是否自动获得焦点、
 58 行滚动是否顺手）只做过 `swift build` 与单测，没有 GUI 断言。要补的门禁是
 一条 `palette-search` 用例：`do --item "Command Palette"` → 输入 "kill" →

@@ -1128,3 +1128,37 @@ app_setup for 'machines-reachability' failed (harness: fixture state could not b
 
 教训记在 `docs/DEBUGGING.md` §17：**要测「终端里有颜色」，选一个不需要引号的命令
 （`ls -G /`）**，比研究几层引用更省时间——第一版用例就是在引号上耗掉的。
+
+## 20. 主题必须落到像素上（`theme-picked`，2026-10-30）
+
+主题那片（#212）原来只有解析与派生配色的单测：**「解析出 #282828」不等于「窗格是 #282828」**。用例 `theme-picked` 把这条补上：用 `KRAAL_THEME` 把两个背景截然不同的主题各跑一次，截图采样，断言窗格像素。
+
+```
+✓ the pick was applied, not the config (theme: applied Gruvbox Dark)
+✓ the terminal was built with the theme's background (terminal background: 282828)
+✓ gruvbox paints the pane #282828        2560/2560 px
+✓ catppuccin paints the pane #1e1e2e     2560/2560 px
+✓ gruvbox's ANSI red fills the pane (#cc241d)      2560/2560
+✓ catppuccin's ANSI red fills the pane (#f38ba8)   2560/2560
+✓ the two picks do not paint the same colour       0/2560
+```
+
+**注入证明**：把 `makeTerminalPool` 里的 `ghostty: theme.ghostty` 改成 `nil`，
+两条 ANSI 断言立刻变红（`matched=0`），背景两条仍然绿 —— 因为背景走的是
+`pool.background`（调色板），ANSI 走的是 `withPalette`。**一个门禁至少要能红在
+它声称覆盖的那一半上**；只测背景会把「主题只换了底色」当成通过。
+
+### 三个坑
+
+1. **日志每次启动都轮转**：`KraalLog.rotate()` 在 launch 时跑，第二次启动后
+   `kraal.log` 里读不到第一次的行。第一次写成 `grep theme: applied Gruvbox Dark`
+   对着第二轮的日志查，失败的理由是错的。现在**每轮跑完立刻 `collect_app_log_tail`
+   存一份**，断言只读那一份。
+2. **窗格的屏幕属于 daemon，能活过 app 重启**：上一轮画的红色填充在下一轮还在，
+   「catppuccin 的底色」断言就是为了这个变成 0/2560。每轮采样前先 `clear`。
+3. **`tput setab 1 && clear` 不会填色**：实测窗格底色没变（BCE 不能指望），
+   而且 `pane run` 会吃掉引号。改成把一小段脚本推进 guest 再 `bash` 它 ——
+   用**带背景色的空格**铺满，不依赖 BCE，也不需要一行里带引号。
+
+断言用的矩形来自渲染器自己的 `layout:` 行（`container=` / `containerOrigin=`），
+不是窗口尺寸：容器被侧栏和标题栏缩进过，用窗口算会落到侧栏上。
