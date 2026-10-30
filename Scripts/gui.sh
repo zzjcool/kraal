@@ -5395,7 +5395,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch font-size status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch font-size sidebar-density status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #
@@ -6392,6 +6392,86 @@ case_font_size() {
         check "the size the app applied is logged" \
             "$(grep -o 'terminal font: [0-9.]*' "$log_path" | tr '\n' ' ' | grep -q 'terminal font: 15' && echo 0 || echo 1)" \
             "$(grep -o 'terminal font: [0-9.]*' "$log_path" | tr '\n' ' ')"
+    }
+}
+
+# A sidebar label's vertical position, in window points, straight from AX.
+#
+# The row band is not its own AX node (the label is), so the measurement is the
+# distance between two labels: the *pitch* of the list, which is row height plus
+# spacing. A density change that forgets one of the two still moves the pitch.
+sidebar_row_pitch() {
+    local first="$1" second="$2" ax
+    ax=$(driver ax --json --depth 22 2>/dev/null) || return 1
+    printf '%s' "$ax" | FIRST="$first" SECOND="$second" python3 -c '
+import json, os, sys
+wanted = [os.environ["FIRST"], os.environ["SECOND"]]
+found = {}
+tree = json.load(sys.stdin)
+for node in tree["nodes"]:
+    value = node.get("value") or node.get("title")
+    if node.get("role") == "AXStaticText" and value in wanted:
+        frame = node.get("frame") or {}
+        # The sidebar is the left column; a terminal pane could show the same text.
+        if "y" in frame and frame.get("x", 999) < 260 and value not in found:
+            found[value] = frame["y"]
+missing = [value for value in wanted if value not in found]
+if missing:
+    sys.exit(1)
+print(found[wanted[1]] - found[wanted[0]])
+' || return 1
+}
+
+# Density: comfortable vs compact rows (#215, borrowed from Rex's
+# `client.sidebar.density.toggle`).
+#
+# The assertion is the row *pitch* — the distance between two sidebar labels in
+# the AX tree — because that is the number the setting promises to change. Written
+# direction-agnostically and toggled twice: a failed run must not leave the next
+# one asserting against whatever density was left in the defaults.
+case_sidebar_density() {
+    requires() { echo ax; }
+    fixture() {
+        [ "$(pane_count)" -ge 1 ] || herdr workspace create >/dev/null 2>&1
+        herdr workspace create >/dev/null 2>&1
+        sleep 1
+        herdr workspace rename w1 dens-one >/dev/null 2>&1 || return 1
+        herdr workspace rename w2 dens-two >/dev/null 2>&1 || return 1
+        herdr workspace focus w1 >/dev/null 2>&1
+        sleep 2
+        ensure_sidebar_expanded || return 1
+        return 0
+    }
+    action() {
+        sidebar_row_pitch dens-one dens-two >"$host_dir/pitch-before.txt" 2>&1 || return 1
+        driver 'do' --item "Toggle Sidebar Density" >"$host_dir/toggle.txt" 2>&1 \
+            || { cat "$host_dir/toggle.txt"; return 1; }
+        sleep 1
+        sidebar_row_pitch dens-one dens-two >"$host_dir/pitch-toggled.txt" 2>&1 || return 1
+        driver 'do' --item "Toggle Sidebar Density" >"$host_dir/toggle-back.txt" 2>&1 \
+            || { cat "$host_dir/toggle-back.txt"; return 1; }
+        sleep 1
+        sidebar_row_pitch dens-one dens-two >"$host_dir/pitch-restored.txt" 2>&1 || return 1
+        return 0
+    }
+    assert() {
+        local before toggled restored
+        before=$(cat "$host_dir/pitch-before.txt")
+        toggled=$(cat "$host_dir/pitch-toggled.txt")
+        restored=$(cat "$host_dir/pitch-restored.txt")
+        check "both densities put the two workspaces in the sidebar" \
+            "$([ -n "$before" ] && [ -n "$toggled" ] && echo 0 || echo 1)" \
+            "pitch before=$before toggled=$toggled"
+        # 4pt: compact drops 2pt of padding above and below every row.
+        check "the density changed the row pitch by the promised 4pt" \
+            "$(awk -v a="$before" -v b="$toggled" 'BEGIN { d = (a > b ? a - b : b - a); exit !(d >= 3) }' && echo 0 || echo 1)" \
+            "$before -> $toggled"
+        check "toggling back restored the original pitch" \
+            "$(awk -v a="$before" -v b="$restored" 'BEGIN { exit !(a == b) }' && echo 0 || echo 1)" \
+            "$before -> $restored"
+        check "the density change is logged" \
+            "$(grep -c 'density: \(compact\|comfortable\)' "$host_dir/kraal.log" 2>/dev/null | awk '{ exit !($1 >= 2) }' && echo 0 || echo 1)" \
+            "$(grep -o 'density: .*' "$host_dir/kraal.log" 2>/dev/null | tr '\n' ' ')"
     }
 }
 

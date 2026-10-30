@@ -171,6 +171,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
                 showSettings: { [windowActions] in windowActions.showSettings() },
                 showThemePicker: { [windowActions] in windowActions.showThemePicker() },
                 adjustFontSize: { [weak self] change in self?.adjustFontSize(change) },
+                toggleDensity: { [windowActions] in windowActions.toggleDensity() },
                 showDebugInfo: { [windowActions] in windowActions.showDebugInfo() },
                 enterCopyMode: { [weak self] paneId in self?.copyMode?.enter(paneId: paneId) }
             )

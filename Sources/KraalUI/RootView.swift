@@ -20,6 +20,8 @@ public struct RootView: View {
     @State private var showShortcuts = false
     @State private var showSettings = false
     @State private var showThemePicker = false
+    /// How much air the chrome gives each row; persisted across launches.
+    @State private var density = Density.stored()
     @State private var showDebugInfo = false
     /// The rename dialog raised by a command; the palette presents its own.
     @State private var prompt: CommandPrompt?
@@ -84,8 +86,17 @@ public struct RootView: View {
             showSettings: { showSettings = true },
             showThemePicker: { showThemePicker = true },
             adjustFontSize: { onAdjustFontSize($0) },
+            toggleDensity: { toggleDensity() },
             enterCopyMode: { onEnterCopyMode($0) }
         )
+    }
+
+    /// Flips the density, saves it, and leaves the rest of the tree alone — the
+    /// environment value is what the rows read, so they redraw themselves.
+    private func toggleDensity() {
+        density = density.toggled
+        density.store()
+        kraalLog("density: \(density.rawValue)")
     }
 
     private var content: some View {
@@ -225,6 +236,8 @@ public struct RootView: View {
         .onChange(of: windowActions.statusBarToggleCount) { statusBarVisible.toggle() }
         .onChange(of: windowActions.commandPaletteCount) { showCommands = true }
         .onChange(of: windowActions.themePickerCount) { showThemePicker = true }
+        .onChange(of: windowActions.densityToggleCount) { toggleDensity() }
+        .environment(\.density, density)
         .onChange(of: windowActions.shortcutsCount) { showShortcuts = true }
         .onChange(of: windowActions.settingsCount) { showSettings = true }
         .onChange(of: windowActions.debugInfoCount) { showDebugInfo = true }

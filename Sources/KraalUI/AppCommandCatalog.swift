@@ -70,7 +70,7 @@ public extension AppCommand {
              .resizePaneLeft, .resizePaneRight, .resizePaneUp, .resizePaneDown, .previousPane, .nextPane:
             .pane
         case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme,
-             .increaseFontSize, .decreaseFontSize, .resetFontSize,
+             .increaseFontSize, .decreaseFontSize, .resetFontSize, .toggleDensity,
              .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
             .view
         }
@@ -130,6 +130,7 @@ public extension AppCommand {
         .increaseFontSize: ["font", "text", "size", "bigger", "larger", "zoom", "read"],
         .decreaseFontSize: ["font", "text", "size", "smaller", "tinier", "zoom"],
         .resetFontSize: ["font", "text", "size", "default", "normal", "reset"],
+        .toggleDensity: ["density", "compact", "comfortable", "rows", "spacing", "sidebar"],
         .reloadConfig: ["reload", "refresh", "config", "theme", "reconnect"],
         .keyboardShortcuts: ["keys", "shortcuts", "bindings", "hotkeys", "keyboard"],
         .reconnect: ["reconnect", "connection", "disconnect", "retry", "network", "socket"],

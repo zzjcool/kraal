@@ -36,6 +36,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         var showSettings: () -> Void = {}
         var showThemePicker: () -> Void = {}
         var adjustFontSize: (FontScale.Change) -> Void = { _ in }
+        var toggleDensity: () -> Void = {}
         var showDebugInfo: () -> Void = {}
         var enterCopyMode: (String) -> Void = { _ in }
     }
@@ -158,6 +159,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
         menu.addItem(command: .increaseFontSize, target: self)
         menu.addItem(command: .decreaseFontSize, target: self)
         menu.addItem(command: .resetFontSize, target: self)
+        menu.addItem(command: .toggleDensity, target: self)
         menu.addItem(.separator())
 
         menu.addItem(command: .splitRight, target: self)
@@ -311,6 +313,7 @@ final class MacMenuBar: NSObject, NSMenuItemValidation {
             showSettings: actions.showSettings,
             showThemePicker: actions.showThemePicker,
             adjustFontSize: actions.adjustFontSize,
+            toggleDensity: actions.toggleDensity,
             targetPaneId: targetPaneId,
             enterCopyMode: { [weak self] paneId in self?.actions.enterCopyMode(paneId) }
         )

@@ -16,6 +16,7 @@ struct SidebarView: View {
     @Environment(AppStore.self) private var store
     @Environment(WindowActions.self) private var windowActions
     @Environment(\.palette) private var palette
+    @Environment(\.density) private var density
     @State private var prompt: CommandPrompt?
 
     /// Fraction of the list area given to the spaces pane.
@@ -337,7 +338,10 @@ struct SidebarView: View {
         // 16pt hit areas were dead, and because the list spaces rows by 0 that
         // made a 4pt dead strip between every pair of machines. Clicking a row
         // near its edge silently did nothing, or landed on its neighbour.
-        .padding(.vertical, 2)
+        //
+        // The padding comes from the density: in compact it is 0, and the band is
+        // exactly the content, so there is no dead strip to speak of.
+        .padding(.vertical, density.rowVerticalPadding)
         .contentShape(Rectangle())
         .onTapGesture {
             // The band itself falls back to the label's action. The fold square
@@ -579,6 +583,7 @@ func sidebarTokenSeparator(before previous: ResolvedToken, current: ResolvedToke
 
 private struct WorkspaceRowView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.density) private var density
     let workspace: ClientShellWorkspace
     let layout: SidebarLayout
     /// The machine this workspace lives on. Rows describe one connection, so the
@@ -637,7 +642,7 @@ private struct WorkspaceRowView: View {
             // disagree about where they end.
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, density.rowVerticalPadding)
         .padding(.horizontal, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Hit testing follows the drawn rect, so the whole row is clickable

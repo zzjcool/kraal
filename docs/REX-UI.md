@@ -118,6 +118,15 @@ Kraal 的 `AppCommand` 有 58 条、标题与菜单一致，但**只有标题可
   "max"→Toggle Pane Zoom、"kill"→三个 Close、双词 AND、"tzm" 子序列、
   每条命令都有关键字、每条命令都能用自己的 id 词搜到。
 
+**密度两档**（`Toggle Sidebar Density`，Rex 的 `client.sidebar.density.toggle`）：
+
+- `KraalUI/Density.swift`：`comfortable`（= 历史值，行内上下各 2pt、选项卡 4pt）与
+  `compact`（行内 0、选项卡 2pt）。**逐面写死而不是乘一个系数** —— 乘系数要求每个
+  `padding(...)` 都记得乘，漏一处就是半紧凑。
+- 环境值 `\.density`，行/选项卡自己读；`WindowActions.densityToggleCount` 让菜单
+  能触发，`UserDefaults["KraalSidebarDensity"]` 持久化。
+- 门禁 `sidebar-density` 量的是**行距**（两个侧栏标签在 AX 里的 y 差）：`19 → 15 → 19`。
+
 **字号三键**（`Increase / Decrease / Reset Font Size`，Rex 的 `client.font.*`）：
 
 - `KraalUI/FontScale.swift`：基准 13pt（libghostty 自己的默认）、步长 1、范围 8…32，
@@ -168,7 +177,7 @@ Kraal 的 `AppCommand` 有 58 条、标题与菜单一致，但**只有标题可
    并抓到了「清模型不重建视图」这个真 bug。
 2. ~~主题选择器~~ 已完成（见 §5），且**没有**动用户的 `config.toml`：
    选中的主题只是客户端覆盖，`config.toml` 仍是默认值的来源。
-3. **密度切换**（紧凑/舒适）：侧栏行高 + 选项卡高度，两档，存 UserDefaults。
+3. ~~密度切换~~ 已完成（见 §5）：行距 `19 → 15 → 19`，选项卡同档。
 4. **语义角色补齐**：把 `danger/success/warning/info` 家族加进 `Palette`，
    现在这些状态色是散在视图里的 `.red`/`.green`。
 
