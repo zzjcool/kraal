@@ -257,10 +257,19 @@ public struct HerdrMachineClient: Sendable {
     public static func discover(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> HerdrMachineClient? {
+        guard let executable = resolveExecutable(environment: environment) else { return nil }
+        return HerdrMachineClient(executable: executable, home: isolatedHome(environment))
+    }
+
+    /// The `herdr` binary alone, for callers that shell out to it themselves
+    /// (`kraal capture` runs `herdr pane read`; it needs no machine bookkeeping).
+    public static func resolveExecutable(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL? {
         if let override = environment["KRAAL_HERDR_BIN"], !override.isEmpty {
             let url = URL(fileURLWithPath: override)
             if FileManager.default.isExecutableFile(atPath: url.path) {
-                return HerdrMachineClient(executable: url, home: isolatedHome(environment))
+                return url
             }
         }
 
@@ -279,10 +288,7 @@ public struct HerdrMachineClient: Sendable {
         ])
 
         for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return HerdrMachineClient(
-                executable: URL(fileURLWithPath: candidate),
-                home: isolatedHome(environment)
-            )
+            return URL(fileURLWithPath: candidate)
         }
         return nil
     }

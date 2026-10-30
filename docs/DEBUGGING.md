@@ -633,3 +633,28 @@ pane-hit: pane=w1:p2 topDown=385,548 rect=232,375 928x288 point=152,173 contentH
 
 修法是把写入读回来核对，不匹配就走合成事件（`Sources/KraalGUIDriver/main.swift`）。这
 意味着**在这之前，任何靠 `type` 往终端里打字的用例都可能是在测空气**。
+
+## §17 `\r\n` 在 Swift 里是一个 Character（2026-10-30）
+
+`kraal capture --format html` 的第一版把 `^M` 写进了 HTML。原因不是转义逻辑写错，而是循环
+**遍历的对象**选错了：
+
+```swift
+for character in text {           // Character
+    if character == "\r" { continue }   // 永远不成立
+}
+```
+
+Swift 的 `Character` 是**字素簇**，`"\r\n"` 是一个字符。所以那段代码既不匹配 `"\r"`、也不
+匹配 `"\n"`（后者同样不是单独的字素簇），两个字符被当成一个整体塞进了输出。改成遍历
+`unicodeScalars` 之后立刻正确。
+
+可复用的教训（同 §3「探针要测对对象」）：**先问「我遍历的是什么单位」**。`String` 的
+`count`、`index(_:offsetBy:)`、`==` 都是按字素簇走的，任何逐字节/逐码点的处理
+（ANSI 解析、列宽计算、`
+` 归一化）都必须显式走 `unicodeScalars` 或 `utf8`。
+
+顺带一条同一轮的：**引号会被吃掉不止一次**。`herdr pane run` 会 shell-split 自己的参数；
+`gui.sh` 的 vm 后端还会把参数拼进 `tart exec bash -lc "…"` 再解析一次。`printf '\033[31mX…'`
+经过这两层变成 `zsh: bad pattern: 033[31mX033[0m`。要测「终端里有颜色」，选一个**不需要
+引号**的命令（`ls -G /`），比研究几层引用更省时间。

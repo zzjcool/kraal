@@ -30,6 +30,7 @@ struct Options {
     var target: String?
     var text: String?
     var timeout: Double = 20
+    var capture = CaptureOptions()
 
     enum Command {
         case probe
@@ -39,6 +40,7 @@ struct Options {
         case keys
         case sendText
         case paste
+        case capture
     }
 }
 
@@ -125,26 +127,62 @@ func parse() -> Options {
             if parts.count == 2 {
                 options.params[parts[0]] = parts[1]
             }
+        case "--trim":
+            options.capture.trim = true
         case "--methods":
             options.showMethods = true
         case "--json":
             // A literal object, for the many requests whose fields are not
             // strings (splits take `[bool]` paths, ratios take `f32`).
             options.rawParams = nextValue()
-        case "screenshot": options.command = .screenshot
-        case "snapshot": options.command = .snapshot
-        case "call": options.command = .call
-        case "keys": options.command = .keys
-        case "send-text": options.command = .sendText
-        case "paste": options.command = .paste
         case "--help", "-h":
             printUsage()
             exit(0)
         default:
-            break
+            if parseCommandWord(argument, options: &options) { continue }
+            _ = parseCaptureFlag(argument, nextValue: nextValue, options: &options)
         }
     }
     return options
+}
+
+/// The bare words that select a command (`kraal snapshot`, `kraal capture`, …).
+///
+/// Split out of `parse()` for the same reason as `parseCaptureFlag`: that switch was
+/// over the project's cyclomatic-complexity limit once `capture` and its flags
+/// landed, and an argument parser is exactly the place where "just one more case"
+/// keeps happening.
+func parseCommandWord(_ argument: String, options: inout Options) -> Bool {
+    switch argument {
+    case "screenshot": options.command = .screenshot
+    case "snapshot": options.command = .snapshot
+    case "call": options.command = .call
+    case "keys": options.command = .keys
+    case "send-text": options.command = .sendText
+    case "paste": options.command = .paste
+    case "capture": options.command = .capture
+    default: return false
+    }
+    return true
+}
+
+/// Capture-only flags. Separate from `parse()` purely to keep that function's
+/// branch count under the project's cyclomatic-complexity limit; the behaviour is
+/// the same as if they were inline.
+func parseCaptureFlag(
+    _ argument: String,
+    nextValue: () -> String?,
+    options: inout Options
+) -> Bool {
+    switch argument {
+    case "--format": options.capture.format = nextValue() ?? options.capture.format
+    case "--source": options.capture.source = nextValue() ?? options.capture.source
+    case "--lines": options.capture.lines = nextValue().flatMap(Int.init) ?? options.capture.lines
+    case "--background": options.capture.background = nextValue() ?? options.capture.background
+    case "--foreground": options.capture.foreground = nextValue() ?? options.capture.foreground
+    default: return false
+    }
+    return true
 }
 
 func printUsage() {
@@ -158,6 +196,9 @@ func printUsage() {
       kraal [options] call             issue an endpoint API call (needs --method)
       kraal [options] keys             send a keyed sequence to a pane
       kraal [options] send-text        send literal text to a pane
+      kraal capture                   print a pane's screen + scrollback as
+                                       text | ansi | html; runs `herdr pane read`,
+                                       so it needs no Kraal window
 
     TARGET
       --socket <path>     unix socket (default: this Mac's herdr-client.sock)
@@ -177,6 +218,15 @@ func printUsage() {
       --text <string>     text for `send-text`
       --json '{...}'      literal JSON object for `call`
       --timeout <seconds> overall wait (default 20)
+
+    CAPTURE
+      --pane <pane_id>    pane to capture (default: $HERDR_PANE_ID)
+      --source <src>      visible | recent | recent-unwrapped (default visible)
+      --lines <n>         keep only the last n lines
+      --format <fmt>      text | ansi | html (default text)
+      --trim              drop trailing blanks; helps logs
+      --background <hex>  html page background (default #282828)
+      --foreground <hex>  html page foreground (default #ebdbb2)
     """)
 }
 
@@ -260,6 +310,12 @@ func wait(
 struct KraalCLI {
     static func main() async {
         let options = parse()
+        // `capture` shells out to `herdr pane read`; it must not require the endpoint
+        // socket the rest of this binary talks to, or it could not report on a pane
+        // when the app is the thing that is broken.
+        if options.command == .capture {
+            runCapture(options)
+        }
         let target: HerdrTarget
         do {
             target = try resolveTarget(options)
@@ -342,6 +398,9 @@ struct KraalCLI {
 
         case .keys, .sendText, .paste:
             await runInput(options: options, connection: connection)
+
+        case .capture:
+            break   // handled before connecting; see `main`
         }
     }
 
