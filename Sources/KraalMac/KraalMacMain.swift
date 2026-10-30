@@ -113,6 +113,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             )
         } popupPaneContent: { store, popup, _ in
             self.popupView(store: store, popup: popup, pool: pool)
+        } onEnterCopyMode: { [weak self] paneId in
+            self?.copyMode?.enter(paneId: paneId)
         }
         // Injected on the view rather than on the hosting view, so sheets and
         // popovers inherit it too.

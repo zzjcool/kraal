@@ -396,6 +396,7 @@ PR 正文和提交信息同样要求**证据**：不只是「修好了」，而�
 | `docs/ENVIRONMENT.md` | **实测的环境事实**：版本、隔离方式、多机验证、Tart VM、TCC |
 | `docs/AUTOMATION.md` | GUI 验证闭环：方案、实测数据、未验证项 |
 | `docs/CLI.md` | **对外接口**：Rex 借鉴清单、`kraal-gui actions/do/skill/clients`、`kraal capture/run/events`、缺口与路线 |
+| `docs/REX-UI.md` | **Rex 界面借了什么**：41 主题/70 语义角色/材质层/密度、Kraal 对照表、下一步排序 |
 | `docs/DEBUGGING.md` | **怎么验证一件事是真的**（排查教训） |
 | `docs/PERFORMANCE.md` | **怎么量出一件事有多贵**（基准方法学 + 实测数据） |
 | `docs/IOS-PORT.md` | **iOS 移植做到哪一步了**：实测编译矩阵、阻塞项优先级、最小改动配方 |
