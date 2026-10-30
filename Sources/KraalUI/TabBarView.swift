@@ -16,6 +16,7 @@ import KraalTransport
 
 struct TabBarView: View {
     @Environment(\.palette) private var palette
+    @Environment(\.density) private var density
     @Environment(AppStore.self) private var store
     @State private var prompt: CommandPrompt?
 
@@ -61,7 +62,7 @@ struct TabBarView: View {
                 }
             }
             .padding(.horizontal, KraalTheme.Space.base)
-            .padding(.vertical, KraalTheme.Space.tight)
+            .padding(.vertical, density.tabBarVerticalPadding)
             .background {
                 // The focused tab reads as a lit pill on the bar's glass. A plain
                 // accent fill at 25% looked muddy over the material, so the pill

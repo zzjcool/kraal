@@ -41,6 +41,7 @@ enum MenuShortcuts {
             .increaseFontSize: Shortcut(key: "=", modifiers: .command),
             .decreaseFontSize: Shortcut(key: "-", modifiers: .command),
             .resetFontSize: Shortcut(key: "0", modifiers: .command),
+            .toggleDensity: Shortcut(key: "d", modifiers: [.command, .option]),
 
             .splitRight: Shortcut(key: "d", modifiers: .command),
             .splitDown: Shortcut(key: "d", modifiers: [.command, .shift]),

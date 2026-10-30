@@ -106,6 +106,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
     case increaseFontSize = "increase_font_size"
     case decreaseFontSize = "decrease_font_size"
     case resetFontSize = "reset_font_size"
+    case toggleDensity = "toggle_density"
     case reloadConfig = "reload_config"
     case settings = "settings"
     case keyboardShortcuts = "keybindings"
@@ -155,6 +156,7 @@ public enum AppCommand: String, Sendable, CaseIterable {
         case .increaseFontSize: return "Increase Font Size"
         case .decreaseFontSize: return "Decrease Font Size"
         case .resetFontSize: return "Reset Font Size"
+        case .toggleDensity: return "Toggle Sidebar Density"
         case .reloadConfig: return "Reload Config"
         case .settings: return "Settings…"
         case .keyboardShortcuts: return "Keyboard Shortcuts"
@@ -308,6 +310,8 @@ public struct CommandEnvironment {
     /// Moves the terminal's font size. The pool belongs to the app target, and a
     /// size change retires its models, so the command only *asks*.
     public var adjustFontSize: (FontScale.Change) -> Void
+    /// Switches the chrome between comfortable and compact rows.
+    public var toggleDensity: () -> Void
     /// The pane a context menu was raised over, when there was one.
     ///
     /// A right-click means "the pane under the pointer", not "whatever is
@@ -337,6 +341,7 @@ public struct CommandEnvironment {
         showSettings: @escaping () -> Void = {},
         showThemePicker: @escaping () -> Void = {},
         adjustFontSize: @escaping (FontScale.Change) -> Void = { _ in },
+        toggleDensity: @escaping () -> Void = {},
         targetPaneId: String? = nil,
         enterCopyMode: @escaping (String) -> Void = { _ in }
     ) {
@@ -348,6 +353,7 @@ public struct CommandEnvironment {
         self.showSettings = showSettings
         self.showThemePicker = showThemePicker
         self.adjustFontSize = adjustFontSize
+        self.toggleDensity = toggleDensity
         self.targetPaneId = targetPaneId
         self.enterCopyMode = enterCopyMode
     }
@@ -397,7 +403,7 @@ public func perform(_ command: AppCommand, on store: AppStore, env: CommandEnvir
         performPaneAction(command, on: store, target: env.targetPaneId)
 
     case .toggleSidebar, .toggleStatusBar, .commandPalette, .changeTheme,
-         .increaseFontSize, .decreaseFontSize, .resetFontSize,
+         .increaseFontSize, .decreaseFontSize, .resetFontSize, .toggleDensity,
          .reloadConfig, .keyboardShortcuts, .reconnect, .settings:
         performViewAction(command, on: store, env: env)
     }
@@ -530,6 +536,7 @@ private func performViewAction(
     case .increaseFontSize: env.adjustFontSize(.increase)
     case .decreaseFontSize: env.adjustFontSize(.decrease)
     case .resetFontSize: env.adjustFontSize(.reset)
+    case .toggleDensity: env.toggleDensity()
     case .reloadConfig: store.reloadServerConfig()
     case .keyboardShortcuts: env.showShortcuts()
     case .settings: env.showSettings()

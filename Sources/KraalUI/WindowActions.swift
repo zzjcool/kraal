@@ -38,6 +38,8 @@ public final class WindowActions {
     /// views hold the models they were handed, and nothing else about the tree
     /// changes, so without an identity change they keep drawing the old surfaces.
     public private(set) var fontChangeCount = 0
+    /// Bumped when the menu asks for the other density.
+    public private(set) var densityToggleCount = 0
 
     public init() {}
 
@@ -49,4 +51,5 @@ public final class WindowActions {
     public func showDebugInfo() { debugInfoCount += 1 }
     public func showThemePicker() { themePickerCount += 1 }
     public func fontChanged() { fontChangeCount += 1 }
+    public func toggleDensity() { densityToggleCount += 1 }
 }
