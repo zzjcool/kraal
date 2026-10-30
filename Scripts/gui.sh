@@ -492,7 +492,7 @@ win_x, win_y = int(win.group(1)), int(win.group(2))
 cont_x, cont_y = int(origin.group(1)), int(origin.group(2))
 cell_w, cell_h = float(cell.group(1)), float(cell.group(2))
 
-match = re.search(r"(?:^|\s)" + re.escape(pane_id) + r"=(\d+)x(\d+)@(\d+),(\d+)", line)
+match = re.search(r"(?:^|[\s\[,])" + re.escape(pane_id) + r"=(\d+)x(\d+)@(\d+),(\d+)", line)
 if not match:
     sys.exit(1)
 _x, _y, term_x, term_y = (int(v) for v in match.groups())
@@ -3140,6 +3140,77 @@ case_machines_roster_app_setup() {
 # offset under investigation is exactly one border row plus the divider's first row. If
 # pinning the borders off changes the reported rows, the inset handling is the cause; if
 # it does not, it is not. Overridable so one case can run both arms.
+# TEMPORARY probe: is each pane's engine view where the pane is drawn?
+#
+# Fills the two halves of a split with text that names itself, screenshots the window and
+# copies it out, so the picture can be compared with the geometry the app reports. If the
+# halves are swapped or shifted, this is where it shows; if they are right, the mouse
+# offset lives in the engine's coordinate mapping rather than in view placement.
+# Commands are `seq` only: `type --text` falls back to the AX path for text it cannot
+# type positionally (`|`, capitals) and that path writes nowhere in a terminal, which is
+# how the first version of this probe produced two empty panes and looked like a bug in
+# the app.
+case_probe_split_view() {
+    requires() { echo focus; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+            sleep 1
+        fi
+        if [ "$(pane_count)" = "1" ]; then
+            herdr pane split "$(first_pane_id)" --direction down >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" = "2" ] || return 1
+        sleep 2
+        return 0
+    }
+    action() {
+        local top bottom
+        top=$(printf '%s\n' "$(pane_ids)" | head -1)
+        bottom=$(printf '%s\n' "$(pane_ids)" | tail -1)
+        printf '%s %s\n' "$top" "$bottom" >"$host_dir/panes.txt"
+        local row point
+        for row in 6; do
+            point=$(pane_cell_point "$top" "$row" 10 2>"$host_dir/pcp-top.err") \
+                || { echo "pane_cell_point(top): $(cat "$host_dir/pcp-top.err")"; return 1; }
+            driver click --at-screen "$point" >"$host_dir/click-top.txt" 2>&1 \
+                || { cat "$host_dir/click-top.txt"; return 1; }
+            # Focus through the daemon as well as by clicking: the first click on an
+            # unfocused pane is consumed by the focus change, and keystrokes typed after
+            # it go to whichever pane was focused before.
+            herdr pane focus --pane "$top" >/dev/null 2>&1 || true
+            sleep 0.4
+            driver type --text "seq 1 40" >"$host_dir/type-top.txt" 2>&1 \
+                || { cat "$host_dir/type-top.txt"; return 1; }
+            driver key --name return >/dev/null 2>&1 || return 1
+            sleep 0.6
+            point=$(pane_cell_point "$bottom" "$row" 10) && printf '%s\n' "$point"
+            driver click --at-screen "$point" >"$host_dir/click-bottom.txt" 2>&1 \
+                || { cat "$host_dir/click-bottom.txt"; return 1; }
+            herdr pane focus --pane "$bottom" >/dev/null 2>&1 || true
+            sleep 0.4
+            driver type --text "seq 100 140" >"$host_dir/type-bottom.txt" 2>&1 \
+                || { cat "$host_dir/type-bottom.txt"; return 1; }
+            driver key --name return >/dev/null 2>&1 || return 1
+            sleep 1.5
+        done
+        driver shot -o "$VM_ROOT/split-view.png" >"$host_dir/shot.txt" 2>&1
+        case "$BACKEND" in
+        local) cp "$VM_ROOT/split-view.png" "$host_dir/split-view.png" 2>/dev/null ;;
+        vm)
+            tart exec -i "$VM" /bin/bash -lc "cat $VM_ROOT/split-view.png" \
+                >"$host_dir/split-view.png" 2>/dev/null
+            ;;
+        esac
+        return 0
+    }
+    assert() {
+        local shot="$host_dir/split-view.png"
+        check "the window was captured" \
+            "$([ -s "$shot" ] && echo 0 || echo 1)" "$(ls -l "$shot" 2>/dev/null | awk '{print $5}') bytes"
+    }
+}
+
 case_mouse_tui_row_config() {
     printf 'ui.pane_borders = "%s"\n' "${KRAAL_MOUSE_ROW_BORDERS:-never}" | write_config
 }

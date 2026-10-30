@@ -557,3 +557,53 @@ surface 层是 928x288pt（16 行），说明**引擎自己的视图坐标系**�
 上）。下一步用临时日志把引擎 NSView 的 `frame/bounds`（窗口坐标）打出来，与 `pane.innerRect`
 的绘制矩形对比，定位那 36pt，再修 —— 修完 `mouse-tui-row` 应当变绿，然后把它加进
 `all_cases`。
+
+### §16 续：自己跑完那三个实验，偏移定位到「引擎认为 surface 是 18 行」
+
+**一、内容有没有放错位置** —— 没有。`probe-split-view` 往上下两个 pane 各灌 `seq`（上
+`1-40`、下 `100-140`）再截图：上半个 pane 是 26-40 + 提示符，下半个是 126-140 + 提示符，
+**各在各的格子里**，第一行文字落在 y≈97，和 `containerOrigin=221,71` + 居中 8 +
+内边距 1 行 = 97 完全一致。
+
+顺带纠正我上一节写错的一句话：`settled: origin=…` 是 **窗口左下原点**的坐标
+（p1 `375` → 顶部 = 760-375-288 = 97 ✓；p2 `51` → 421 ✓）。我先前把它当左上读，得出
+「视图偏了 46pt」的结论是**错的**，那是坐标翻转的老坑（`docs/DEBUGGING.md` §8 同源）。
+
+**二、app 交给引擎的坐标对不对** —— 对。临时在 `PaneSurfaceHostView` 的 `mouseDown` 里
+打点，并打开 `TerminalDebugLog` 的 `.input`：
+
+```
+mouse-in: window=385,338 local=152,287 flipped=false bounds=928x288 viewBL=233,51
+surface mousePos x=152.00 y=1.00
+surface mousePos x=152.00 y=127.00
+surface mousePos x=152.00 y=253.00      ← 这三下分别点的是第 1、8、15 行
+```
+
+288pt 高、18pt 一格 → `1/127/253` 正好是第 1/8/15 行 **顶部附近**，所以翻转换算这一层
+是对的（`bounds.height - local.y` 在这条 `flipped=false` 的视图上成立）。
+
+**三、程序收到什么** —— 第 3、10、什么都没收到。
+
+三条合起来：**偏移发生在 Ghostty 内部把 y 换成单元格的那一步**。能同时解释三个数据点的
+唯一模型是「引擎认为自己的 surface 是 **324pt（18 行）**，终端内容贴在这 18 行的**底部**
+（偏移 36pt）」：
+
+```
+row = floor((y + 36) / 18) + 1
+y=1   → 3     ✓
+y=127 → 10    ✓
+y=253 → 17    → 超过 16 行，被丢弃  ✓
+```
+
+324pt 不是随手来的数：它就是 **pane 的 allocation（18 行）**，而 pane 里的终端只有 16 行。
+也就是说 surface 的尺寸是在「拿到 allocation」时定的，之后视图缩到 16 行时**没有跟着缩**。
+
+### 顺手挖出的第四个坑：`driver type` 会静默什么都不打
+
+第一次跑 `probe-split-view` 时两个 pane 都是空的、截图字节数一模一样。原因不是 app：
+`kraal-gui type --text` 走「取 AX 焦点元素 → 设 `AXValue`」这条路，而**终端视图会接受
+`AXValue` 然后什么也不做**，于是它打印 `typed via AX` 就退出了 —— 后面真正可用的合成
+键盘事件永远不会执行。
+
+修法是把写入读回来核对，不匹配就走合成事件（`Sources/KraalGUIDriver/main.swift`）。这
+意味着**在这之前，任何靠 `type` 往终端里打字的用例都可能是在测空气**。

@@ -575,12 +575,32 @@ func commandType(_ args: Arguments) -> Never {
         app.element, kAXFocusedUIElementAttribute as CFString, &focused
     ) == .success, let raw = focused, CFGetTypeID(raw) == AXUIElementGetTypeID() {
         let element = unsafeDowncast(raw, to: AXUIElement.self)
-        if AXUIElementSetAttributeValue(
+        let accepted = AXUIElementSetAttributeValue(
             element, kAXValueAttribute as CFString, text as CFString
-        ) == .success {
+        ) == .success
+        // Read the value back before believing it. A terminal's focused element is the
+        // surface view: it *accepts* `AXValue` and does nothing with it, so the old
+        // unchecked path printed "typed via AX" and typed nothing. Measured 2026-10-30
+        // on a focused pane — `type --text "seq 1 40"` reported success and the pane
+        // stayed empty, which made every case that types into a terminal silently test
+        // nothing (the caller sees exit 0 either way).
+        var readBack: CFTypeRef?
+        var confirmed = false
+        if accepted,
+           AXUIElementCopyAttributeValue(
+               element, kAXValueAttribute as CFString, &readBack
+           ) == .success, let value = readBack as? String {
+            confirmed = value == text || value.hasSuffix(text)
+        }
+        if confirmed {
             print("typed via AX")
             requireAlive(app, context: "type")
             exit(Exit.success.rawValue)
+        }
+        if accepted {
+            FileHandle.standardError.write(Data(
+                "kraal-gui: AX accepted the value but did not change it; using key events\n".utf8
+            ))
         }
     }
     // Fallback: real key events. This steals focus, so say so loudly.
