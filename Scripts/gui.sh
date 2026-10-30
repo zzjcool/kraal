@@ -1541,6 +1541,84 @@ case_run_wait() {
     }
 }
 
+# `kraal events`: the subscription API herdr defines but its CLI never exposed.
+#
+# The order matters and is the whole test: subscribe, *wait for the daemon's ack*, then
+# cause the event, then read the frame. Triggering first would pass on a slow machine
+# for the wrong reason (`docs/DEBUGGING.md` §8).
+case_events_json() {
+    requires() { :; }
+    fixture() {
+        if [ "$(pane_count)" = "0" ]; then
+            herdr workspace create >/dev/null 2>&1 || return 1
+        fi
+        [ "$(pane_count)" -ge 1 ]
+    }
+    action() {
+        kraal_cli events --list >"$host_dir/kinds.txt" 2>&1 || return 1
+
+        kraal_cli events --type pane.created --count 1 --timeout 30 \
+            >"$host_dir/events.jsonl" 2>"$host_dir/events.err" &
+        local subscriber=$!
+
+        local tries=0
+        while [ "$tries" -lt 50 ]; do
+            if grep -q subscription_started "$host_dir/events.jsonl" 2>/dev/null; then
+                break
+            fi
+            tries=$((tries + 1))
+            sleep 0.1
+        done
+        # A brand-new tab in the scratch daemon, which is exactly a `pane.created`.
+        herdr tab create --no-focus >/dev/null 2>&1 || true
+        wait "$subscriber" 2>/dev/null
+        echo "exit=$?" >>"$host_dir/events.jsonl"
+
+        # `--quiet-ack` must leave the acknowledgement out, and a stream with no
+        # matching event must still end cleanly on its timeout.
+        kraal_cli events --type pane.closed --quiet-ack --timeout 2 \
+            >"$host_dir/quiet.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/quiet.txt"
+        kraal_cli events --type nope.not_a_kind --count 1 --timeout 5 \
+            >"$host_dir/rejected.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/rejected.txt"
+        kraal_cli events >"$host_dir/no-type.txt" 2>&1
+        echo "exit=$?" >>"$host_dir/no-type.txt"
+        return 0
+    }
+    assert() {
+        check "the kind list comes from the running herdr, not this binary" \
+            "$(grep -qx 'pane.created' "$host_dir/kinds.txt" \
+                && grep -qx 'layout.updated' "$host_dir/kinds.txt" \
+                && echo 0 || echo 1)" \
+            "$(wc -l <"$host_dir/kinds.txt" | tr -d ' ') kinds"
+        check "the subscription is acknowledged before anything is triggered" \
+            "$(grep -q '"type":"subscription_started"' "$host_dir/events.jsonl" && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/events.jsonl")"
+        check "creating a pane produces a pane_created frame" \
+            "$(grep -q '"event":"pane_created"' "$host_dir/events.jsonl" && echo 0 || echo 1)" \
+            "$(grep -o '"pane_id":"[^"]*"' "$host_dir/events.jsonl" | head -1)"
+        check "the frame carries the pane the daemon created" \
+            "$(grep -q '"pane_id"' "$host_dir/events.jsonl" \
+                && grep -q '"workspace_id"' "$host_dir/events.jsonl" \
+                && echo 0 || echo 1)" \
+            "$(grep -c '"event"' "$host_dir/events.jsonl") event frames"
+        check "--quiet-ack suppresses the acknowledgement and exits cleanly" \
+            "$(grep -q 'exit=0' "$host_dir/quiet.txt" \
+                && ! grep -q subscription_started "$host_dir/quiet.txt" \
+                && echo 0 || echo 1)" \
+            "$(wc -c <"$host_dir/quiet.txt" | tr -d ' ') bytes"
+        check "an unknown kind is rejected by the daemon, in its own words" \
+            "$(grep -q '"error"' "$host_dir/rejected.txt" && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/rejected.txt")"
+        check "events without --type says where to find the kinds" \
+            "$(grep -q 'exit=1' "$host_dir/no-type.txt" \
+                && grep -q 'events --list' "$host_dir/no-type.txt" \
+                && echo 0 || echo 1)" \
+            "$(head -1 "$host_dir/no-type.txt")"
+    }
+}
+
 # Split Down: proves the direction is honoured rather than hard-coded.
 # Pins the theme, like `case_drag_divider_app_setup`: the divider assertion below
 # compares against `paneGapColor`, which only means something if the theme is known.
@@ -5270,7 +5348,7 @@ print(round(json.load(sys.stdin)["result"]["layout"]["splits"][0]["ratio"], 3))
     }
 }
 
-all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
+all_cases() { echo "click-coordinates split-right menu-split client-actions capture-formats run-wait events-json split-down close-pane close-workspace-group paste drag-divider drag-divider-vertical drag-jitter scrollbar copy-mode popup scroll mouse-tui mouse-tui-row machines-roster machines-switch machines-controls machines-reachability context-menu-remote session-name-budget key-named kitty-graphics sidebar-sections sidebar-split-geometry sidebar-divider-drag sidebar-independent-scroll sidebar-footer-attention sidebar-collapse sidebar-agent-sort sidebar-footer-controls sidebar-priority-across-machines notification-posted theme-applied theme-auto-switch status-change-resorts"; }
 
 # Both sidebar panes are visible at once (issue #115).
 #

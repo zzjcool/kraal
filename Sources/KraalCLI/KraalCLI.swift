@@ -32,6 +32,7 @@ struct Options {
     var timeout: Double = 20
     var capture = CaptureOptions()
     var run = RunOptions()
+    var events = EventOptions()
 
     enum Command {
         case probe
@@ -43,6 +44,7 @@ struct Options {
         case paste
         case capture
         case run
+        case events
     }
 }
 
@@ -130,7 +132,12 @@ func parse() -> Options {
         case "--rows":
             options.rows = nextValue().flatMap(UInt16.init) ?? options.rows
         case "--timeout":
+            // One flag, three meanings: the overall probe budget, how long `run
+            // --wait` waits, and how long `events` streams. Parsed here because the
+            // alternative was three near-identical flags that would drift.
             options.timeout = nextValue().flatMap(Double.init) ?? options.timeout
+            options.run.timeout = options.timeout
+            options.events.timeout = options.timeout
         case "--param":
             let raw = nextValue() ?? ""
             let parts = raw.split(separator: "=", maxSplits: 1).map(String.init)
@@ -152,7 +159,7 @@ func parse() -> Options {
             exit(0)
         default:
             if parseCommandWord(argument, options: &options) { continue }
-            _ = parseCaptureFlag(argument, nextValue: nextValue, options: &options)
+            _ = parseModeFlag(argument, nextValue: nextValue, options: &options)
         }
     }
     return options
@@ -174,15 +181,17 @@ func parseCommandWord(_ argument: String, options: inout Options) -> Bool {
     case "paste": options.command = .paste
     case "capture": options.command = .capture
     case "run": options.command = .run
+    case "events": options.command = .events
     default: return false
     }
     return true
 }
 
-/// Capture-only flags. Separate from `parse()` purely to keep that function's
+/// Flags that only one mode understands (`capture`, `run`, `events`). Separate from
+/// `parse()` purely to keep that function's
 /// branch count under the project's cyclomatic-complexity limit; the behaviour is
 /// the same as if they were inline.
-func parseCaptureFlag(
+func parseModeFlag(
     _ argument: String,
     nextValue: () -> String?,
     options: inout Options
@@ -197,6 +206,11 @@ func parseCaptureFlag(
     case "--cwd": options.run.cwd = nextValue() ?? options.run.cwd
     case "--split": options.run.split = nextValue() ?? options.run.split
     case "--output": options.run.output = nextValue() ?? options.run.output
+    case "--type":
+        if let kind = nextValue() { options.events.types.append(kind) }
+    case "--count": options.events.count = nextValue().flatMap(Int.init) ?? options.events.count
+    case "--list": options.events.list = true
+    case "--quiet-ack": options.events.includeAck = false
     default: return false
     }
     return true
@@ -218,6 +232,8 @@ func printUsage() {
                                        so it needs no Kraal window
       kraal run [--wait] -- CMD …     start CMD in a new tab (or --split right|down)
                                        and, with --wait, exit with its status
+      kraal events --type T …         stream daemon events as JSON lines
+                                       (`kraal events --list` prints the kinds)
 
     TARGET
       --socket <path>     unix socket (default: this Mac's herdr-client.sock)
@@ -245,6 +261,14 @@ func printUsage() {
       --wait              block until the command exits, then exit with its status
       --output <fmt>      text | json (default text)
       --timeout <seconds> how long --wait waits (default 120)
+
+    EVENTS
+      --type <kind>       subscription kind, repeatable (see --list)
+      --list              print the kinds the running herdr offers
+      --count <n>         stop after n events (default: never)
+      --timeout <seconds> stop after this long (default: never)
+      --socket <path>     daemon socket (default: $HERDR_SOCKET_PATH or `herdr status`)
+      --quiet-ack         do not print the subscription acknowledgement
 
     CAPTURE
       --pane <pane_id>    pane to capture (default: $HERDR_PANE_ID)
@@ -346,6 +370,9 @@ struct KraalCLI {
         if options.command == .run {
             runCommand(options)
         }
+        if options.command == .events {
+            runEvents(options)
+        }
         let target: HerdrTarget
         do {
             target = try resolveTarget(options)
@@ -429,7 +456,7 @@ struct KraalCLI {
         case .keys, .sendText, .paste:
             await runInput(options: options, connection: connection)
 
-        case .capture, .run:
+        case .capture, .run, .events:
             break   // handled before connecting; see `main`
         }
     }
