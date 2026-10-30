@@ -459,6 +459,50 @@ container_origin() {
     printf '%s' "$line" | sed -n 's/.*containerOrigin=\(-\{0,1\}[0-9]*\),\(-\{0,1\}[0-9]*\).*/\1 \2/p'
 }
 
+# The screen point at the centre of a pane's terminal cell.
+#
+# Everything comes from the app's own `layout: container=` line and the daemon's pane
+# rects: the daemon says which cells belong to a pane (`WxH@x,y` — the terminal *inside*
+# its allocation, so the border is already excluded), the app says where the container
+# sits and how big a cell is.
+#
+# It exists because "the row the program received" could not be checked without it. The
+# older `pane_body_point` derives the container origin as `window - container`, which is
+# 25 pt wrong here (the container is not flush to the bottom) and made a correct mapping
+# look three rows off.
+pane_cell_point() {
+    local pane_id="$1" row="$2" column="$3"
+    local window_text layout_text container
+    window_text=$(driver window 2>/dev/null) || return 1
+    layout_text=$(pane_layout 2>/dev/null) || return 1
+    container=$(collect_app_log_tail 2>/dev/null | grep -a 'layout: container=' | tail -1)
+    [ -n "$container" ] || { echo "no 'layout: container=' line" >&2; return 1; }
+    python3 -c '
+import json, re, sys
+
+pane_id, row, column = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+window_text, layout_text, line = sys.argv[4], sys.argv[5], sys.argv[6]
+
+win = re.search(r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", window_text)
+origin = re.search(r"containerOrigin=(-?\d+),(-?\d+)", line)
+cell = re.search(r"cell=([\d.]+)x([\d.]+)", line)
+if not (win and origin and cell):
+    sys.exit(1)
+win_x, win_y = int(win.group(1)), int(win.group(2))
+cont_x, cont_y = int(origin.group(1)), int(origin.group(2))
+cell_w, cell_h = float(cell.group(1)), float(cell.group(2))
+
+match = re.search(r"(?:^|\s)" + re.escape(pane_id) + r"=(\d+)x(\d+)@(\d+),(\d+)", line)
+if not match:
+    sys.exit(1)
+_x, _y, term_x, term_y = (int(v) for v in match.groups())
+
+x = win_x + cont_x + (term_x + column - 0.5) * cell_w
+y = win_y + cont_y + (term_y + row - 0.5) * cell_h
+print(f"{int(x)},{int(y)}")
+' "$pane_id" "$row" "$column" "$window_text" "$layout_text" "$container"
+}
+
 # ---------------------------------------------------------------- lifecycle
 
 cmd_probe() {
@@ -3092,7 +3136,7 @@ case_machines_roster_app_setup() {
 # sent correctly and ignored by the program all look like "clicking does nothing".
 # So the program itself records the bytes it received, and the assertion is on
 # those bytes.
-case_mouse_tui() {
+case_mouse_tui_row() {
     requires() { echo focus; }
     fixture() {
         # A fresh daemon has no panes at all (`daemon up, panes=0`), so the
@@ -3157,29 +3201,26 @@ case_mouse_tui() {
     }
     action() {
         driver window >"$host_dir/window.txt" 2>&1
-        # The AX tree, because the window frame is not the surface: the sidebar is on
-        # the left and the title bar above, so mapping cell space onto the *window*
-        # put the click in the sidebar and the program correctly saw nothing.
         driver ax --json --depth 30 >"$host_dir/ax.json" 2>&1
-        local point
-        point=$(pane_body_point "$(cat "$host_dir/target-pane.txt")") || {
-            echo "cannot compute a point inside the target pane"
-            return 1
-        }
-        printf '%s' "$point" >"$host_dir/click-point.txt"
-        # A real click, not AXPress: only a synthetic event exercises the mouse path
-        # (AXPress goes through the accessibility action, which panes do not have).
-        driver click --at-screen "$point" >"$host_dir/click.txt" 2>&1
-        echo "exit=$?" >>"$host_dir/click.txt"
-        sleep 1
-        driver scroll --at-screen "$point" --lines 3 >"$host_dir/scroll.txt" 2>&1
-        echo "exit=$?" >>"$host_dir/scroll.txt"
-        sleep 2
+        local target
+        target=$(cat "$host_dir/target-pane.txt")
+        # Three clicks at three *known* rows, so the row the program is told can be
+        # compared with the row the pointer was on. The old case clicked the pane's
+        # centre, which only proves "some row inside the pane".
+        local wanted_rows="1 8 15" row point_text
+        : >"$host_dir/expected-rows.txt"
+        for row in $wanted_rows; do
+            point_text=$(pane_cell_point "$target" "$row" 20) || {
+                echo "cannot compute a point for row $row"
+                return 1
+            }
+            printf '%s\n' "$row" >>"$host_dir/expected-rows.txt"
+            printf '%s\n' "$point_text" >>"$host_dir/row-points.txt"
+            driver click --at-screen "$point_text" >>"$host_dir/click.txt" 2>&1
+            sleep 0.5
+        done
     }
     assert() {
-        # The probe writes in the guest under the vm backend, and the artefact
-        # collection that would bring that file to the host runs *after* `assert`.
-        # So the file has to be read where it is, not after it has been copied.
         local events="$host_dir/mouse-events.txt"
         if [ "$BACKEND" = "vm" ]; then
             tart exec -i "$VM" /bin/bash -lc "cat $dir/mouse-events.txt 2>/dev/null" \
@@ -3187,63 +3228,8 @@ case_mouse_tui() {
         else
             cp "$dir/mouse-events.txt" "$events" 2>/dev/null
         fi
-        if [ ! -s "$events" ]; then
-            check "program received a mouse press" 1 \
-                "no bytes at all: the event never reached the program"
-            return 1
-        fi
-        local parsed
-        parsed=$(
-            python3 - "$events" <<'PYEOF'
-import ast
-import sys
-
-press = release = wheel = 0
-for line in open(sys.argv[1], encoding="utf-8"):
-    line = line.strip()
-    if not line:
-        continue
-    data = ast.literal_eval(line)
-    # SGR mouse reports: ESC [ < button ; column ; row M|m
-    # `M` is press (or wheel), `m` is release. Bit 6 of the button (>= 64) means
-    # the wheel, which is how a program tells a scroll from a click.
-    for chunk in data.split(b"\x1b[<")[1:]:
-        if not chunk:
-            continue
-        final = chunk[-1:]
-        if final not in (b"M", b"m"):
-            continue
-        try:
-            button = int(chunk[:-1].split(b";")[0])
-        except ValueError:
-            continue
-        if button >= 64:
-            wheel += 1
-        elif final == b"M":
-            press += 1
-        else:
-            release += 1
-print(f"press={press} release={release} wheel={wheel}")
-sys.exit(0 if press >= 1 and release >= 1 else 1)
-PYEOF
-        )
-        check "program received a press and its release" "$?" "$parsed"
-        local wheel_only
-        wheel_only=$(printf '%s' "$parsed" | sed -n 's/.*wheel=\([0-9]*\)/\1/p')
-        check "program received a wheel report" \
-            "$([ "${wheel_only:-0}" -ge 1 ] && echo 0 || echo 1)" "wheel=$wheel_only"
-        # The pair must be one click, not several: the drag-jitter filter exists so a
-        # stationary click is not reported as a drag (issue #95).
-        local press_only
-        press_only=$(printf '%s' "$parsed" | sed -n 's/^press=\([0-9]*\).*/\1/p')
-        check "a stationary click is one press, not a drag storm" \
-            "$([ "${press_only:-99}" = "1" ] && echo 0 || echo 1)" "press=$press_only"
-        # And the report is in the *target pane's* own coordinates. A router that
-        # picked the neighbour would send bytes too — same format, same count, a row
-        # measured against the wrong pane — so counting alone would pass while the
-        # click landed somewhere else. The row has to fit the pane it was aimed at.
-        local target_row
-        target_row=$(python3 - "$events" <<'PYEOF'
+        local rows wanted
+        rows=$(python3 - "$events" <<'PYEOF'
 import ast
 import sys
 
@@ -3253,43 +3239,27 @@ for line in open(sys.argv[1], encoding="utf-8"):
     if not line:
         continue
     for chunk in ast.literal_eval(line).split(b"\x1b[<")[1:]:
-        if not chunk or chunk[-1:] not in (b"M", b"m"):
+        if not chunk or chunk[-1:] != b"M":
             continue
         try:
-            parts = chunk[:-1].split(b";")
-            rows.append(int(parts[2]))
+            pieces = chunk[:-1].split(b";")
+            if int(pieces[0]) >= 64:
+                continue          # wheel
+            rows.append(int(pieces[2]))
         except (IndexError, ValueError):
             continue
-print(max(rows) if rows else -1)
+print(",".join(str(r) for r in rows))
 PYEOF
 )
-        local pane_rows
-        pane_rows=$(pane_layout 2>/dev/null | python3 -c '
-import json, sys
-target = sys.argv[1]
-layout = json.load(sys.stdin)["result"]["layout"]
-for pane in layout["panes"]:
-    if pane["pane_id"] == target:
-        print(pane["rect"]["height"])
-        break
-' "$(cat "$host_dir/target-pane.txt")")
-        # And the click focused the pane it landed in. Asserted against the daemon,
-        # not the app's own state: focus is the daemon's to decide, and the whole
-        # point is that a click on an unfocused pane goes nowhere without this.
-        local focused_now
-        focused_now=$(herdr pane list 2>/dev/null | python3 -c '
-import json, sys
-for pane in json.load(sys.stdin)["result"]["panes"]:
-    if pane.get("focused"):
-        print(pane["pane_id"])
-        break
-')
-        check "the click focused the pane it landed in" \
-            "$([ "$focused_now" = "$(cat "$host_dir/target-pane.txt")" ] && echo 0 || echo 1)" \
-            "focused=$focused_now target=$(cat "$host_dir/target-pane.txt")"
-        check "the click reported a row inside the target pane" \
-            "$([ "${target_row:-0}" -ge 0 ] && [ "${target_row:-99}" -lt "${pane_rows:-1}" ] && echo 0 || echo 1)" \
-            "row=$target_row of $pane_rows"
+        printf '%s\n' "$rows" >"$host_dir/received-rows.txt"
+        wanted=$(paste -sd, - <"$host_dir/expected-rows.txt")
+        # Zero tolerance: the pointer was placed at the centre of a specific cell, so the
+        # program has to be told that cell. A mapping that is off by a border row, a
+        # divider, a tab bar or a backing scale passes every count-based check and fails
+        # only here.
+        check "the program was told the row the pointer was on" \
+            "$([ -n "$rows" ] && [ "$rows" = "$wanted" ] && echo 0 || echo 1)" \
+            "clicked rows $wanted, program got ${rows:-nothing}"
     }
 }
 
