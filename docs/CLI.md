@@ -51,7 +51,8 @@ Rex（Superlogical 的终端应用）的 CLI 是「一个 agent 能不能独自�
 | **客户端动作目录** | **无**（ax 只能盲点） | **本轮已补**：`kraal-gui actions` |
 | **按名调用客户端动作** | **无** | **本轮已补**：`kraal-gui do` |
 | `whoami --json` / 位置上下文 | herdr 在 pane 里注入了 `HERDR_*` 环境变量；Kraal 无自己的 | 低（herdr 已覆盖大半） |
-| `__internal skill` | 无 | 中：`docs/` 是给人看的，agent 要的是「命令 + 何时用」 |
+| `client ls` | 无 | **已补**：`kraal-gui clients --json` + `--client PID` |
+| `__internal skill` | 无 | **已补**：`kraal-gui skill`（从命令表生成） |
 | block 类型 / Lua / init.lua / 浮动层 / Tailscale | 无 | 不抄：herdr 没有类型化 block，Kraal 是纯客户端 |
 
 ## 4. 本轮落地：客户端动作（`actions` / `do`）
@@ -93,10 +94,31 @@ kraal-gui do --path "View > Split Right"   # 同上，菜单名写错就拒绝
 - **键位没导出**。Rex 有 `keymap`；Kraal 的 `AXMenuItemCmdChar/CmdModifiers` 语义没实测过，
   宁可不给也不要写错（`docs/DEBUGGING.md` 的「探针要测对对象」）。
 
+## 4b. 第二个切片：`help` / `skill` / `clients`
+
+```bash
+kraal-gui help --json          # 19 条命令 + 退出码表，机器可读
+kraal-gui help --command do    # 单条用法
+kraal-gui skill                # agent 指南：目标划分、动作发现、命令表、六条诚实守则
+kraal-gui clients --json       # 正在跑的实例（pid / 窗口数），配合 actions|do --client PID
+```
+
+三件事都是同一动机：**清单只能有一份**。用法表从 `main.swift` 里的一段字符串搬到
+`CommandSpec` 表，`help`、`skill`、`--help` 全部由它渲染——Rex 的 `__internal skill`
+值得借鉴的不是那份 468 行文档本身，而是「文档由工具生成」这条不变量。`skill` 里唯一
+与 app 状态有关的一段（动作目录）是**现场读的**，没装 app 时会明说没读到，而不是印一段
+固定文本冒充。
+
+`clients` 补的是「同时有几个 Kraal 在跑」这个洞：`find` 会静默挑窗口最多的那个，而调用方
+有时指的是某个具体的实例（dev build / VM build / `make run` 三个并存）。
+
+`./Scripts/gui.sh run client-actions` 现在 9 条断言（含 `help --json` 覆盖全部命令、
+`clients` 的 pid 与窗口 owner 一致、`skill` 读到活目录且带守则）。注入验证：把
+`liveActionReport` 改成返回固定字符串 → `✗ skill reads the live action catalog`。
+
 ## 5. 下一步（按价值排序）
 
-1. **`kraal-gui actions` 的兄弟：`kraal __internal skill`**。给 agent 一份「怎么用 herdr +
-   kraal 干活」的自描述指南，内容从真实的 `actions` / `--help` 生成，避免手写文档过期。
+1. ~~`skill` 自描述指南~~（§4b 已做）
 2. **`capture --format=html`**。Kraal 已经有每格的样式（`PaneCellCanvas` / `SurfaceANSIRenderer`），
    把它渲染成 HTML 是 Rex 没有、而 Kraal 结构上能做到的事。
 3. **`run --wait` 拿退出码**：`herdr pane run` 有进程信息，缺「等结束 + 返回码」的动词。
