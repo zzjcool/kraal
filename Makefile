@@ -38,7 +38,7 @@ SESSION ?= live
 # renders and is still capturable. Set FOCUS=0 to let it come to the front.
 FOCUS ?= 1
 
-.PHONY: help run app build driver test lint shell-lint verify clean \
+.PHONY: help run run-hc app build driver test lint shell-lint verify clean \
         check-env socket-status logs stop gui-list gui-run gui-verify vm
 
 ## ---------------------------------------------------------------- 默认
@@ -46,6 +46,7 @@ FOCUS ?= 1
 help: ## 显示可用目标
 	@echo "真实环境（连你自己的 daemon）:"
 	@echo "  make run            构建 + 打包 + 启动（连真实 daemon）"
+	@echo "  make run-hc         同上，但连 herdr-core（M0：终端列表 + 一个 pane）"
 	@echo "  make run FOCUS=0    同上，但让窗口到前台（会抢焦点）"
 	@echo "  make socket-status  显示连的是哪个 socket、是否活着"
 	@echo "  make logs           跟踪 app 日志"
@@ -69,6 +70,15 @@ help: ## 显示可用目标
 # script-wrapped app reports -1. That breaks anything that finds the app by pid
 # (`kraal-gui window` did). Launching the real binary directly keeps the pid
 # honest; the launcher's env defaults are passed explicitly below instead.
+run-hc: app ## 连本机 herdr-core 启动（M0 窗口）
+	@echo ""
+	@echo "==> 启动 Kraal（herdr-core 模式）"
+	@echo "    KRAAL_HC=1，socket 由 HcPaths 解析（HC_SESSION / HC_SOCKET / XDG）"
+	@echo ""
+	@KRAAL_HC=1 \
+	 KRAAL_DEV_BACKGROUND="$(FOCUS)" \
+	 $(APP)/Contents/MacOS/KraalMac-bin
+
 run: check-env app ## 连真实 daemon 启动（默认）
 	@echo ""
 	@echo "==> 启动 Kraal，连 $(SOCKET)"

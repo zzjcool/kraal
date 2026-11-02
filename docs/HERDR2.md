@@ -163,6 +163,13 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 重连重放。判据：`hc run --bg 'printf …'` 起的终端在 Kraal 窗口里显示正确，
 改窗口大小后 `hc get` 的 `cols/rows` 跟着变。
 
+> **落地记录（2026-11-02）**：协议层（#223）、attach/Ghostty/窗口（#224）已完成。
+> `make run-hc` 打开 M0 窗口；实测核心侧 `cols/rows` 从 attach 的
+> 80×24 变成窗口的 98×38，窗口截图里能看到核心重放的 `APP-MODE`。
+> **cell→ANSI 删除没有随 #224 做**：旧窗口仍在使用那条链，删了 main 会红。
+> 删除改由 #234 在旧窗口退场时一次完成——这与「不双栈」不矛盾：两条路径是
+> 两个入口（`KRAAL_HC=1` 与否），不是同一条路径上的兼容分支。
+
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。
 判据：在官方 `herdr-app` 里建两个 space 三个 tab，Kraal 启动后原样显示；

@@ -89,6 +89,26 @@ public final class HcClient: @unchecked Sendable {
         return try await connection.call(method, params: params)
     }
 
+    /// Attaches to a terminal on the current link.
+    ///
+    /// A reconnect drops every channel, so the caller must be ready to attach
+    /// again: the streams are not restored behind its back.
+    public func attach(
+        terminal: String,
+        options: HcAttachOptions = HcAttachOptions(),
+        handlers: HcAttachHandlers
+    ) async throws -> HcAttachStream {
+        guard let connection = currentConnection() else {
+            throw HcConnectionError.notConnected
+        }
+        return try await HcAttachStream.attach(
+            connection,
+            terminal: terminal,
+            options: options,
+            handlers: handlers
+        )
+    }
+
     private func currentConnection() -> HcConnection? {
         stateLock.lock()
         defer { stateLock.unlock() }

@@ -222,6 +222,7 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 
 ```bash
 make run              # 构建 + 打包 + 启动，连你自己的 daemon
+make run-hc           # 同上，但连本机 herdr-core（M0：终端列表 + 一个 pane）
 make run FOCUS=0      # 同上，但让窗口到前台（会抢焦点）
 make socket-status    # 连的是哪个 socket
 make logs             # 跟日志
