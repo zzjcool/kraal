@@ -16,6 +16,7 @@
 
 import Foundation
 import Testing
+import KraalSocket
 
 @testable import KraalTransport
 

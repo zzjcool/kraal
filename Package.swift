@@ -33,13 +33,25 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
+            name: "KraalSocket",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .target(
             name: "KraalTransport",
-            dependencies: ["KraalProtocol"],
+            dependencies: ["KraalProtocol", "KraalSocket"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
             name: "KraalClient",
-            dependencies: ["KraalProtocol", "KraalTransport"],
+            dependencies: ["KraalProtocol", "KraalTransport", "KraalSocket"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // herdr-core (`hc`) client: JSON-RPC over the core socket, framed streams
+        // after `hello`. Deliberately independent of the Herdr 1 modules above;
+        // they are deleted once the migration lands (docs/HERDR2.md).
+        .target(
+            name: "KraalHC",
+            dependencies: ["KraalSocket"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
@@ -91,6 +103,11 @@ let package = Package(
             name: "KraalProtocolTests",
             dependencies: ["KraalProtocol"],
             resources: [.copy("Fixtures")],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "KraalHCTests",
+            dependencies: ["KraalHC"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(

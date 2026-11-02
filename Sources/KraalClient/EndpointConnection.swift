@@ -9,6 +9,7 @@
 // the UI is delivered as a `ConnectionEvent`.
 
 import Foundation
+import KraalSocket
 import KraalProtocol
 import KraalTransport
 
