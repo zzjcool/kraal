@@ -116,7 +116,7 @@ struct LiveHcPaneTests {
         #expect(address.isEmpty == false)
 
         let paths = try HcPaths.resolve(environment: env.variables)
-        let connection = try await HcConnection.open(path: paths.socket)
+        let connection = try await openTestConnection(path: paths.socket)
         defer { connection.close() }
 
         let session = try await HcTerminalSession.open(
@@ -185,7 +185,7 @@ struct LiveHcPaneTests {
         var address = ""
         _ = try await waitForTerminal(binary, env: env, address: &address)
         let paths = try HcPaths.resolve(environment: env.variables)
-        let connection = try await HcConnection.open(path: paths.socket)
+        let connection = try await openTestConnection(path: paths.socket)
         defer { connection.close() }
         let session = try await HcTerminalSession.open(connection: connection, terminal: address)
         defer { session.close() }

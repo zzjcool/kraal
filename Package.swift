@@ -123,6 +123,7 @@ let package = Package(
         .testTarget(
             name: "KraalHCTests",
             dependencies: ["KraalHC"],
+            resources: [.copy("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(

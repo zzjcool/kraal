@@ -51,7 +51,7 @@ struct LiveCoreSmokeTests {
             let paths = try HcPaths.resolve(environment: environment)
             try Self.waitForSocket(paths.socket)
 
-            let connection = try HcConnection.open(path: paths.socket)
+            let connection = try await openTestConnection(path: paths.socket)
             defer { connection.close() }
 
             #expect(connection.hello.generation == HcProtocol.generation)

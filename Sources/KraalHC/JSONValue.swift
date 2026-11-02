@@ -53,6 +53,11 @@ public enum JSONValue: Sendable, Equatable {
         return Int64(value)
     }
 
+    public var uint64Value: UInt64? {
+        guard let value = int64Value, value >= 0 else { return nil }
+        return UInt64(value)
+    }
+
     public var doubleValue: Double? {
         if case let .number(value) = self { return value }
         return nil

@@ -658,3 +658,22 @@ Swift 的 `Character` 是**字素簇**，`"\r\n"` 是一个字符。所以那段
 `gui.sh` 的 vm 后端还会把参数拼进 `tart exec bash -lc "…"` 再解析一次。`printf '\033[31mX…'`
 经过这两层变成 `zsh: bad pattern: 033[31mX033[0m`。要测「终端里有颜色」，选一个**不需要
 引号**的命令（`ls -G /`），比研究几层引用更省时间。
+
+## §18 关闭连接时不能丢掉还没注册通道的帧（2026-11-02）
+
+`terminal.attach` 的回复和一帧 CLOSE 可以先后到达，而调用方在**回复之后**才拿到
+channel id 去注册。读线程若在注册前读到 CLOSE，会把它放进 `earlyFrames`；如果这时
+对端刚好关闭、`finish` 把 `earlyFrames` 清空，那么随后注册的通道永远等不到结束——
+测试里表现为 15 秒超时，真实窗口里是 pane 永远停在最后一帧。
+
+同一轮还有两个同源问题：
+
+- `finish` 由**写失败**触发时，会比读线程先处理完，导致对端已发的 CLOSE（带
+  exit_code）被当成链路丢失。写失败只记录原因，让读线程读到 EOF；1 秒看门狗只负责
+  半开连接。
+- `hello` 回复和第一帧可能在同一次 `read` 里到达；读线程先 `read` 再解码
+  `initialBytes`，对端已关闭时 `read` 返回 nil，缓冲里的帧被丢掉。
+
+三条都遵守同一个顺序：**先解码已到的字节，再处理结束**；结束不能清掉尚未交付的
+字节。回归测试在 `HcConnectionTests`（late registration / handshake coalescing）与
+`HcAttachStreamTests`；`HcLateChannelTests/lateAttachClose` 在修复前会稳定超时。

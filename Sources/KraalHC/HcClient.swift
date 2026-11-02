@@ -89,6 +89,18 @@ public final class HcClient: @unchecked Sendable {
         return try await connection.call(method, params: params)
     }
 
+    /// Subscribes to events on the current link. A reconnect drops the
+    /// channel; subscribe again and replace the store with the new snapshot.
+    public func subscribeEvents(
+        filter: HcEventFilter = HcEventFilter(),
+        handlers: HcEventHandlers
+    ) async throws -> HcEventSubscription {
+        guard let connection = currentConnection() else {
+            throw HcConnectionError.notConnected
+        }
+        return try await HcEventSubscription.subscribe(connection, filter: filter, handlers: handlers)
+    }
+
     /// Attaches to a terminal on the current link.
     ///
     /// A reconnect drops every channel, so the caller must be ready to attach
@@ -135,9 +147,17 @@ public final class HcClient: @unchecked Sendable {
             eventContinuation.yield(.connecting(attempt: attempt))
 
             do {
-                let opened = try await Task.detached(priority: .userInitiated) { [path] in
-                    try HcConnection.open(path: path)
-                }.value
+                let opened = try await withCheckedThrowingContinuation { continuation in
+                    // The handshake blocks; keep it off the cooperative pool so
+                    // it cannot starve the tasks waiting for this one.
+                    DispatchQueue.global(qos: .userInitiated).async { [path] in
+                        do {
+                            continuation.resume(returning: try HcConnection.open(path: path))
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
 
                 if isStopped() {
                     opened.close()

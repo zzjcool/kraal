@@ -81,6 +81,7 @@ public final class HcConnection: @unchecked Sendable {
     private var earlyFrames: [UInt32: [HcFrame]] = [:]
     private var earlyBytes: [UInt32: Int] = [:]
     private var retiredChannels: Set<UInt32> = []
+    private var writeFailureReason: String?
     private var nextRequestID: Int64 = 2
     private var nextChannelID: UInt32 = 1
     private var isClosed = false
@@ -184,19 +185,29 @@ public final class HcConnection: @unchecked Sendable {
     /// `terminal.attach`, the `channel` field of the reply).
     public func openChannel(id: UInt32, handlers: HcStreamHandlers) -> HcChannel {
         let channel = HcChannel(id: id, connection: self, handlers: handlers)
-        var early: [HcFrame] = []
-        stateLock.lock()
-        if let frames = earlyFrames.removeValue(forKey: id) {
-            early = frames
+        // Replay the frames that arrived before registration *before* publishing
+        // the channel. Publishing first let the reader deliver a later CLOSE
+        // while this thread was still replaying DATA; `deliverClose` marks the
+        // channel closed and the replay then dropped those bytes. The loop
+        // also catches frames that arrive during a replay, which go back into
+        // `earlyFrames`.
+        while true {
+            stateLock.lock()
+            let early = earlyFrames.removeValue(forKey: id) ?? []
             earlyBytes.removeValue(forKey: id)
-        }
-        channels[id] = channel
-        stateLock.unlock()
+            let done = early.isEmpty
+            let wasClosed = isClosed
+            if done, !wasClosed { channels[id] = channel }
+            stateLock.unlock()
 
-        for frame in early {
-            deliver(frame: frame, to: channel)
+            if done {
+                if wasClosed { channel.deliverClose(reason: nil) }
+                return channel
+            }
+            for frame in early {
+                deliver(frame: frame, to: channel)
+            }
         }
-        return channel
     }
 
     /// A channel id for callers that create the stream themselves (tests, future
@@ -258,6 +269,18 @@ public final class HcConnection: @unchecked Sendable {
             decoder.append(initialBytes)
         }
         while true {
+            // Decode what is buffered *before* reading. The hello reply and the
+            // first frames can arrive in one read; when the core then closes,
+            // `socket.read()` is nil and those frames must not be dropped with
+            // it. (Under load this lost the first event notification.)
+            do {
+                while let frame = try decoder.next() {
+                    handle(frame: frame)
+                }
+            } catch {
+                finish(reason: "\(error)")
+                return
+            }
             let chunk: Data?
             do {
                 chunk = try socket.read()
@@ -270,14 +293,6 @@ public final class HcConnection: @unchecked Sendable {
                 return
             }
             decoder.append(chunk)
-            do {
-                while let frame = try decoder.next() {
-                    handle(frame: frame)
-                }
-            } catch {
-                finish(reason: "\(error)")
-                return
-            }
         }
     }
 
@@ -429,8 +444,32 @@ public final class HcConnection: @unchecked Sendable {
         do {
             try socket.write(data)
         } catch {
-            finish(reason: "write failed: \(error)")
+            noteWriteFailure(error)
             throw HcConnectionError.socket("\(error)")
+        }
+    }
+
+    /// A failed write must not outrun the reader.
+    ///
+    /// The peer often sends its CLOSE (with the exit record) and then goes away;
+    /// our next credit hits a dead pipe. Finishing here would deliver a nil
+    /// reason to every channel before the reader had processed that CLOSE, and
+    /// the pane would call a clean exit a lost link. Record the failure and let
+    /// the reader reach EOF, which finishes with the frames it already has. The
+    /// watchdog only exists for a half-open connection the reader cannot leave.
+    private func noteWriteFailure(_ error: Error) {
+        let reason = "write failed: \(error)"
+        stateLock.lock()
+        let first = writeFailureReason == nil
+        if first { writeFailureReason = reason }
+        stateLock.unlock()
+        guard first else { return }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let reason = self.writeFailureReason
+            self.stateLock.unlock()
+            self.finish(reason: reason)
         }
     }
 
@@ -462,8 +501,10 @@ public final class HcConnection: @unchecked Sendable {
         pending.removeAll()
         let openChannels = channels
         channels.removeAll()
-        earlyFrames.removeAll()
-        earlyBytes.removeAll()
+        // Keep `earlyFrames`: a caller can register its channel after the core
+        // has already written to it and gone away. Dropping them here lost a
+        // CLOSE that arrived before the attach reply was registered, and the
+        // pane waited forever for an end that had already been sent.
         retiredChannels.removeAll()
         cancelledIDs.removeAll()
         stateLock.unlock()
