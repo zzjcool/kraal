@@ -134,7 +134,7 @@ func commandSkill(_ args: Arguments) -> Never {
     lines.append("- `docs/RUNNING.md` — from clone to a verified UI change")
     lines.append("- `docs/AUTOMATION.md` — the GUI verification loop and its measurements")
     lines.append("- `docs/DEBUGGING.md` — ten ways a \"verified\" fix turned out not to be")
-    lines.append("- `docs/CLI.md` — what was borrowed from Rex and what is still missing")
+    lines.append("- `docs/archive/CLI.md` — what was borrowed from Rex and what is still missing")
     print(lines.joined(separator: "\n"))
     exit(Exit.success.rawValue)
 }

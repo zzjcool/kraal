@@ -6,7 +6,7 @@ Ghostty 1.1.x), which bundles the themes from
 
 Both are open source under the MIT licence; individual themes keep the authorship
 recorded in those repositories. Nothing here is copied from Rex — its theme catalogue
-was read to learn the *model* (`docs/REX-UI.md`), not to take the colours.
+was read to learn the *model* (`docs/archive/REX-UI.md`), not to take the colours.
 
 Format: Ghostty's own theme file format, one `key = value` per line:
 

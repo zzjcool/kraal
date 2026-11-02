@@ -153,7 +153,7 @@ daemon」——这是错的，沙箱里完全可以再起一个 session（见
 **代码符合了你的理解，而你的理解是错的。**
 
 **事故**：issue #20 第 7-7 条，daemon 发的 `ClientShellKeyboardReportAll`
-被丢弃。`docs/GAP-VS-HERDR.md` 那句写在先：
+被丢弃。`docs/archive/GAP-VS-HERDR.md` 那句写在先：
 
 > "Kitty keyboard 模式的 pane 是否拿到 key release 完全取决于这个开关。"
 

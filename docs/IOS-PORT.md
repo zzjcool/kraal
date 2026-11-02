@@ -5,6 +5,11 @@ SPDX-FileCopyrightText: 2026 zzjcool
 
 # 移植到 iOS：现状与要做的事
 
+> **状态提示（2026-11-02）：** 本文的编译矩阵与 Ghostty iOS 结论仍然有效；
+> 但「协议层」与「SSH 传输」两节的结论属于 Herdr 1（bincode endpoint）。
+> 切到 [herdr-core](HERDR2.md) 后，iOS 的远端传输改为 `ssh host hc connect`，
+> 协议层改为 JSON-RPC。读这两节时以 [HERDR2.md](HERDR2.md) 为准。
+
 > 实测记录：2026-10-27 · Xcode 27.1 / iOS SDK 27.1 / Swift 6.4
 >
 > 这份文档回答一个问题：**Kraal 现在离 iOS 上能跑差多远。**
@@ -107,7 +112,7 @@ KraalMac           AppKit files=4  total=4
 `UnixSocket.swift:121` 的 `Darwin.connect` 在 iOS 上还能编译，但只能连本机 UDS，
 连不到远端 —— iOS 也没有别的机器可连。
 
-**为什么这个缺口不难补**：协议当初就是为 iOS 选的路线。`docs/DESIGN.md:99` 记着
+**为什么这个缺口不难补**：协议当初就是为 iOS 选的路线。`docs/archive/DESIGN.md:99` 记着
 "两者都是 stdin/stdout 二进制管道，不涉及 stream-local forwarding，因此不需要
 `AllowStreamLocalForwarding`。**这是选择这条路线的关键原因之一**"。
 
@@ -140,7 +145,7 @@ macOS 版把认证整个交给系统 `ssh`：用户自己的 `~/.ssh/config`、`
 | passphrase 输入 | UI + Keychain | |
 | 首次连接的主机指纹确认 | 自己实现 `known_hosts` 等价物 | 这是安全问题，不能默认接受 |
 
-这不是编译适配，是产品级工作。`docs/DESIGN.md:115-118` 有初步推演
+这不是编译适配，是产品级工作。`docs/archive/DESIGN.md:115-118` 有初步推演
 （`-C` 压缩开关、`libssh2_keepalive_config` 对应 `ServerAliveInterval`），但
 **凭据部分文档里也没写**。
 
@@ -163,7 +168,7 @@ enable/disable、remove，以及 `machine status` 的连通性探测。落点：
 - **B** 第一版砍掉 Machines 面板，只支持"用户手填一条连接"。
   `ConnectionViews.swift:58` 已经有手填 host/user/port 的界面，够用。
 
-`docs/feasibility.md:20` 早就指出过这件事："所以 iOS App **不能『从服务器读到同一份
+`docs/archive/feasibility.md:20` 早就指出过这件事："所以 iOS App **不能『从服务器读到同一份
 machines 列表』**。要么让用户在 App 里自己填（等于重建一份目录）"。
 
 ### P2 · 约 4300 行 AppKit 专属 UI
@@ -190,7 +195,7 @@ machines 列表』**。要么让用户在 App 里自己填（等于重建一份�
 
 真正需要从零写的是两件：
 
-- `RootView` 的 iPhone 单列布局（`docs/GAP-VS-HERDR.md:399` 已经记着这项：
+- `RootView` 的 iPhone 单列布局（`docs/archive/GAP-VS-HERDR.md:399` 已经记着这项：
   "移动端单列布局（≤64 列）… macOS 不需要；iOS 阶段必须补"）。
 - `MachinesPanel` 的替代品（取决于 P1 的决策）。
 
@@ -296,9 +301,9 @@ Foundation，把 Ghostty 吐的字节翻译成语义事件。`PaneTerminal.swift
 `InMemoryTerminalSession(write:)` 已经把"Ghostty → `onInput`"接好了。
 
 而且 iOS 上这段**比 macOS 简单**：软键盘直接产生文本，走 `TextCommit` 就行，
-不需要字节级键位映射。`docs/DESIGN.md:716`："iOS 软键盘 → `TextCommit(String)`"。
+不需要字节级键位映射。`docs/archive/DESIGN.md:716`："iOS 软键盘 → `TextCommit(String)`"。
 
-IME 也有现成的：`docs/DESIGN.md:718` 记着 ghostty 的 `TerminalSurface` 已经处理
+IME 也有现成的：`docs/archive/DESIGN.md:718` 记着 ghostty 的 `TerminalSurface` 已经处理
 `preedit` / `markedText`。
 
 ### 4.2 鼠标/触摸 → daemon
@@ -370,7 +375,7 @@ SPM 没有条件 `exclude`。所以唯一的路是整文件 `#if os(macOS)`（�
 3. **iPhone 单列布局**：`RootView` 的 iOS 版。
 4. **软键盘 + 触摸手势**：软键盘基本白拿（§4.1），触摸要写 `sendMouse` 适配层。
 5. **P1 凭据界面 + Machines 面板决策**：产品决策先定，再动手。
-6. **iPad 分屏**：`docs/DESIGN.md:789` 有 iPhone/iPad/Mac 三栏对照表。
+6. **iPad 分屏**：`docs/archive/DESIGN.md:789` 有 iPhone/iPad/Mac 三栏对照表。
 7. **真机**：`docs/ENVIRONMENT.md:108` 记的阻塞项 —— Xcode 内登录 Apple ID，
    目前 0 个 provisioning profile。
 
@@ -382,20 +387,20 @@ SPM 没有条件 `exclude`。所以唯一的路是整文件 `#if os(macOS)`（�
 
 - **任何运行期行为**。§1.3 证明的是"能编过"，模拟器里起进程、连 daemon、
   渲染画面、收到键盘输入，全部**没跑过**。
-- **`libssh2` 单 session 多 channel 并发**。这是 `docs/DESIGN.md:1021` 待验证清单
+- **`libssh2` 单 session 多 channel 并发**。这是 `docs/archive/DESIGN.md:1021` 待验证清单
   的第 1 项，至今没做。它决定 iOS 是"1 次握手"还是"每个 pane 一次握手"，
   直接影响体验和远端负载。
 - **`herdr remote-client-bridge` 在 `libssh2` 的 exec channel 下能否正常拿到
   `herdr-remote-output-ready:1`**。`bridgeScript` 是纯 shell，理论上没问题，
   但没在 libssh2 上跑过。
-- **iOS 后台行为**。`docs/DESIGN.md:809` 记着"进后台约 5s 后挂起，
+- **iOS 后台行为**。`docs/archive/DESIGN.md:809` 记着"进后台约 5s 后挂起，
   `beginBackgroundTask` 实测 25–30s"，那是上游调研的数字，本仓库没复测。
 - **`UIGlassEffect`（iOS 26 SDK 符号）在 Xcode 27.1 / iOS 27.1 SDK 下的表现**。
   `docs/ENVIRONMENT.md:64-68` 说 Xcode 16.4 时代会编译失败、Xcode 27 已解除，
   但那条的是 libghostty 自己的 `TerminalInputAccessoryView.swift`，本仓库没碰过。
 - **签名与真机部署链路**。除了"证书在 keychain 里、2026-11-20 到期"
   （`docs/ENVIRONMENT.md:100-103`）之外全没走过。
-- **`libghostty` 静态链入的 LGPL `libintl`**（`docs/feasibility.md:84` 提到需审查
+- **`libghostty` 静态链入的 LGPL `libintl`**（`docs/archive/feasibility.md:84` 提到需审查
   版本）。App Store 分发的合规问题，没调研。
 
 ---
@@ -405,10 +410,10 @@ SPM 没有条件 `exclude`。所以唯一的路是整文件 `#if os(macOS)`（�
 | 文档 | 它说什么 | 本文档补什么 |
 | --- | --- | --- |
 | `docs/ROADMAP.md` §2 | iOS 阶段的任务清单（1–2 周量级） | **实测**这份清单的工作量；补上 SSH 凭据界面和 Machines 面板这两项（原清单没算） |
-| `docs/DESIGN.md` §6.5 / §7 | 触摸映射、尺寸协商、iPhone/iPad 布局 | 那些是设计；本文是"现在代码离那儿多远" |
+| `docs/archive/DESIGN.md` §6.5 / §7 | 触摸映射、尺寸协商、iPhone/iPad 布局 | 那些是设计；本文是"现在代码离那儿多远" |
 | `docs/ENVIRONMENT.md` §2 | 依赖的版本与坑（libghostty、libssh2） | 本文第 1 节是这些依赖第一次在 iOS 上被真的编过 |
-| `docs/feasibility*.md` | 立项期的可行性推演（2026-10） | 那份是"值不值得做"；本文是"做到哪一步了" |
-| `docs/GAP-VS-HERDR.md:399` | 移动端单列布局是已知缺口 | 把它归到 §2 P2 的 `RootView` |
+| `docs/archive/feasibility*.md` | 立项期的可行性推演（2026-10） | 那份是"值不值得做"；本文是"做到哪一步了" |
+| `docs/archive/GAP-VS-HERDR.md:399` | 移动端单列布局是已知缺口 | 把它归到 §2 P2 的 `RootView` |
 
 ---
 

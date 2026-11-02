@@ -45,7 +45,7 @@ check "${PIPESTATUS[0]}" "swift build"
 
 section "tests"
 # `swift test` is red on purpose: the tests ported from herdr / herdr-gpui /
-# rootshell pin behaviour this client does not have yet (docs/PORTED-TESTS.md).
+# rootshell pin behaviour this client does not have yet (docs/archive/PORTED-TESTS.md).
 # The gate is "everything outside that known list stays green", which is what
 # test-baseline.sh asserts — otherwise a real regression is indistinguishable
 # from the expected failures.
