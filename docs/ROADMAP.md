@@ -77,5 +77,12 @@ SPDX-FileCopyrightText: 2026 zzjcool
   `keep:true` 的终端丢程序后由 core 换新 shell，窗口自动重新 attach；`park`
   清标签把 pane 退回 worker。真实 core 的端到端测试 `LiveHcOwnershipTests`
   覆盖建 tab、split、关闭、外部收养、keep 重启与文档持久化。
-- **下一步**：#230（agents 侧栏 / OSC 7501 状态与通知），再做 #231 的命令面与 chrome。
+- **#230 agents 侧栏已完成**：状态只认 OSC 7501（`working`/`blocked|error`/`turn > seen`
+  的 `done`/其余 `idle`），子 agent 的 `done→idle`、`error→blocked`；pinned 置顶，
+  priority 与按 space 分组两种视图；子 agent 树、点击 peek（不是 focus）、
+  `herdr.seen` 只升不降且同 turn 只写一次、mark unread 写 `turn-1`；blocked 或
+  busy→quiet 且没在看时 toast + 系统通知 + 声音（子 agent 与无 space 终端不告警）。
+  `LiveHcAgentTests` 用真实 core + PTY 覆盖 working→blocked→done、seen、pin、
+  后台不写、子 agent peek 与 mark unread；截图见 `/tmp/km-ui-agent2/`。
+- **下一步**：#231 的命令面与 chrome。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

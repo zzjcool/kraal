@@ -200,6 +200,16 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > 的子终端），空间/标签组关闭先弹一次确认；`keep:true` 的终端丢程序后由 core
 > 原地换 shell，窗口重新 attach；`park` 清标签把 pane 退回 worker。真实 core
 > 的 `LiveHcOwnershipTests` 覆盖这条链路并检查共享文档已写回。
+>
+> #230 的 agents 侧栏：`HcAgentTracker` 只消费终端记录里的 `status`、`turn`、
+> `parent` 与 `herdr.seen`/`herdr.pinned`，不读屏幕文本；`done` 用
+> `turn > seen_turn` 判定，子 agent 的 `done`/`error` 先降为 `idle`/`blocked`。
+> priority 视图按 `blocked > done > working > idle`（父行取子树最高级），
+> 还有按 space 分组；pinned 置顶，子 agent 缩进并点击 peek。`herdr.seen` 只在
+> 窗口前台且该终端真正显示（当前 tab 的 pane 或 peek）时写，只升不降、同 turn
+> 一次；mark unread 写 `turn-1`。blocked 新出现或 busy→quiet 且没在看时给
+> toast/系统通知/声音，子 agent 与不属于任何 space 的终端不告警。旧
+> `KraalUI` 的 `SnapshotNotices`/agent 解析仍在旧窗口路径上，随 #234 一起删除。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

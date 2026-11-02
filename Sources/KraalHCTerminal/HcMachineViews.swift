@@ -10,63 +10,182 @@ struct HcSidebarView: View {
     @ObservedObject var model: HcWorkspaceModel
 
     var body: some View {
-        List(selection: Binding(
-            get: { model.selected },
-            set: { address in
-                guard let address else { return }
-                Task { await model.select(address) }
-            }
-        )) {
-            ForEach(model.groups) { group in
-                Section {
-                    ForEach(group.terminals) { terminal in
-                        terminalRow(terminal)
-                            .tag(terminal.address)
-                    }
-                    if group.terminals.isEmpty, group.machine != nil {
-                        Text(group.state?.isConnected == true ? "no terminals" : "no terminals yet")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                } header: {
-                    groupHeader(group)
+        VStack(spacing: 0) {
+            Picker("Agents", selection: $model.agentViewMode) {
+                ForEach(HcAgentViewMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
                 }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .onChange(of: model.agentViewMode) { _, _ in
+                model.refreshAgentGroups()
+            }
+            List(selection: Binding(
+                get: { model.selected },
+                set: { address in
+                    guard let address,
+                          let agent = model.agents.first(where: { $0.address == address })
+                    else { return }
+                    Task { await model.selectAgent(agent) }
+                }
+            )) {
+                ForEach(model.agentGroups) { group in
+                    Section {
+                        ForEach(group.agents) { agent in
+                            agentRow(agent)
+                                .tag(agent.address)
+                        }
+                        if group.agents.isEmpty, let machine = machine(for: group) {
+                            Text(machine.state.isConnected ? "no agents" : "no agents yet")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    } header: {
+                        groupHeader(group)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
     }
 
-    private func terminalRow(_ terminal: HcTerminal) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(terminal.name).lineLimit(1)
-                Spacer()
-                Text(terminal.address)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-            }
+    private func agentRow(_ agent: HcAgent) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(terminal.isLive ? Color.green : Color.secondary)
-                    .frame(width: 6, height: 6)
-                Text(terminal.agentState ?? (terminal.agent.isEmpty ? terminal.state : terminal.agent))
-                if !terminal.cwd.isEmpty {
-                    Text(terminal.cwd)
+                if agent.depth > 0 {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                statusIcon(agent.status)
+                Text(primaryLabel(agent))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .fontWeight(agent.isChild ? .regular : .medium)
+                if !secondaryLabel(agent).isEmpty {
+                    Text("· \(secondaryLabel(agent))")
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                }
+                if agent.pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 2)
+            }
+            HStack(spacing: 6) {
+                Text(agent.status.label)
+                    .foregroundStyle(statusColor(agent.status))
+                if agent.isChild {
+                    Text("sub-agent")
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+                if agent.status == .done {
+                    Text("turn \(agent.turn)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                } else if agent.since > 0 {
+                    Text(age(agent.since))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+        }
+        .padding(.leading, CGFloat(agent.depth) * 12)
+        .padding(.vertical, 2)
+        .background(
+            agent.pane == model.workspace.focusedPane
+                ? Color.accentColor.opacity(0.12)
+                : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button(agent.pinned ? "Unpin" : "Pin to top") {
+                Task { await model.togglePin(agent) }
+            }
+            if agent.status == .done, !agent.isChild {
+                Button("Mark unread") {
+                    Task { await model.markUnread(agent) }
+                }
+            }
+            if agent.isChild {
+                Button("Peek") {
+                    Task { await model.peek(agent.address) }
+                }
+            }
         }
     }
 
+    private func primaryLabel(_ agent: HcAgent) -> String {
+        if model.agentViewMode == .priority {
+            return agent.spaceName.isEmpty ? agent.name : agent.spaceName
+        }
+        return agent.detail.isEmpty ? agent.name : agent.detail
+    }
+
+    private func secondaryLabel(_ agent: HcAgent) -> String {
+        guard model.agentViewMode == .priority else { return "" }
+        return agent.detail.isEmpty ? "" : agent.detail
+    }
+
     @ViewBuilder
-    private func groupHeader(_ group: HcMachineGroup) -> some View {
+    private func statusIcon(_ status: HcAgentStatus) -> some View {
+        switch status {
+        case .working:
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 10, height: 10)
+        case .blocked:
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.blue)
+                .font(.caption)
+        case .idle:
+            Image(systemName: "circle.fill")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 5))
+        }
+    }
+
+    private func statusColor(_ status: HcAgentStatus) -> Color {
+        switch status {
+        case .working: .green
+        case .blocked: .red
+        case .done: .blue
+        case .idle: .secondary
+        }
+    }
+
+    private func age(_ since: UInt64) -> String {
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let seconds = max(0, Int(now - since) / 1000)
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m" }
+        return "\(seconds / 3600)h"
+    }
+
+    private func machine(for group: HcAgentGroup) -> HcMachine? {
+        guard let id = group.machineID else { return nil }
+        return model.machines.first { $0.name == id }
+    }
+
+    @ViewBuilder
+    private func groupHeader(_ group: HcAgentGroup) -> some View {
         HStack(spacing: 6) {
-            if let state = group.state {
+            if let machine = machine(for: group) {
                 Circle()
-                    .fill(color(for: state))
+                    .fill(color(for: machine.state))
                     .frame(width: 7, height: 7)
             }
             VStack(alignment: .leading, spacing: 1) {
@@ -82,7 +201,7 @@ struct HcSidebarView: View {
                 }
             }
             Spacer(minLength: 2)
-            if let machine = group.machine {
+            if let machine = machine(for: group) {
                 Menu {
                     machineMenu(machine)
                 } label: {

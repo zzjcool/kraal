@@ -12,6 +12,7 @@
 // Arrangement and streams live in `HcWorkspaceModel+Layout`; chrome, the
 // command surface and the agents sidebar are #230/#231.
 
+import AppKit
 import Foundation
 import KraalHC
 import KraalModel
@@ -43,7 +44,18 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public internal(set) var machines: [HcMachine] = []
     /// The sidebar's sections: this core, then one per machine.
     @Published public private(set) var groups: [HcMachineGroup] = []
-    @Published public private(set) var selected: String?
+    /// Agents from OSC 7501, flattened for the sidebar (parents before
+    /// children, pinned and most urgent first).
+    @Published public internal(set) var agents: [HcAgent] = []
+    @Published public internal(set) var agentGroups: [HcAgentGroup] = []
+    @Published public var agentViewMode: HcAgentViewMode = .priority
+    /// A blocked/done event shown in the window; the system notification is
+    /// delivered next to it.
+    @Published public var agentToast: HcAgentToast?
+    /// A sub-agent peeked from the sidebar; not the focused pane.
+    @Published public internal(set) var peekSession: HcTerminalSession?
+    @Published public internal(set) var peekAddress: String?
+    @Published public internal(set) var selected: String?
     @Published public private(set) var session: HcTerminalSession?
     @Published public private(set) var openError: String?
     /// The core has not sent a heartbeat for twice its 15 s interval.
@@ -77,7 +89,7 @@ public final class HcWorkspaceModel: ObservableObject {
     private var eventsTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var machinePollTask: Task<Void, Never>?
-    private var localName = "This core"
+    var localName = "This core"
     /// One sync per machine, keyed by `""` for this core.
     var layoutSyncs: [String: HcDocumentSync] = [:]
     /// A load that started before a newer doc event must not overwrite the
@@ -92,6 +104,15 @@ public final class HcWorkspaceModel: ObservableObject {
     /// Whether the terminal set from the current connection has arrived. Before
     /// it, an empty `terminals` means "not read yet", not "every pane died".
     var hasSnapshot = false
+    var appActive = false
+    var agentTracker = HcAgentTracker()
+    var seenOverrides: [String: Int] = [:]
+    var writtenSeen: [String: Int] = [:]
+    var unreadAgents: Set<String> = []
+    /// The first snapshot is not news; only later blocked/quiet transitions alert.
+    var listedAgents = false
+    private var activeObservers: [NSObjectProtocol] = []
+    var toastTask: Task<Void, Never>?
     private var viewSaveTask: Task<Void, Never>?
     private var writtenView: Data?
     private var subscription: HcEventSubscription?
@@ -121,6 +142,7 @@ public final class HcWorkspaceModel: ObservableObject {
         guard !started else { return }
         started = true
         loadViewFile()
+        observeActivation()
         status = .connecting
         client.start()
         eventsTask = Task { [weak self] in
@@ -141,6 +163,10 @@ public final class HcWorkspaceModel: ObservableObject {
     }
 
     public func stop() {
+        for observer in activeObservers { NotificationCenter.default.removeObserver(observer) }
+        activeObservers = []
+        toastTask?.cancel()
+        closePeek()
         eventsTask?.cancel()
         eventsTask = nil
         heartbeatTask?.cancel()
@@ -181,6 +207,7 @@ public final class HcWorkspaceModel: ObservableObject {
             cancelSubscription()
             if attempt > 0 { detach() }
             detachPanes()
+            closePeek()
         case let .ready(hello):
             log?("hc: ready core=\(hello.coreName) version=\(hello.version) generation=\(hello.generation)")
             status = .ready(version: hello.version)
@@ -205,6 +232,7 @@ public final class HcWorkspaceModel: ObservableObject {
             stopMachinePolling()
             detach()
             detachPanes()
+            closePeek()
         case let .failed(error):
             log?("hc: failed \(error)")
             status = .failed(String(describing: error))
@@ -359,6 +387,7 @@ public final class HcWorkspaceModel: ObservableObject {
         }
         reconcile()
         refreshPaneSessions()
+        updateAgents()
         scheduleViewSave()
     }
 
@@ -450,6 +479,25 @@ public final class HcWorkspaceModel: ObservableObject {
     private func detach() {
         session?.close()
         session = nil
+    }
+
+    private func observeActivation() {
+        guard NSApp != nil, activeObservers.isEmpty else {
+            appActive = NSApp?.isActive ?? false
+            return
+        }
+        appActive = NSApp?.isActive ?? false
+        let center = NotificationCenter.default
+        for name in [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.appActive = NSApp?.isActive ?? false
+                    self.publish()
+                }
+            }
+            activeObservers.append(observer)
+        }
     }
 
     private func detachPanes() {
