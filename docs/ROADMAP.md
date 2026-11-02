@@ -58,5 +58,8 @@ SPDX-FileCopyrightText: 2026 zzjcool
 - **#225 已完成**：`HcStateStore` + `HcEventSubscription`（事件通道按行解码）；
   M0 窗口改为事件驱动（快照 + 归约，`missed` 换快照，heartbeat 缺失显示失联）。
   真实事件流录制在 `Tests/KraalHCTests/Fixtures/events.ndjson`。
-- **下一步**：#226（machines），然后 M1 的共享文档与模型。
+- **#226 已完成**：`machine.list` 轮询（core 无机器事件）、侧栏按机器分组、
+  `temporary` 隐藏、add/rename/rm/reconnect，`needs_login`/`needs_update` 开
+  真实终端跑 `hc machine login|update`。直连 ssh → #242，SSH 专项 fixture → #243。
+- **下一步**：#227/#228（共享文档与客户端模型）。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

@@ -125,6 +125,35 @@ hc get <address> --json | jq '{cols, rows, state}'
 覆盖（实测 98×38）。日志里 `hc: ready core=…` / `hc: attached t1` 是给以后
 gui.sh 断言用的证据。`KRAAL_HC_SOCKET` 可以显式指定一个 socket。
 
+## 2.2 机器（herdr-core 自己 SSH）
+
+侧栏按 `machine.list` 分组（core 没有机器事件，客户端 2.5 s 轮询）；`temporary`
+机器连同其终端隐藏。机器行的菜单有 Reconnect / Log in… / Update… / Rename… /
+Remove…；登录和更新都开一个真实终端跑 `hc machine login|update`，因为这两件事
+需要人或要复制 `hc` 到对面，没有 RPC。
+
+本机没有第二台 SSH 机器时，可以用「`via` 本地双 core」造一台（core 会执行
+`via "$1"`，`$1` 是它要跑的 `hc connect` 行）：
+
+```bash
+ROOT=/tmp/km
+mkdir -p $ROOT/a $ROOT/b
+cat > $ROOT/via <<'EOF'
+#!/bin/sh
+HC_SESSION=mb XDG_STATE_HOME=/tmp/km/b/state XDG_CONFIG_HOME=/tmp/km/b/config exec sh -c "$1"
+EOF
+chmod +x $ROOT/via
+export HC_SESSION=ma XDG_STATE_HOME=$ROOT/a/state XDG_CONFIG_HOME=$ROOT/a/config
+hc ls --json >/dev/null                 # 起本机 core
+hc machine add --via $ROOT/via --name alpha
+hc run --on alpha --bg --name remote --keep -- sh
+make run-hc                             # 侧栏应出现 alpha 与 alpha/t1
+```
+
+把 `via` 改成 `exit 1` 再 kill 掉 `herdr-core connect`，2.5 s 轮询内会出现
+`unreachable · …`；恢复脚本后 `machine.connect`（UI 的 Reconnect）回到 connected，
+`alpha/t1` 不消失。`tmp` 机器加 `--temp` 后 `hc machine ls` 有、侧栏没有。
+
 ---
 
 ## 3. 日常改一个 UI 功能

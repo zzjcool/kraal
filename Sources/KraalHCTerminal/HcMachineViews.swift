@@ -1,0 +1,305 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 zzjcool
+//
+// Sidebar sections and the two sheets that edit machines.
+
+import KraalHC
+import SwiftUI
+
+struct HcSidebarView: View {
+    @ObservedObject var model: HcWorkspaceModel
+
+    var body: some View {
+        List(selection: Binding(
+            get: { model.selected },
+            set: { address in
+                guard let address else { return }
+                Task { await model.select(address) }
+            }
+        )) {
+            ForEach(model.groups) { group in
+                Section {
+                    ForEach(group.terminals) { terminal in
+                        terminalRow(terminal)
+                            .tag(terminal.address)
+                    }
+                    if group.terminals.isEmpty, group.machine != nil {
+                        Text(group.state?.isConnected == true ? "no terminals" : "no terminals yet")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                } header: {
+                    groupHeader(group)
+                }
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private func terminalRow(_ terminal: HcTerminal) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(terminal.name).lineLimit(1)
+                Spacer()
+                Text(terminal.address)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(terminal.isLive ? Color.green : Color.secondary)
+                    .frame(width: 6, height: 6)
+                Text(terminal.agentState ?? (terminal.agent.isEmpty ? terminal.state : terminal.agent))
+                if !terminal.cwd.isEmpty {
+                    Text(terminal.cwd)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func groupHeader(_ group: HcMachineGroup) -> some View {
+        HStack(spacing: 6) {
+            if let state = group.state {
+                Circle()
+                    .fill(color(for: state))
+                    .frame(width: 7, height: 7)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(group.title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                if let subtitle = group.subtitle {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 2)
+            if let machine = group.machine {
+                Menu {
+                    machineMenu(machine)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Machine actions")
+            }
+        }
+        .padding(.vertical, 1)
+    }
+
+    @ViewBuilder
+    private func machineMenu(_ machine: HcMachine) -> some View {
+        if machine.state != .connected {
+            Button("Reconnect") {
+                Task { await model.reconnectMachine(machine) }
+            }
+        }
+        if machine.state == .needsLogin {
+            Button("Log in…") {
+                Task { await model.openLoginTerminal(machine) }
+            }
+        }
+        if machine.state == .needsUpdate {
+            Button("Update…") {
+                Task { await model.openUpdateTerminal(machine) }
+            }
+        }
+        Divider()
+        Button("Rename…") {
+            model.machineSheet = .rename(machine)
+        }
+        Button("Remove…", role: .destructive) {
+            model.removingMachine = machine
+        }
+    }
+
+    private func color(for state: HcMachineState) -> Color {
+        switch state {
+        case .connected: .green
+        case .connecting: .orange
+        case .needsLogin, .needsUpdate: .yellow
+        case .unreachable: .red
+        case .other: .secondary
+        }
+    }
+}
+
+struct HcAddMachineView: View {
+    enum Reach: String, CaseIterable, Identifiable {
+        case ssh = "SSH"
+        case command = "Command"
+
+        var id: String { rawValue }
+    }
+
+    @ObservedObject var model: HcWorkspaceModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var reach: Reach = .ssh
+    @State private var target = ""
+    @State private var via = ""
+    @State private var name = ""
+    @State private var session = ""
+    @State private var temporary = false
+    @State private var submitting = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add a machine").font(.headline)
+            Text("The core dials it and keeps it connected; its terminals join this list.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Reach it by", selection: $reach) {
+                ForEach(Reach.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+
+            if reach == .ssh {
+                labeled("SSH target", text: $target, prompt: "can@10.0.0.7:2222 or a Host from ~/.ssh/config")
+            } else {
+                labeled("Command", text: $via, prompt: "given a shell line as its last argument, like ssh")
+            }
+            labeled("Name (optional)", text: $name, prompt: "default: the target's host")
+
+            HStack(spacing: 12) {
+                labeled("Session (optional)", text: $session, prompt: "default: its default")
+                Toggle("Temporary", isOn: $temporary)
+                    .toggleStyle(.checkbox)
+                    .help("A sandbox for one task: hidden from the sidebar")
+            }
+
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                if error != nil {
+                    Button("Open a terminal instead…") {
+                        Task {
+                            await model.openAddTerminal(
+                                target: reach == .ssh ? target : nil,
+                                via: reach == .command ? via : nil,
+                                name: name,
+                                session: session,
+                                temporary: temporary
+                            )
+                            dismiss()
+                        }
+                    }
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(submitting ? "Adding…" : "Add") { submit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(submitting || !isValid)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private var isValid: Bool {
+        if reach == .ssh {
+            return !target.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        return !via.trimmingCharacters(in: .whitespaces).isEmpty
+            && !name.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private func submit() {
+        submitting = true
+        error = nil
+        Task {
+            do {
+                _ = try await model.addMachine(
+                    target: reach == .ssh ? target : nil,
+                    via: reach == .command ? via : nil,
+                    name: name.isEmpty ? nil : name,
+                    session: session.isEmpty ? nil : session,
+                    temporary: temporary
+                )
+                await model.refreshMachines()
+                dismiss()
+            } catch {
+                self.error = HcWorkspaceModel.describe(error)
+            }
+            submitting = false
+        }
+    }
+
+    private func labeled(_ title: String, text: Binding<String>, prompt: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            TextField(title, text: text, prompt: Text(prompt))
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+}
+
+struct HcRenameMachineView: View {
+    let machine: HcMachine
+    @ObservedObject var model: HcWorkspaceModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name = ""
+    @State private var submitting = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rename \(machine.name)").font(.headline)
+            Text("Only this core's name changes. Terminals using the old name\u{2019}s addresses stop working.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("New name", text: $name, prompt: Text(machine.name))
+                .textFieldStyle(.roundedBorder)
+            if let error {
+                Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(submitting ? "Renaming…" : "Rename") { submit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(submitting || trimmed.isEmpty || trimmed == machine.name)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .onAppear { name = machine.name }
+    }
+
+    private var trimmed: String {
+        name.trimmingCharacters(in: .whitespaces)
+    }
+
+    private func submit() {
+        submitting = true
+        error = nil
+        Task {
+            do {
+                try await model.renameMachine(machine, to: trimmed)
+                dismiss()
+            } catch {
+                self.error = HcWorkspaceModel.describe(error)
+            }
+            submitting = false
+        }
+    }
+}
