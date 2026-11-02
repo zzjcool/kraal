@@ -7,6 +7,7 @@
 
 import Foundation
 import KraalProtocol
+import KraalSocket
 import KraalTransport
 
 public enum BridgeError: Error, CustomStringConvertible {

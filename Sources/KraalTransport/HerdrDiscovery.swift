@@ -9,6 +9,7 @@
 // overrides and the named-session layout are reproduced exactly.
 
 import Foundation
+import KraalSocket
 
 public enum HerdrTransportKind: String, Sendable, Codable, CaseIterable {
     /// A unix socket on this machine.

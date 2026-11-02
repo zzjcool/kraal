@@ -10,6 +10,7 @@
 // from `herdr-client/src/ssh.rs` (Apache-2.0).
 
 import Foundation
+import KraalSocket
 import KraalProtocol
 
 /// What the failure path managed to collect from the bridge's stderr.

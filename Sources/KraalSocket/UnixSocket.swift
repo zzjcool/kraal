@@ -4,7 +4,7 @@
 // A small POSIX unix-domain-socket wrapper.
 //
 // `Network.framework` can carry unix sockets on macOS/iOS but adds framing
-// latency and makes partial reads harder to reason about. The endpoint protocol
+// latency and makes partial reads harder to reason about. The protocol
 // is a raw byte stream, so a plain `socket(2)` with a dedicated read thread is
 // both simpler and closer to what the daemon's own Rust client does.
 
