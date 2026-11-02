@@ -10,7 +10,7 @@
 //
 //  A theme file carries 6 + 16 colours; the interface needs 19 roles. Rex solves
 //  this by computing its 70 semantic roles from the same source colours
-//  (`docs/REX-UI.md` §2), and that is the right shape: one file per theme, and the
+//  (`docs/archive/REX-UI.md` §2), and that is the right shape: one file per theme, and the
 //  chrome cannot drift away from the terminal it frames.
 //
 //  ## The rule, in one line

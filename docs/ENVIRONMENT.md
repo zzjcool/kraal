@@ -726,7 +726,7 @@ tar -czf - ~/.pi/agent/skills | tart exec -i kraal-agent /bin/bash -c 'tar -xzf 
 
 ---
 
-## 5. 已知待验证项（承接 DESIGN.md §12）
+## 5. 已知待验证项（承接 docs/archive/DESIGN.md §12）
 
 | # | 项 | 现状 |
 | --- | --- | --- | --- |

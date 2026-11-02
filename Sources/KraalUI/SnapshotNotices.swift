@@ -24,7 +24,7 @@
 //  for `latestReleaseNotesAvailable` alone, and no `productAnnouncement` popup.
 //  Those are policy decisions that need a dismissal store to avoid nagging, and
 //  the honest first step is a read-only surface the user can look at when they
-//  want to. `docs/GAP-VS-HERDR.md` calls the opposite mistake "adding UI to make
+//  want to. `docs/archive/GAP-VS-HERDR.md` calls the opposite mistake "adding UI to make
 //  a warning go away".
 //
 

@@ -10,6 +10,12 @@ SPDX-FileCopyrightText: 2026 zzjcool
 `docs/` 下是**知识**（协议怎么工作、环境什么版本），这份是**行为**（该跑什么、
 不该做什么、验证到什么程度算完）。两者冲突时以 `docs/` 的实测记录为准。
 
+> **迁移中（2026-11-02 起）：** 项目正从 Herdr 1 daemon 切换到
+> [herdr-core](docs/HERDR2.md)（Herdr 2，`hc`）。本文里凡是以 `herdr pane …`、
+> `KRAAL_HERDR_SOCKET`、`herdr-client.sock`、bincode endpoint 为例的命令与判据，
+> 描述的都是**旧实现**，会随 M0–M3 逐步替换成 `hc …` 与 JSON-RPC。
+> 拿不准时先看 [docs/HERDR2.md](docs/HERDR2.md) 和 [docs/ROADMAP.md](docs/ROADMAP.md)。
+
 **第一次进这个仓库、或者换了一台机器，先读 `docs/RUNNING.md`**——那是一份从
 clone 到能验证 UI 改动的最短路径清单（装什么、跑什么、缺什么会表现成什么样）。
 
@@ -139,9 +145,9 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
 `verify.sh` 六道门禁：`swift build` → `swift test` → `swiftlint` → `shellcheck`
 → `build-app.sh` → `gui.sh run`。`--fast` 跳过最后两道，`KRAAL_SKIP_GUI=1` 只跳 GUI。
 
-**移植的兼容性测试现在全绿。** 从上游三个参考项目移植的那批测试，当初有 22 条
-是红的（它们钉的是本客户端还没实现的行为）。这些差异已全部修完
-（issue #1、#3–#10、#18、#19），逐条记录在 `docs/PORTED-TESTS.md`。
+**移植的兼容性测试已随旧协议作废。** 旧实现里从上游三个项目移植的测试与
+22 条红/修复记录在 `docs/archive/PORTED-TESTS.md`；新协议下不再有移植测试，
+改为 `hc schema` 驱动的 wire fixture 测试（见 `docs/HERDR2.md` §8）。
 
 门禁仍是 `Scripts/test-baseline.sh`：它跑全量、只跳过 `REDS` 名单里的条目。
 **名单为空就是目标状态**，此时它退化成一条普通的 `swift test`。
@@ -390,16 +396,15 @@ PR 正文和提交信息同样要求**证据**：不只是「修好了」，而�
 | 文件 | 写什么 |
 |---|---|
 | `README.md` | 是什么、怎么开始、致谢 |
+| `docs/HERDR2.md` | **目标**：为什么切 herdr-core、硬性决策、保留/删除清单、对齐口径、风险 |
 | `docs/RUNNING.md` | **怎么跑起来**：上手顺序、命令、迁移到新机器 |
-| `docs/ROADMAP.md` | 里程碑与完成状态 |
-| `docs/DESIGN.md` | 协议与架构设计 |
+| `docs/ROADMAP.md` | 里程碑（M0–M3）与判据 |
 | `docs/ENVIRONMENT.md` | **实测的环境事实**：版本、隔离方式、多机验证、Tart VM、TCC |
 | `docs/AUTOMATION.md` | GUI 验证闭环：方案、实测数据、未验证项 |
-| `docs/CLI.md` | **对外接口**：Rex 借鉴清单、`kraal-gui actions/do/skill/clients`、`kraal capture/run/events`、缺口与路线 |
-| `docs/REX-UI.md` | **Rex 界面借了什么**：41 主题/70 语义角色/材质层/密度、Kraal 对照表、下一步排序 |
 | `docs/DEBUGGING.md` | **怎么验证一件事是真的**（排查教训） |
 | `docs/PERFORMANCE.md` | **怎么量出一件事有多贵**（基准方法学 + 实测数据） |
-| `docs/IOS-PORT.md` | **iOS 移植做到哪一步了**：实测编译矩阵、阻塞项优先级、最小改动配方 |
+| `docs/IOS-PORT.md` | **iOS 移植做到哪一步了**：实测编译矩阵、阻塞项优先级（协议部分待 M3 更新） |
+| `docs/archive/` | Herdr 1 时代的文档，只作历史参考：废弃的协议设计、竞品分析、移植测试、Rex 接口 |
 | `AGENTS.md`（本文件） | agent 的行为约定：跑什么、验证到什么程度算完 |
 
 新发现的排查教训进 `DEBUGGING.md`；性能方法与实测数字进 `PERFORMANCE.md`；

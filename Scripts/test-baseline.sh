@@ -5,7 +5,7 @@
 # Runs the whole suite except the tests ported from the three reference projects
 # that are *known* to disagree with this client today.
 #
-# Why this exists: `swift test` is deliberately red. `docs/PORTED-TESTS.md`
+# Why this exists: `swift test` is deliberately red. `docs/archive/PORTED-TESTS.md`
 # lists the tests that came from herdr / herdr-gpui / rootshell and encode
 # behaviour this client does not have yet (named-colour SGR, halfwidth kana
 # width, OSC 8, u8-as-varint in host themes, generation-vs-error in the
