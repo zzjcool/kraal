@@ -150,6 +150,10 @@ hc run --on alpha --bg --name remote --keep -- sh
 make run-hc                             # 侧栏应出现 alpha 与 alpha/t1
 ```
 
+布局文档 `herdr-app` 随连接读一次，日志是 `hc: layout vN spaces=M tabs=K`；
+外部写这份文档会发 `doc` 事件（只有 name/version），窗口随后重读并再打一行。
+M0 阶段还没有渲染，只证明协议与事件路径通。
+
 把 `via` 改成 `exit 1` 再 kill 掉 `herdr-core connect`，2.5 s 轮询内会出现
 `unreachable · …`；恢复脚本后 `machine.connect`（UI 的 Reconnect）回到 connected，
 `alpha/t1` 不消失。`tmp` 机器加 `--temp` 后 `hc machine ls` 有、侧栏没有。
