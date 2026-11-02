@@ -14,12 +14,49 @@ public struct HcRootView: View {
 
     public var body: some View {
         HSplitView {
-            sidebar
-                .frame(minWidth: 180, idealWidth: 240, maxWidth: 340)
+            HcSidebarView(model: model)
+                .frame(minWidth: 220, idealWidth: 260, maxWidth: 360)
             detail
                 .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
         .task { model.start() }
+        .sheet(item: $model.machineSheet) { sheet in
+            switch sheet {
+            case .add:
+                HcAddMachineView(model: model)
+            case let .rename(machine):
+                HcRenameMachineView(machine: machine, model: model)
+            }
+        }
+        .confirmationDialog(
+            "Remove \(model.removingMachine?.name ?? "machine")?",
+            isPresented: Binding(
+                get: { model.removingMachine != nil },
+                set: { if !$0 { model.removingMachine = nil } }
+            ),
+            presenting: model.removingMachine
+        ) { machine in
+            Button("Remove \(machine.name)", role: .destructive) {
+                Task {
+                    await model.removeMachine(machine)
+                    model.removingMachine = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { model.removingMachine = nil }
+        } message: { _ in
+            Text("Only this core forgets it; its terminals keep running there.")
+        }
+        .alert(
+            "Machine action failed",
+            isPresented: Binding(
+                get: { model.machineError != nil },
+                set: { if !$0 { model.machineError = nil } }
+            )
+        ) {
+            Button("OK") { model.machineError = nil }
+        } message: {
+            Text(model.machineError ?? "")
+        }
         .toolbar {
             ToolbarItem(placement: .status) {
                 Text(statusText)
@@ -28,50 +65,24 @@ public struct HcRootView: View {
             }
             ToolbarItem {
                 Button {
-                    Task { await model.refresh() }
+                    model.machineSheet = .add
+                } label: {
+                    Label("Add machine", systemImage: "plus")
+                }
+                .disabled(!isReady)
+            }
+            ToolbarItem {
+                Button {
+                    Task {
+                        await model.refresh()
+                        await model.refreshMachines()
+                    }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
                 .disabled(!isReady)
             }
         }
-    }
-
-    private var sidebar: some View {
-        List(selection: Binding(
-            get: { model.selected },
-            set: { address in
-                guard let address else { return }
-                Task { await model.select(address) }
-            }
-        )) {
-            ForEach(model.terminals) { terminal in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(terminal.name).lineLimit(1)
-                        Spacer()
-                        Text(terminal.address)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(terminal.isLive ? Color.green : Color.secondary)
-                            .frame(width: 6, height: 6)
-                        Text(terminal.agentState ?? (terminal.agent.isEmpty ? terminal.state : terminal.agent))
-                        if !terminal.cwd.isEmpty {
-                            Text(terminal.cwd)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                .tag(terminal.address)
-            }
-        }
-        .listStyle(.sidebar)
     }
 
     @ViewBuilder

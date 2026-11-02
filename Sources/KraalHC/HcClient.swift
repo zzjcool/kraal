@@ -101,6 +101,50 @@ public final class HcClient: @unchecked Sendable {
         return try await HcEventSubscription.subscribe(connection, filter: filter, handlers: handlers)
     }
 
+    /// The machines this core has added. `temporary` ones are included: the
+    /// filter is a client decision, and `machine.rename`/`rm` still need them.
+    public func machines() async throws -> [HcMachine] {
+        let reply = try await call("machine.list")
+        return (reply["machines"]?.arrayValue ?? []).map(HcMachine.init(json:))
+    }
+
+    /// Adds a machine reached by ssh (`target`) or by a command (`via`).
+    ///
+    /// The core owns the connection; this replies with the profile before the
+    /// first dial finishes. `machine.list` carries the state afterwards.
+    public func addMachine(
+        target: String? = nil,
+        via: String? = nil,
+        name: String? = nil,
+        session: String? = nil,
+        temporary: Bool = false
+    ) async throws -> HcMachine {
+        var params: [String: JSONValue] = [:]
+        if let target { params["target"] = .string(target) }
+        if let via { params["via"] = .string(via) }
+        if let name { params["name"] = .string(name) }
+        if let session { params["session"] = .string(session) }
+        if temporary { params["temporary"] = .bool(true) }
+        return HcMachine(json: try await call("machine.add", params: .object(params)))
+    }
+
+    /// Dials now instead of at the next retry (after a login, for instance).
+    public func connectMachine(_ name: String) async throws -> HcMachine {
+        HcMachine(json: try await call("machine.connect", params: .object(["machine": .string(name)])))
+    }
+
+    /// Only this core's name changes; addresses using the old one stop working.
+    public func renameMachine(_ name: String, to newName: String) async throws -> HcMachine {
+        HcMachine(json: try await call(
+            "machine.rename",
+            params: .object(["machine": .string(name), "new_name": .string(newName)])
+        ))
+    }
+
+    public func removeMachine(_ name: String) async throws {
+        _ = try await call("machine.rm", params: .object(["machine": .string(name)]))
+    }
+
     /// Attaches to a terminal on the current link.
     ///
     /// A reconnect drops every channel, so the caller must be ready to attach
