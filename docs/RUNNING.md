@@ -105,8 +105,10 @@ tart exec kraal-agent /bin/bash -lc \
 make run-hc          # 与 make run 同一个 bundle，只是入口换成 herdr-core
 ```
 
-窗口左边是 `terminal.list`，右边是一个 attach 的 Ghostty pane。它和旧入口
-**不是同一条路径**：不构造 Herdr 1 的 store，也不做 cell 编码。
+窗口左边是事件流归约出的终端列表（`events.subscribe` 快照 + 归约），右边是一个
+attach 的 Ghostty pane。它和旧入口**不是同一条路径**：不构造 Herdr 1 的 store，
+也不做 cell 编码。列表会随 `created`/`labels`/`status`/`finished`/`removed` 自己变，
+不需要刷新；15 s 心跳缺失时工具栏显示「core 失联」。
 
 默认连本机 `default` core。隔离实验要自己给全套环境（`hc` 也用同一套）：
 

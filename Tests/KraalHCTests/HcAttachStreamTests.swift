@@ -105,7 +105,7 @@ struct HcAttachStreamTests {
                 )
             }
 
-            let connection = try await HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             let stream = try await HcAttachStream.attach(
                 connection,
@@ -122,7 +122,7 @@ struct HcAttachStreamTests {
 
             stream.credit(6)
 
-            let deadline = Date().addingTimeInterval(5)
+            let deadline = Date().addingTimeInterval(15)
             while probe.end.end == nil, Date() < deadline {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
@@ -151,7 +151,7 @@ struct HcAttachStreamTests {
                 session.writeFrame(channel: 3, kind: .close, payload: Data())
             }
 
-            let connection = try await HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             _ = try await HcAttachStream.attach(
                 connection,
@@ -163,7 +163,7 @@ struct HcAttachStreamTests {
                 )
             )
 
-            let deadline = Date().addingTimeInterval(5)
+            let deadline = Date().addingTimeInterval(15)
             while !probe.lost.isSet, Date() < deadline {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
@@ -188,7 +188,7 @@ struct HcAttachStreamTests {
                 }
             }
 
-            let connection = try await HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             let stream = try await HcAttachStream.attach(
                 connection,
@@ -198,7 +198,7 @@ struct HcAttachStreamTests {
             stream.resize(columns: 120, rows: 40)
             stream.focus(true)
 
-            let deadline = Date().addingTimeInterval(5)
+            let deadline = Date().addingTimeInterval(15)
             while frames.count < 2, Date() < deadline {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }

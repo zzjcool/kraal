@@ -55,5 +55,8 @@ SPDX-FileCopyrightText: 2026 zzjcool
   M0 窗口 `make run-hc`（终端列表 + 一个 pane）。实测窗口的网格
   98×38 已写回核心，截图可见重放内容；真实 core 的 headless 测试同时验证
   输入回显与 RESIZE。
-- **下一步**：#225（events 归约）、#226（machines），然后 M1 的共享文档与模型。
+- **#225 已完成**：`HcStateStore` + `HcEventSubscription`（事件通道按行解码）；
+  M0 窗口改为事件驱动（快照 + 归约，`missed` 换快照，heartbeat 缺失显示失联）。
+  真实事件流录制在 `Tests/KraalHCTests/Fixtures/events.ndjson`。
+- **下一步**：#226（machines），然后 M1 的共享文档与模型。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

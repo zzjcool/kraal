@@ -24,7 +24,7 @@ public struct HcRootView: View {
             ToolbarItem(placement: .status) {
                 Text(statusText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(model.heartbeatStale ? Color.red : Color.secondary)
             }
             ToolbarItem {
                 Button {
@@ -58,7 +58,7 @@ public struct HcRootView: View {
                         Circle()
                             .fill(terminal.isLive ? Color.green : Color.secondary)
                             .frame(width: 6, height: 6)
-                        Text(terminal.agent.isEmpty ? terminal.state : terminal.agent)
+                        Text(terminal.agentState ?? (terminal.agent.isEmpty ? terminal.state : terminal.agent))
                         if !terminal.cwd.isEmpty {
                             Text(terminal.cwd)
                                 .lineLimit(1)
@@ -111,12 +111,13 @@ public struct HcRootView: View {
     }
 
     private var statusText: String {
+        if model.heartbeatStale { return "core 失联（无心跳）" }
         switch model.status {
-        case .idle: "idle"
-        case .connecting: "connecting…"
-        case let .ready(version): "herdr-core \(version)"
-        case let .incompatible(reason): "incompatible: \(reason)"
-        case let .failed(error): "failed: \(error)"
+        case .idle: return "idle"
+        case .connecting: return "connecting…"
+        case let .ready(version): return "herdr-core \(version)"
+        case let .incompatible(reason): return "incompatible: \(reason)"
+        case let .failed(error): return "failed: \(error)"
         }
     }
 }

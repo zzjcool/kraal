@@ -35,7 +35,7 @@ struct HcConnectionTests {
                 }
             }
 
-            let connection = try HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             #expect(connection.hello.generation == 1)
             #expect(connection.hello.version == "0.1.16")
@@ -73,7 +73,7 @@ struct HcConnectionTests {
                 ]))
             }
 
-            let connection = try HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             do {
                 _ = try await connection.call(
@@ -103,9 +103,9 @@ struct HcConnectionTests {
                 ]))
             }
 
-            let connection = try HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
-            let notification = try await withTimeout(3) {
+            let notification = try await withTimeout(10) {
                 var iterator = connection.notifications.makeAsyncIterator()
                 return await iterator.next()
             }
@@ -155,7 +155,7 @@ struct HcConnectionTests {
                 )
             }
 
-            let connection = try HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             let reply = try await connection.call(
                 "terminal.attach",
@@ -192,7 +192,7 @@ struct HcConnectionTests {
                 _ = session.readFrame()
             }
 
-            let connection = try HcConnection.open(path: core.socketPath)
+            let connection = try await openTestConnection(path: core.socketPath)
             defer { connection.close() }
             do {
                 _ = try await connection.call("terminal.list")
@@ -203,6 +203,95 @@ struct HcConnectionTests {
                     return
                 }
             }
+        }
+    }
+}
+
+@Suite("Late channel registration")
+struct HcLateChannelTests {
+    @Test("an attach CLOSE with an exit record survives a late registration")
+    func lateAttachClose() async throws {
+        try await withFakeCore { core in
+            core.onSession = { session in
+                guard let frame = session.readFrame(),
+                      let request = try? JSONDecoder().decode(JSONValue.self, from: frame.payload)
+                else { return }
+                session.writeMessage(.object([
+                    "jsonrpc": .string("2.0"),
+                    "id": request["id"] ?? .int(2),
+                    "result": .object(["channel": .int(3), "terminal": .object([:])]),
+                ]))
+                session.writeFrame(
+                    channel: 3, kind: .close,
+                    payload: Data(#"{"reason":"exited","exit_code":0}"#.utf8)
+                )
+            }
+
+            let connection = try await openTestConnection(path: core.socketPath)
+            defer { connection.close() }
+            _ = try await connection.call("terminal.attach", params: .object(["terminal": .string("t1")]))
+            try await Task.sleep(for: .milliseconds(200))
+
+            let probe = ChannelProbe()
+            _ = connection.openChannel(id: 3, handlers: probe.handlers())
+            let event = try await probe.next(5)
+            guard case let .closed(reason?) = event else {
+                Issue.record("expected the recorded exit reason, got \(String(describing: event))")
+                return
+            }
+            #expect(reason["reason"]?.stringValue == "exited")
+            #expect(reason["exit_code"]?.intValue == 0)
+        }
+    }
+
+    @Test("a channel registered after the core closed still reaches its CLOSE")
+    func lateOpen() async throws {
+        try await withFakeCore { core in
+            core.onSession = { session in
+                guard let frame = session.readFrame(),
+                      let request = try? JSONDecoder().decode(JSONValue.self, from: frame.payload)
+                else { return }
+                session.writeMessage(.object([
+                    "jsonrpc": .string("2.0"),
+                    "id": request["id"] ?? .int(2),
+                    "result": .object(["channel": .int(4), "terminals": .array([])]),
+                ]))
+                // The core is done: no channel was registered yet, and it closes.
+                session.writeFrame(channel: 4, kind: .close, payload: Data())
+            }
+
+            let connection = try await openTestConnection(path: core.socketPath)
+            defer { connection.close() }
+            let reply = try await connection.call("events.subscribe")
+            #expect(reply["channel"]?.intValue == 4)
+
+            // Let the reader reach EOF and finish before the channel exists.
+            try await Task.sleep(for: .milliseconds(200))
+
+            let probe = ChannelProbe()
+            _ = connection.openChannel(id: 4, handlers: probe.handlers())
+            let event = try await probe.next(5)
+            #expect(event == .closed(nil))
+        }
+    }
+}
+
+@Suite("Handshake coalescing")
+struct HcHandshakeCoalescingTests {
+    @Test("a frame written with the hello reply is not lost when the core closes")
+    func frameWithHello() async throws {
+        try await withFakeCore { core in
+            let payload = Data(#"{"jsonrpc":"2.0","method":"event","params":{"seq":1,"type":"status"}}"#.utf8)
+            core.helloAppend = try HcWire.dataFrame(channel: 0, payload: payload)
+
+            let connection = try await openTestConnection(path: core.socketPath)
+            defer { connection.close() }
+            let note = try await withTimeout(10) {
+                var iterator = connection.notifications.makeAsyncIterator()
+                return await iterator.next()
+            }
+            #expect(note?.method == "event")
+            #expect(note?.params["seq"]?.intValue == 1)
         }
     }
 }

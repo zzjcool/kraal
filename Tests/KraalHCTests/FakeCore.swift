@@ -34,9 +34,39 @@ enum FakeCoreError: Error, CustomStringConvertible {
 final class FakeCore: @unchecked Sendable {
     let socketPath: String
     var hello: JSONValue
+    /// Written in the same `write` as the hello reply, before `onSession`: the
+    /// bytes a client sees coalesced with the handshake.
+    ///
+    /// Locked: the test sets these on its thread while the accept thread reads
+    /// them, and an unsynchronized read made the handler appear nil under load
+    /// (the core answered hello, then never the attach call).
+    var helloAppend: Data? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return helloAppendValue
+        }
+        set {
+            lock.lock()
+            helloAppendValue = newValue
+            lock.unlock()
+        }
+    }
+
     /// Runs on the accept thread. The session is already past `hello`; frames
     /// written before the client registers a channel are buffered by the client.
-    var onSession: ((FakeCoreSession) -> Void)?
+    var onSession: ((FakeCoreSession) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return onSessionValue
+        }
+        set {
+            lock.lock()
+            onSessionValue = newValue
+            lock.unlock()
+        }
+    }
     private var connectionCount = 0
 
     var acceptedConnections: Int {
@@ -47,6 +77,8 @@ final class FakeCore: @unchecked Sendable {
 
     private let listener: Int32
     private let lock = NSLock()
+    private var helloAppendValue: Data?
+    private var onSessionValue: ((FakeCoreSession) -> Void)?
     private var running = true
     private var acceptThread: Thread?
 
@@ -147,7 +179,13 @@ final class FakeCore: @unchecked Sendable {
             "id": .int(1),
             "result": hello,
         ])
-        session.writeLine(reply.compactDescription)
+        if let extra = helloAppend {
+            var bytes = Data((reply.compactDescription + "\n").utf8)
+            bytes.append(extra)
+            session.writeRaw(bytes)
+        } else {
+            session.writeLine(reply.compactDescription)
+        }
         onSession?(session)
     }
 
@@ -182,6 +220,19 @@ final class FakeCoreSession {
         closed = true
         shutdown(descriptor, SHUT_RDWR)
         Darwin.close(descriptor)
+    }
+
+    /// Gives `readFrame`/`readLine` a deadline so a test script cannot block the
+    /// accept thread forever when the client stops sending.
+    func setReadTimeout(_ seconds: Double) {
+        var value = timeval(
+            tv_sec: Int(seconds),
+            tv_usec: Int32((seconds - Double(Int(seconds))) * 1_000_000)
+        )
+        setsockopt(
+            descriptor, SOL_SOCKET, SO_RCVTIMEO,
+            &value, socklen_t(MemoryLayout<timeval>.size)
+        )
     }
 
     func readLine() -> String? {
@@ -227,6 +278,10 @@ final class FakeCoreSession {
               let frame = try? HcWire.dataFrame(channel: 0, payload: payload)
         else { return }
         write(frame)
+    }
+
+    func writeRaw(_ data: Data) {
+        write(data)
     }
 
     func writeFrame(channel: UInt32, kind: HcFrameKind, payload: Data = Data()) {
