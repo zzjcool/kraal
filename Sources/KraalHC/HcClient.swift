@@ -162,6 +162,7 @@ public final class HcClient: @unchecked Sendable {
         labels: [String: String] = [:],
         name: String? = nil,
         keep: Bool? = nil,
+        parent: String? = nil,
         on machine: String? = nil
     ) async throws -> HcTerminal {
         var params: [String: JSONValue] = [:]
@@ -172,6 +173,7 @@ public final class HcClient: @unchecked Sendable {
         if !labels.isEmpty { params["labels"] = .object(labels.mapValues(JSONValue.string)) }
         if let name { params["name"] = .string(name) }
         if let keep { params["keep"] = .bool(keep) }
+        if let parent { params["parent"] = .string(parent) }
         if let machine { params["on"] = .string(machine) }
         return HcTerminal(json: try await call("terminal.run", params: .object(params)))
     }

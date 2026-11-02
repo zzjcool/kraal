@@ -21,6 +21,24 @@ public struct HcRootView: View {
                 .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
         .task { model.start() }
+        .overlay(alignment: .topTrailing) {
+            if let toast = model.agentToast {
+                HcAgentToastView(toast: toast) { model.agentToast = nil }
+                    .padding(16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if let session = model.peekSession, let address = model.peekAddress {
+                HcAgentPeekView(address: address, session: session) {
+                    model.closePeek()
+                }
+                .padding(16)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.agentToast)
+        .animation(.easeOut(duration: 0.2), value: model.peekAddress)
         .sheet(item: $model.machineSheet) { sheet in
             switch sheet {
             case .add:
