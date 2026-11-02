@@ -38,7 +38,7 @@ public final class HcWorkspaceModel: ObservableObject {
 
     @Published public private(set) var status: Status = .idle
     @Published public private(set) var terminals: [HcTerminal] = []
-    @Published public private(set) var machines: [HcMachine] = []
+    @Published public internal(set) var machines: [HcMachine] = []
     /// The sidebar's sections: this core, then one per machine.
     @Published public private(set) var groups: [HcMachineGroup] = []
     @Published public private(set) var selected: String?
@@ -46,6 +46,11 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public private(set) var openError: String?
     /// The core has not sent a heartbeat for twice its 15 s interval.
     @Published public private(set) var heartbeatStale = false
+    /// The shared `herdr-app` layout as last read. The M0 window does not render
+    /// it yet (#228); loading it now proves the document path and keeps the
+    /// version current for the model that will.
+    @Published public private(set) var layout: HcLayoutDocument?
+    @Published public private(set) var layoutVersion: UInt64 = 0
     /// A failed machine action, shown until dismissed. Add/rename keep their
     /// sheet open instead, so the typed values are not lost.
     @Published public var machineError: String?
@@ -57,12 +62,16 @@ public final class HcWorkspaceModel: ObservableObject {
     /// so a GUI run can prove what the window did without a screenshot.
     public var log: ((String) -> Void)?
 
-    private let client: HcClient
+    let client: HcClient
     private let store = HcStateStore()
     private var eventsTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var machinePollTask: Task<Void, Never>?
     private var localName = "This core"
+    private var layoutSync: HcDocumentSync?
+    /// A load that started before a newer doc event must not overwrite the
+    /// newer read when it happens to finish last.
+    private var layoutGeneration = 0
     private var subscription: HcEventSubscription?
     private var resubscribeTask: Task<Void, Never>?
     /// Events that raced the snapshot installation (handlers run on the read
@@ -145,6 +154,7 @@ public final class HcWorkspaceModel: ObservableObject {
             localName = hello.coreName.isEmpty ? "This core" : hello.coreName
             openError = nil
             Task { await self.subscribe() }
+            Task { await self.loadLayout() }
             startMachinePolling()
         case let .incompatible(compatibility):
             log?("hc: incompatible \(compatibility)")
@@ -214,10 +224,34 @@ public final class HcWorkspaceModel: ObservableObject {
             pendingEvents.append(event)
             return
         }
+        if event.type == "doc", layoutSync?.noteRemoteChange(event) == true {
+            Task { await self.loadLayout() }
+        }
         guard store.apply(event) else { return }
         publish()
         if store.view().needsResync {
             scheduleResubscribe()
+        }
+    }
+
+    private func loadLayout() async {
+        guard client.isConnected else { return }
+        layoutGeneration += 1
+        let generation = layoutGeneration
+        let sync = layoutSync ?? HcDocumentSync(client: client, name: "herdr-app")
+        layoutSync = sync
+        do {
+            let document = try await sync.load()
+            guard generation == layoutGeneration else { return }
+            let parsed = try HcLayoutDocument(value: document.value)
+            layout = parsed
+            layoutVersion = document.version
+            let tabs = parsed.spaces.reduce(0) { $0 + $1.tabs.count }
+            log?("hc: layout v\(document.version) spaces=\(parsed.spaces.count) tabs=\(tabs)")
+        } catch {
+            // A layout this build cannot read must not take the terminals down;
+            // #228 turns this into the "layout unavailable" notice.
+            log?("hc: layout unavailable: \(error)")
         }
     }
 
@@ -263,25 +297,6 @@ public final class HcWorkspaceModel: ObservableObject {
         subscription = nil
     }
 
-    // MARK: Machines
-
-    /// The core has no machine events, so this is polled. 2.5 s is the app's
-    /// cadence too: fast enough for a login to show, slow enough to be free.
-    public func refreshMachines() async {
-        guard client.isConnected else { return }
-        do {
-            let listed = try await client.machines()
-            if listed != machines {
-                machines = listed
-                let visible = listed.filter { !$0.temporary }.map { "\($0.name):\($0.state.rawValue)" }
-                log?("hc: machines \(visible.joined(separator: " "))")
-            }
-            publish()
-        } catch {
-            log?("hc: machine.list failed: \(error)")
-        }
-    }
-
     private func startMachinePolling() {
         machinePollTask?.cancel()
         machinePollTask = Task { [weak self] in
@@ -298,144 +313,7 @@ public final class HcWorkspaceModel: ObservableObject {
         machinePollTask = nil
     }
 
-    /// Adds through the RPC. Password/locale prompts need a person, so the
-    /// caller offers a terminal fallback (`openAddTerminal`) when this throws.
-    @discardableResult
-    public func addMachine(
-        target: String?,
-        via: String?,
-        name: String?,
-        session: String?,
-        temporary: Bool
-    ) async throws -> HcMachine {
-        let added = try await client.addMachine(
-            target: target,
-            via: via,
-            name: name,
-            session: session,
-            temporary: temporary
-        )
-        log?("hc: machine added \(added.name) via \(added.target)")
-        await refreshMachines()
-        return added
-    }
-
-    public func reconnectMachine(_ machine: HcMachine) async {
-        do {
-            let view = try await client.connectMachine(machine.name)
-            log?("hc: machine \(machine.name) \(view.state.rawValue)")
-            await refreshMachines()
-        } catch {
-            machineError = HcWorkspaceModel.describe(error)
-        }
-    }
-
-    public func renameMachine(_ machine: HcMachine, to newName: String) async throws {
-        let renamed = try await client.renameMachine(machine.name, to: newName)
-        log?("hc: machine \(machine.name) renamed to \(renamed.name)")
-        await refreshMachines()
-    }
-
-    public func removeMachine(_ machine: HcMachine) async {
-        do {
-            try await client.removeMachine(machine.name)
-            log?("hc: machine removed \(machine.name)")
-            await refreshMachines()
-        } catch {
-            machineError = HcWorkspaceModel.describe(error)
-        }
-    }
-
-    /// A login is interactive (password, code, host key); a real terminal is
-    /// the only honest place for it. `hc machine login` also reconnects.
-    public func openLoginTerminal(_ machine: HcMachine) async {
-        await runTerminal(
-            ["machine", "login", machine.name],
-            name: "login-\(machine.name)"
-        )
-    }
-
-    /// `machine.update` copies this `hc` to the other side; it has no RPC.
-    public func openUpdateTerminal(_ machine: HcMachine) async {
-        await runTerminal(
-            ["machine", "update", machine.name],
-            name: "update-\(machine.name)"
-        )
-    }
-
-    /// The fallback for anything the RPC cannot show: the CLI can ask questions.
-    public func openAddTerminal(
-        target: String?,
-        via: String?,
-        name: String?,
-        session: String?,
-        temporary: Bool
-    ) async {
-        var arguments = ["machine", "add"]
-        if let via, !via.isEmpty {
-            arguments += ["--via", via]
-        } else if let target, !target.isEmpty {
-            arguments.append(target)
-        }
-        if let name, !name.isEmpty { arguments += ["--name", name] }
-        if let session, !session.isEmpty { arguments += ["--session", session] }
-        if temporary { arguments.append("--temp") }
-        await runTerminal(arguments, name: "add-\(name ?? "machine")")
-    }
-
-    private func runTerminal(_ arguments: [String], name: String) async {
-        do {
-            let reply = try await client.call("terminal.run", params: .object([
-                "argv": .array(([HcWorkspaceModel.hcBinary] + arguments).map { .string($0) }),
-                "name": .string(HcWorkspaceModel.terminalName(name)),
-            ]))
-            if let address = reply["address"]?.stringValue {
-                log?("hc: ran \(arguments.joined(separator: " ")) as \(address)")
-                // The `created` event also arrives; selecting now makes the
-                // terminal visible even if that event races this reply.
-                await select(address)
-            }
-        } catch {
-            machineError = "could not run hc: \(HcWorkspaceModel.describe(error))"
-        }
-    }
-
-    /// `hc` next to the core, or on PATH. A GUI app does not inherit the shell's
-    /// PATH, so the usual install locations are checked explicitly.
-    public static var hcBinary: String {
-        if let explicit = ProcessInfo.processInfo.environment["KRAAL_HC_BINARY"], !explicit.isEmpty {
-            return explicit
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "\(home)/.local/bin/hc",
-            "/opt/homebrew/bin/hc",
-            "/usr/local/bin/hc",
-            "/usr/bin/hc",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "hc"
-    }
-
-    /// Terminal names are `1-32 of a-z 0-9 - _`.
-    static func terminalName(_ raw: String) -> String {
-        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-_")
-        var name = raw.lowercased().map { allowed.contains($0) ? $0 : "-" }
-        if name.isEmpty { name = Array("machine") }
-        return String(name.prefix(32))
-    }
-
-    public static func describe(_ error: Error) -> String {
-        if let rpc = error as? HcRPCError { return rpc.description }
-        return String(describing: error)
-    }
-
-    /// Terminals the sidebar shows. A temporary machine's terminals exist but
-    /// are hidden; selecting one would load a pane nobody can see in the list.
-    public var visibleTerminals: [HcTerminal] {
-        groups.flatMap(\.terminals)
-    }
-
-    private func publish() {
+    func publish() {
         terminals = store.view().terminals
         groups = HcMachineGrouping.groups(
             machines: machines,

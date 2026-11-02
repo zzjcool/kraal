@@ -61,5 +61,8 @@ SPDX-FileCopyrightText: 2026 zzjcool
 - **#226 已完成**：`machine.list` 轮询（core 无机器事件）、侧栏按机器分组、
   `temporary` 隐藏、add/rename/rm/reconnect，`needs_login`/`needs_update` 开
   真实终端跑 `hc machine login|update`。直连 ssh → #242，SSH 专项 fixture → #243。
-- **下一步**：#227/#228（共享文档与客户端模型）。
+- **#227 文档层已完成**：`doc.get/set` 的 CAS、conflict 后重读并最新胜出、
+  `herdr-app` 原始 JSON 编辑（split 只改 `children`/`size`，未知节点/外观字段
+  原样保留）、1 MiB 本地检查、`doc` 事件触发重读。M0 窗口启动时读一次并打日志。
+- **下一步**：#228（space/tab/pane 模型 + 私有 view.json），再做 UI 联调。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

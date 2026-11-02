@@ -164,7 +164,7 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 改窗口大小后 `hc get` 的 `cols/rows` 跟着变。
 
 > **落地记录（2026-11-02）**：协议层（#223）、attach/Ghostty/窗口（#224）、
-> 事件归约（#225）、机器（#226）已完成。
+> 事件归约（#225）、机器（#226）、共享布局文档层（#227）已完成。
 > `make run-hc` 打开 M0 窗口；实测核心侧 `cols/rows` 从 attach 的
 > 80×24 变成窗口的 98×38，窗口截图里能看到核心重放的 `APP-MODE`。
 > **cell→ANSI 删除没有随 #224 做**：旧窗口仍在使用那条链，删了 main 会红。
@@ -179,6 +179,11 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > `temporary` 机器连同其终端隐藏；add/rename/rm/reconnect 走 RPC，
 > `needs_login`/`needs_update` 各开一个真实终端跑 `hc machine login|update`。
 > 直连 `ssh host hc connect` 拆到 #242，SSH 专项 fixture 拆到 #243。
+>
+> #227 的文档层：`HcDocumentSync`（CAS、conflict 重读、最新胜出）、
+> `HcLayoutDocument`（原始 JSON 编辑，只动 `children`/`size`，未知字段原样
+> 带回）。`doc` 事件只带 name/version，模型收到后重读；M0 窗口已加载并打印
+> `hc: layout vN spaces=M tabs=K`，渲染与命令留给 #228。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

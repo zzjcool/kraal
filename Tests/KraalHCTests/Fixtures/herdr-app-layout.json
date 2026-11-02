@@ -1,0 +1,55 @@
+{
+  "spaces": [
+    {
+      "id": "sp1",
+      "name": "work",
+      "folder": "/Users/me/code/app",
+      "futureSpaceField": {"kept": true},
+      "tabs": [
+        {
+          "id": "tb1",
+          "name": "shell",
+          "futureTabField": 7,
+          "root": {
+            "id": "root",
+            "type": "row",
+            "look": {"theme": "dark", "font": "Berkeley Mono"},
+            "floating": [
+              {"id": "fl1", "type": "block", "content": {"mod": "notes", "props": {"file": "TODO.md"}}}
+            ],
+            "children": [
+              {
+                "id": "x1",
+                "type": "block",
+                "content": {"terminal": "t1"},
+                "title": "shell",
+                "size": {"weight": 0.4},
+                "background": "#101418",
+                "futureNodeField": ["a", 1, true, null]
+              },
+              {
+                "id": "st1",
+                "type": "stack",
+                "active": "m1",
+                "header": {"show": true},
+                "children": [
+                  {
+                    "id": "m1",
+                    "type": "block",
+                    "content": {"mod": "markdown", "props": {"file": "README.md"}}
+                  },
+                  {
+                    "id": "x2",
+                    "type": "block",
+                    "content": {"terminal": "t2"},
+                    "size": {"px": 320}
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
