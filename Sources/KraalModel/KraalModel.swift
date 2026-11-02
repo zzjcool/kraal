@@ -16,7 +16,6 @@ public struct KraalModel: Equatable, Sendable {
     /// one machine's `herdr-app` document.
     public internal(set) var spacesValue: JSONValue
     public internal(set) var view: KraalView
-    public internal(set) var recent: [KraalRecent]
     public var home: String
     /// Pane id → the folder its program is in now.
     public var paneFolders: [String: String]
@@ -26,15 +25,22 @@ public struct KraalModel: Equatable, Sendable {
     public init(
         home: String = FileManager.default.homeDirectoryForCurrentUser.path,
         view: KraalView = KraalView(),
-        recent: [KraalRecent] = []
+        recent: [KraalRecent]? = nil
     ) {
         self.home = home
         self.view = view
-        self.recent = recent
+        self.view.recent = recent ?? view.recent
         spacesValue = .array([])
         paneFolders = [:]
         terminalFolders = [:]
         pruneView()
+    }
+
+    /// Spaces closed on this screen, newest first. Part of the private view,
+    /// so it travels in `view.json` and never in the shared document.
+    public var recent: [KraalRecent] {
+        get { view.recent }
+        set { view.recent = newValue }
     }
 
     // MARK: Reading
@@ -88,7 +94,7 @@ public struct KraalModel: Equatable, Sendable {
         let incoming = (document.value["spaces"]?.arrayValue ?? []).map { qualify(space: $0, machine: machine) }
         let kept = (spacesValue.arrayValue ?? []).filter { machineOf(space: $0) != machine }
         spacesValue = .array(ordered(kept + incoming))
-        pruneView()
+        pruneView(for: machine)
     }
 
     /// This machine's spaces as its shared document stores them (local ids).
@@ -103,20 +109,42 @@ public struct KraalModel: Equatable, Sendable {
 
     public func encodedView() throws -> Data { try view.encoded() }
 
+    /// Loads this screen's private view. Entries for machines whose documents
+    /// have not arrived yet are kept: they are not stale, they are unloaded.
     public mutating func loadView(_ data: Data) throws {
         view = try KraalView(data: data)
-        pruneView()
     }
 
-    /// A document that is gone takes its view entries with it.
+    /// Drops view entries for every machine that has no document loaded.
     public mutating func pruneView() {
-        let spaceIDs = Set((spacesValue.arrayValue ?? []).compactMap { $0["id"]?.stringValue })
-        let tabIDs = Set((spacesValue.arrayValue ?? []).flatMap { space in
+        let machines = Set((spacesValue.arrayValue ?? []).map { machineOf(space: $0) ?? "" })
+        for machine in machines {
+            pruneView(for: machine.isEmpty ? nil : machine)
+        }
+    }
+
+    /// A document that is gone takes that machine's view entries with it.
+    /// Other machines' entries stay untouched: their documents may just not
+    /// have loaded yet.
+    public mutating func pruneView(for machine: String?) {
+        let spaces = (spacesValue.arrayValue ?? []).filter { machineOf(space: $0) == machine }
+        let spaceIDs = Set(spaces.compactMap { $0["id"]?.stringValue })
+        let tabIDs = Set(spaces.flatMap { space in
             (space["tabs"]?.arrayValue ?? []).compactMap { $0["id"]?.stringValue }
         })
-        view.activeTabs = view.activeTabs.filter { spaceIDs.contains($0.key) && tabIDs.contains($0.value) }
-        view.tabs = view.tabs.filter { tabIDs.contains($0.key) }
-        if let active = view.activeSpace, !spaceIDs.contains(active) {
+        func belongs(_ id: String) -> Bool {
+            guard let machine else { return !id.contains("/") }
+            return id.hasPrefix(machine + "/")
+        }
+        view.activeTabs = view.activeTabs.filter { entry in
+            guard belongs(entry.key) else { return true }
+            return spaceIDs.contains(entry.key) && tabIDs.contains(entry.value)
+        }
+        view.tabs = view.tabs.filter { entry in
+            guard belongs(entry.key) else { return true }
+            return tabIDs.contains(entry.key)
+        }
+        if let active = view.activeSpace, belongs(active), !spaceIDs.contains(active) {
             view.activeSpace = nil
         }
     }

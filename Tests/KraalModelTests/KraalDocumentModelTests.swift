@@ -92,6 +92,23 @@ struct KraalDocumentModelTests {
         #expect(model.view.activeSpace == nil)
     }
 
+    @Test("loading one machine keeps another machine's view until it loads")
+    func preserveUnloaded() throws {
+        var model = KraalModel(home: "/home/me")
+        model.apply(try document(space: "sp1", tab: "tb1", pane: "p1", terminal: "t1"), for: "alpha")
+        model.focus(pane: "alpha/p1", select: true)
+        // The local document arrives after (or before) the remote one; whichever
+        // order, the remote view must survive the other machine's apply.
+        model.apply(try document(space: "sp2", tab: "tb2", pane: "p2", terminal: "t2"))
+        #expect(model.view.tabs["alpha/tb1"]?.focused == "alpha/p1")
+        #expect(model.view.activeTabs["alpha/sp1"] == "alpha/tb1")
+        #expect(model.view.activeSpace == "alpha/sp1")
+        // A reload of the remote document without that tab does prune it.
+        model.apply(try document(space: "sp3", tab: "tb3", pane: "p3", terminal: "t3"), for: "alpha")
+        #expect(model.view.tabs["alpha/tb1"] == nil)
+        #expect(model.view.activeSpace == nil)
+    }
+
     @Test("split ids on a machine are fresh and project back without a prefix")
     func remoteSplit() throws {
         var model = KraalModel(home: "/home/me")

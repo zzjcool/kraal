@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 zzjcool
 //
-// The M0 window: terminals on the left, the attached one on the right.
+// The window: machines/panes on the left, the layout (or a flat terminal) on
+// the right.
 
 import SwiftUI
 
@@ -27,6 +28,21 @@ public struct HcRootView: View {
             case let .rename(machine):
                 HcRenameMachineView(machine: machine, model: model)
             }
+        }
+        .confirmationDialog(
+            model.closeRequest?.title ?? "Close?",
+            isPresented: Binding(
+                get: { model.closeRequest != nil },
+                set: { if !$0 { model.closeRequest = nil } }
+            ),
+            presenting: model.closeRequest
+        ) { request in
+            Button(request.confirmTitle, role: .destructive) {
+                Task { await model.confirmClose(request) }
+            }
+            Button("Cancel", role: .cancel) { model.closeRequest = nil }
+        } message: { request in
+            Text(request.detail)
         }
         .confirmationDialog(
             "Remove \(model.removingMachine?.name ?? "machine")?",
@@ -87,7 +103,9 @@ public struct HcRootView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if let session = model.session {
+        if model.workspace.activeTab != nil {
+            HcLayoutView(model: model)
+        } else if let session = model.session {
             HcTerminalPaneView(session: session)
                 .id(ObjectIdentifier(session))
         } else {

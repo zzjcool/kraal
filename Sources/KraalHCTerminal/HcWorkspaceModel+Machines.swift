@@ -22,6 +22,7 @@ extension HcWorkspaceModel {
                 log?("hc: machines \(visible.joined(separator: " "))")
             }
             publish()
+            await ensureMachineLayouts()
         } catch {
             log?("hc: machine.list failed: \(error)")
         }

@@ -50,17 +50,26 @@ public struct KraalView: Codable, Equatable, Sendable {
     public var activeTabs: [String: String]
     /// Tab id → focus history, zoom and settled time.
     public var tabs: [String: KraalTabView]
+    /// Spaces closed on this screen, newest first; reopening one reuses it.
+    public var recent: [KraalRecent]
 
-    public init(activeSpace: String? = nil, activeTabs: [String: String] = [:], tabs: [String: KraalTabView] = [:]) {
+    public init(
+        activeSpace: String? = nil,
+        activeTabs: [String: String] = [:],
+        tabs: [String: KraalTabView] = [:],
+        recent: [KraalRecent] = []
+    ) {
         self.activeSpace = activeSpace
         self.activeTabs = activeTabs
         self.tabs = tabs
+        self.recent = recent
     }
 
     private enum CodingKeys: String, CodingKey {
         case activeSpace = "active_space"
         case activeTabs = "active_tabs"
         case tabs
+        case recent
     }
 
     public init(from decoder: Decoder) throws {
@@ -68,6 +77,7 @@ public struct KraalView: Codable, Equatable, Sendable {
         activeSpace = try container.decodeIfPresent(String.self, forKey: .activeSpace)
         activeTabs = try container.decodeIfPresent([String: String].self, forKey: .activeTabs) ?? [:]
         tabs = try container.decodeIfPresent([String: KraalTabView].self, forKey: .tabs) ?? [:]
+        recent = try container.decodeIfPresent([KraalRecent].self, forKey: .recent) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -75,6 +85,7 @@ public struct KraalView: Codable, Equatable, Sendable {
         try container.encodeIfPresent(activeSpace, forKey: .activeSpace)
         if !activeTabs.isEmpty { try container.encode(activeTabs, forKey: .activeTabs) }
         if !tabs.isEmpty { try container.encode(tabs, forKey: .tabs) }
+        if !recent.isEmpty { try container.encode(recent, forKey: .recent) }
     }
 
     public func encoded() throws -> Data {

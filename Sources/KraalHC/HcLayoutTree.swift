@@ -97,6 +97,20 @@ public enum HcLayoutTree {
     }
 
     /// Exchanges two nodes' places; sizes stay with the places, ids with the content.
+    /// Makes `child` the visible block of a stack.
+    public static func selecting(_ root: JSONValue, stack: String, child: String) -> JSONValue? {
+        guard let stackPath = path(to: stack, in: root),
+              let node = node(at: stackPath, in: root),
+              node["type"]?.stringValue == "stack",
+              node["children"]?.arrayValue?.contains(where: { $0["id"]?.stringValue == child }) == true
+        else { return nil }
+        var updated = node
+        updated.setLayoutActive(child)
+        var newRoot = root
+        guard setNode(updated, at: stackPath, in: &newRoot) else { return nil }
+        return newRoot
+    }
+
     public static func swapping(_ root: JSONValue, _ first: String, _ second: String) -> JSONValue? {
         guard first != second,
               let firstPath = path(to: first, in: root),
@@ -237,6 +251,12 @@ extension JSONValue {
     fileprivate mutating func setLayoutSizeJSON(_ size: JSONValue) {
         guard var object = objectValue else { return }
         object["size"] = size
+        self = .object(object)
+    }
+
+    fileprivate mutating func setLayoutActive(_ child: String) {
+        guard var object = objectValue else { return }
+        object["active"] = .string(child)
         self = .object(object)
     }
 

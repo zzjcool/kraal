@@ -79,6 +79,7 @@ let package = Package(
             name: "KraalHCTerminal",
             dependencies: [
                 "KraalHC",
+                "KraalModel",
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
@@ -124,7 +125,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KraalHCTerminalTests",
-            dependencies: ["KraalHCTerminal", "KraalHC"],
+            dependencies: ["KraalHCTerminal", "KraalHC", "KraalModel"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
