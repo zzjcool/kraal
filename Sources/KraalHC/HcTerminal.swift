@@ -183,3 +183,35 @@ struct HcAddress {
         Int(value.drop { $0 == "t" || $0 == "T" }) ?? Int.max
     }
 }
+
+/// Terminal names are the core's: 1–32 of `a-z 0-9 - _`.
+public enum HcTerminalName {
+    public static let limit = 32
+
+    public static func isValid(_ name: String) -> Bool {
+        guard (1 ... limit).contains(name.count) else { return false }
+        return name.unicodeScalars.allSatisfy { scalar in
+            ("a" ... "z").contains(scalar) || ("0" ... "9").contains(scalar) || scalar == "-" || scalar == "_"
+        }
+    }
+
+    /// Lowercases and replaces runs of other characters with `-`, then trims to
+    /// the core's limit. Empty input stays empty (callers pick a fallback).
+    public static func suggested(_ raw: String) -> String {
+        var result = ""
+        var lastWasDash = false
+        for scalar in raw.lowercased().unicodeScalars {
+            let allowed = ("a" ... "z").contains(scalar) || ("0" ... "9").contains(scalar) || scalar == "_"
+            if allowed {
+                result.unicodeScalars.append(scalar)
+                lastWasDash = false
+            } else if !lastWasDash {
+                result.append("-")
+                lastWasDash = true
+            }
+        }
+        while result.hasPrefix("-") { result.removeFirst() }
+        while result.hasSuffix("-") { result.removeLast() }
+        return String(result.prefix(limit))
+    }
+}

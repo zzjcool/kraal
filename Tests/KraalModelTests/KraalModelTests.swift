@@ -243,5 +243,9 @@ struct KraalModelTests {
         #expect(model.recent.first?.name == "s25")
         #expect(model.recent.last?.name == "s6")
         #expect(Set(model.recent.map(\.name)).count == 20)
+
+        var restored = KraalModel(home: "/home/me")
+        try restored.loadView(try model.encodedView())
+        #expect(restored.recent == model.recent)
     }
 }

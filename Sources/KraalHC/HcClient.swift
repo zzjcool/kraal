@@ -145,6 +145,79 @@ public final class HcClient: @unchecked Sendable {
         _ = try await call("machine.rm", params: .object(["machine": .string(name)]))
     }
 
+    // MARK: Terminals
+
+    /// Starts a terminal. `line` runs through the machine's shell; `argv` runs
+    /// directly; neither starts that machine's own shell.
+    ///
+    /// Labels are how the client claims a terminal for a space/tab: the core
+    /// stores them and emits a `labels` event, so a terminal started outside the
+    /// window is adopted the same way.
+    @discardableResult
+    public func runTerminal(
+        argv: [String] = [],
+        line: String? = nil,
+        cwd: String? = nil,
+        env: [String: String] = [:],
+        labels: [String: String] = [:],
+        name: String? = nil,
+        keep: Bool? = nil,
+        on machine: String? = nil
+    ) async throws -> HcTerminal {
+        var params: [String: JSONValue] = [:]
+        if !argv.isEmpty { params["argv"] = .array(argv.map(JSONValue.string)) }
+        if let line { params["line"] = .string(line) }
+        if let cwd { params["cwd"] = .string(cwd) }
+        if !env.isEmpty { params["env"] = .object(env.mapValues(JSONValue.string)) }
+        if !labels.isEmpty { params["labels"] = .object(labels.mapValues(JSONValue.string)) }
+        if let name { params["name"] = .string(name) }
+        if let keep { params["keep"] = .bool(keep) }
+        if let machine { params["on"] = .string(machine) }
+        return HcTerminal(json: try await call("terminal.run", params: .object(params)))
+    }
+
+    public func terminal(_ address: String) async throws -> HcTerminal {
+        HcTerminal(json: try await call(
+            "terminal.get",
+            params: .object(["terminal": .string(address)])
+        ))
+    }
+
+    /// Ends the program (SIGHUP, then SIGKILL). A `keep: true` terminal comes
+    /// back as a fresh shell instead of disappearing.
+    @discardableResult
+    public func killTerminal(_ address: String) async throws -> HcTerminal {
+        HcTerminal(json: try await call(
+            "terminal.kill",
+            params: .object(["terminal": .string(address)])
+        ))
+    }
+
+    /// Sets labels; an empty value removes the key.
+    @discardableResult
+    public func labelTerminal(_ address: String, labels: [String: String]) async throws -> HcTerminal {
+        HcTerminal(json: try await call(
+            "terminal.label",
+            params: .object([
+                "terminal": .string(address),
+                "labels": .object(labels.mapValues(JSONValue.string)),
+            ])
+        ))
+    }
+
+    @discardableResult
+    public func keepTerminal(_ address: String, keep: Bool) async throws -> HcTerminal {
+        HcTerminal(json: try await call(
+            "terminal.keep",
+            params: .object(["terminal": .string(address), "keep": .bool(keep)])
+        ))
+    }
+
+    /// Removes a finished terminal's record (it must not be live).
+    public func removeTerminal(_ address: String) async throws {
+        _ = try await call("terminal.rm", params: .object(["terminal": .string(address)]))
+    }
+
     /// Attaches to a terminal on the current link.
     ///
     /// A reconnect drops every channel, so the caller must be ready to attach

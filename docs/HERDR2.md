@@ -193,6 +193,13 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > 共享文档里的 id 按机器加前缀、写入时 strip；`view.json` 只存 `active_space` /
 > `active_tabs` / `tabs`（focused/before/zoomed/settled）。官方 `herdr-app` fixture
 > 加载→split→投影后未知字段仍在。
+>
+> #229 的终端归属：`terminal.run` 的终端带 `herdr.space`/`herdr.tab` 标签；
+> 窗口把带标签的终端收养进对应 space/tab，未标标签的 worker 只留在 `hc ls`
+> 里，不进布局/侧栏。关闭 pane 先删模型节点再 `terminal.kill`（级联未标标签
+> 的子终端），空间/标签组关闭先弹一次确认；`keep:true` 的终端丢程序后由 core
+> 原地换 shell，窗口重新 attach；`park` 清标签把 pane 退回 worker。真实 core
+> 的 `LiveHcOwnershipTests` 覆盖这条链路并检查共享文档已写回。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

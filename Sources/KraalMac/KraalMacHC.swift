@@ -25,7 +25,7 @@ extension KraalAppDelegate {
         }
     }
 
-    /// Builds the M0 window: a flat terminal list and one attached pane.
+    /// Builds the herdr-core window: machines, the layout and its panes.
     func presentHcWindow(path: String) {
         let model = HcWorkspaceModel(path: path)
         model.log = { kraalLog($0) }

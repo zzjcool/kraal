@@ -70,5 +70,12 @@ SPDX-FileCopyrightText: 2026 zzjcool
   swap/move、zoom/settle（next/prev 跳过 settled）、recent 上限 20、机器前缀
   限定与 `view.json`。29 个模型测试 + 8 个树操作测试；官方布局 fixture
   加载→编辑→投影不丢未知字段。文档读写仍由 #227 的 `HcDocumentSync` 负责。
-- **下一步**：#229（终端归属与标签），再做 #230/#231 的侧栏与命令面。
+- **#229 终端归属已完成**：`terminal.run/get/kill/label/keep/rm` 客户端 API；
+  `KraalModel.adopt` 按 `herdr.space`/`herdr.tab` 安放终端；未标标签的 worker
+  不进布局/侧栏。新 tab/split/close 由窗口发起：`terminal.run` 写标签，
+  客户端落文档，关闭走 `terminal.kill`（级联未标标签的子终端；组关闭先确认）。
+  `keep:true` 的终端丢程序后由 core 换新 shell，窗口自动重新 attach；`park`
+  清标签把 pane 退回 worker。真实 core 的端到端测试 `LiveHcOwnershipTests`
+  覆盖建 tab、split、关闭、外部收养、keep 重启与文档持久化。
+- **下一步**：#230（agents 侧栏 / OSC 7501 状态与通知），再做 #231 的命令面与 chrome。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

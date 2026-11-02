@@ -10,6 +10,14 @@ import KraalHC
 extension KraalModel {
     // MARK: Spaces
 
+    /// Shows `id` without touching its tabs or terminals.
+    @discardableResult
+    public mutating func setActiveSpace(_ id: String) -> Bool {
+        guard spaceIndex(id) != nil else { return false }
+        view.activeSpace = id
+        return true
+    }
+
     @discardableResult
     public mutating func addSpace(
         id: String,
@@ -212,13 +220,32 @@ extension KraalModel {
     // MARK: Panes
 
     @discardableResult
-    public mutating func split(pane: String, axis: KraalAxis, newPane: String, terminal: String) -> Bool {
-        splitWith(pane: pane, axis: axis, node: HcLayoutDocument.terminalNode(id: newPane, terminal: terminal))
+    public mutating func split(
+        pane: String,
+        axis: KraalAxis,
+        newPane: String,
+        terminal: String,
+        focus: Bool = true
+    ) -> Bool {
+        splitWith(
+            pane: pane,
+            axis: axis,
+            node: HcLayoutDocument.terminalNode(id: newPane, terminal: terminal),
+            focus: focus
+        )
     }
 
     /// Splits `pane` with any block (a terminal, a mod, a future kind).
+    ///
+    /// `focus: false` leaves focus and zoom alone: adoption puts a terminal
+    /// beside the last pane without stealing what the person is looking at.
     @discardableResult
-    public mutating func splitWith(pane: String, axis: KraalAxis, node: JSONValue) -> Bool {
+    public mutating func splitWith(
+        pane: String,
+        axis: KraalAxis,
+        node: JSONValue,
+        focus: Bool = true
+    ) -> Bool {
         guard let location = tabLocation(pane: pane),
               let root = root(at: location),
               let spaceID = spacesValue[location.space]?["id"]?.stringValue
@@ -236,8 +263,9 @@ extension KraalModel {
             containerID: freshID("s", machine: machine)
         ) else { return false }
         setRoot(updated, at: location)
+        guard focus else { return true }
         var state = view.tabs[location.id] ?? KraalTabView()
-        focus(&state, pane: newID)
+        self.focus(&state, pane: newID)
         state.zoomed = nil
         view.tabs[location.id] = state
         return true
@@ -389,6 +417,16 @@ extension KraalModel {
         guard state.zoomed != nil else { return false }
         state.zoomed = nil
         view.tabs[tab.id] = state
+        return true
+    }
+
+    /// Shows another block of a stack.
+    @discardableResult
+    public mutating func selectStackChild(stack: String, child: String) -> Bool {
+        guard let location = tabLocation(pane: stack), let root = root(at: location),
+              let updated = HcLayoutTree.selecting(root, stack: stack, child: child)
+        else { return false }
+        setRoot(updated, at: location)
         return true
     }
 

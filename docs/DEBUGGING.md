@@ -677,3 +677,21 @@ channel id 去注册。读线程若在注册前读到 CLOSE，会把它放进 `e
 三条都遵守同一个顺序：**先解码已到的字节，再处理结束**；结束不能清掉尚未交付的
 字节。回归测试在 `HcConnectionTests`（late registration / handshake coalescing）与
 `HcAttachStreamTests`；`HcLateChannelTests/lateAttachClose` 在修复前会稳定超时。
+
+## §19 「终端列表是空的」不等于「终端都没了」（2026-11-03）
+
+布局文档和事件快照是两条独立的 RPC。连接后 `doc.get` 可能先于
+`events.subscribe` 返回：这时 `terminals` 还是空的，但文档里已有 pane。如果
+`reconcile` 直接按「地址不在列表里 = 终端结束」删 pane，就会在文档刚加载完时
+把整份布局删空并写回核心——看起来像「打开窗口布局没了」。
+
+修法是给事件层一个显式的 `hasSnapshot`：快照到达前，空列表的含义是「还没读到」，
+不是「没有终端」；`reconcile` 在它为 false 时直接返回。第二层是关闭竞态：pane
+节点删掉后 `terminal.kill` 还在路上，标签仍然写着原 space，下一次 reconcile 会把
+它重新收养回来。所以关闭先记进 `closingTerminals`，直到终端不再 live 才移除；
+kill 失败则撤销记录，让终端继续可见。
+
+验证分两层：`HcWorkspaceModelTests/beforeSnapshot` 在 `terminals` 为空、
+`hasSnapshot=false` 时直接调用 `reconcile`，pane 必须还在（去掉守卫就红）；
+`LiveHcOwnershipTests/checkReload` 再用真实 core 开第二个窗口，读回第一个窗口
+落盘的 space 和 pane。
