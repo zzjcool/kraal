@@ -122,6 +122,7 @@ rename/rm`；错误态 `needs_update` / `needs_login` / `unreachable` 原样呈�
 | `KraalProtocol` 5.8k | **删 ~5.2k** | Bincode/Wire/Decoder/Encoder/Snapshot/Surface/CellBuffer/GraphicsEncoder/SurfaceANSIRenderer/TerminalInputDecoder 全部作废 |
 | 同上 | 留 ~0.6k | `ANSIToHTML`、`GhosttyTheme`、`Frame` 的定长校验思路 |
 | `KraalTransport` 1.6k | 改 ~1.0k | `UnixSocket` 直接复用；`HerdrDiscovery` → HC_SESSION/HC_SOCKET 路径规则；SSH 只保留 `hc connect` 一种形态 |
+| `KraalModel` 1.0k（新增） | 新增 | 纯 Swift 的 space/tab/pane 模型：命名、焦点历史、split/close/move/zoom/settle、recent、`view.json`；不依赖 AppKit/Ghostty |
 | `KraalClient` 1.0k | 重写 | `EndpointConnection` → `HcConnection`（JSON-RPC id + 帧通道 + 流 credit） |
 | `KraalSidebar` 1.4k | 删 ~1.0k | `ui.sidebar.*` 规格与 token 解析是 Herdr 1 的；行模型可留 |
 | `KraalUI` 18.0k | 改 ~5k / 留 ~11k | 布局视图、cell 画布、滚动条、快捷键快照解析删除；主题/调色板/设置/命令表/侧栏外壳保留改造 |
@@ -184,6 +185,14 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > `HcLayoutDocument`（原始 JSON 编辑，只动 `children`/`size`，未知字段原样
 > 带回）。`doc` 事件只带 name/version，模型收到后重读；M0 窗口已加载并打印
 > `hc: layout vN spaces=M tabs=K`，渲染与命令留给 #228。
+>
+> #228 的模型层：`KraalModel` 是纯 Swift（只依赖 Foundation + `KraalHC` 的值类型），
+> 规则按官方 `src/model.rs` / `src/layout.rs` 的可观察行为重写：space 跟随第一个
+> 终端目录、tab 用序号、焦点历史 32、关 pane 回退到 before、split 同轴复用父容器、
+> close 权重归还前邻居、settled tab 被 next/prev 跳过、recent 去重且上限 20。
+> 共享文档里的 id 按机器加前缀、写入时 strip；`view.json` 只存 `active_space` /
+> `active_tabs` / `tabs`（focused/before/zoomed/settled）。官方 `herdr-app` fixture
+> 加载→split→投影后未知字段仍在。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

@@ -64,5 +64,11 @@ SPDX-FileCopyrightText: 2026 zzjcool
 - **#227 文档层已完成**：`doc.get/set` 的 CAS、conflict 后重读并最新胜出、
   `herdr-app` 原始 JSON 编辑（split 只改 `children`/`size`，未知节点/外观字段
   原样保留）、1 MiB 本地检查、`doc` 事件触发重读。M0 窗口启动时读一次并打日志。
-- **下一步**：#228（space/tab/pane 模型 + 私有 view.json），再做 UI 联调。
+- **#228 模型层已完成**：`KraalModel`（纯 Swift，无 AppKit/Ghostty）/ `KraalOperations`
+  / `KraalView`：space/tab/pane 值与规则、命名（worktree 优先、跳 mod）、焦点历史
+  上限 32、关 pane 回退、split 同轴复用/跨轴包容器、close 权重归还、
+  swap/move、zoom/settle（next/prev 跳过 settled）、recent 上限 20、机器前缀
+  限定与 `view.json`。29 个模型测试 + 8 个树操作测试；官方布局 fixture
+  加载→编辑→投影不丢未知字段。文档读写仍由 #227 的 `HcDocumentSync` 负责。
+- **下一步**：#229（终端归属与标签），再做 #230/#231 的侧栏与命令面。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

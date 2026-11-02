@@ -68,6 +68,13 @@ let package = Package(
             resources: [.copy("Resources/themes")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // The client's spaces/tabs/panes: pure values and tree operations, no
+        // AppKit or Ghostty, so the rules are testable on their own.
+        .target(
+            name: "KraalModel",
+            dependencies: ["KraalHC"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .target(
             name: "KraalHCTerminal",
             dependencies: [
@@ -118,6 +125,11 @@ let package = Package(
         .testTarget(
             name: "KraalHCTerminalTests",
             dependencies: ["KraalHCTerminal", "KraalHC"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "KraalModelTests",
+            dependencies: ["KraalModel", "KraalHC"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
