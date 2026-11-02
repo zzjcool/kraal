@@ -9,6 +9,8 @@
 
 import AppKit
 import KraalClient
+import KraalHC
+import KraalHCTerminal
 import KraalProtocol
 import KraalTransport
 import KraalTerminalView
@@ -17,7 +19,7 @@ import SwiftUI
 
 @MainActor
 final class KraalAppDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow?
+    var window: NSWindow?
     /// Owns the copy-mode session for this window: its cursor, its visible bar and
     /// the key monitor that drives it. Lives here rather than in the store because
     /// it is per-window view state.
@@ -37,6 +39,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var terminalEffects: TerminalEffectsApplier?
     /// Owns the resolved palette; every view reads it through `\.palette`.
     private var themeStore: ThemeStore?
+    /// The herdr-core window's model, when this launch is in hc mode.
+    var hcWorkspace: HcWorkspaceModel?
 
     /// Whether this launch is allowed to take the desktop.
     ///
@@ -99,6 +103,16 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
         kraalLog("launch: cell painter=\(CellPainterPolicy.mode.rawValue)")
+
+        // herdr-core mode is a separate window, not a second stack: the Herdr 1
+        // store and its pane renderer are never constructed. `KRAAL_HC=1` uses the
+        // socket `HcPaths` resolves (same rules as `hc`); `KRAAL_HC_SOCKET` points
+        // at one explicitly for a scratch core.
+        if let socket = Self.hcSocketPath() {
+            kraalLog("launch: mode=herdr-core socket=\(socket)")
+            presentHcWindow(path: socket)
+            return
+        }
 
         let theme = makeThemeStore()
         let pool = makeTerminalPool(theme: theme)
@@ -468,7 +482,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         return theme
     }
 
-    private func makeWindow(root: some View) -> NSWindow {
+    func makeWindow(root: some View) -> NSWindow {
         let hosting = NSHostingView(rootView: root)
         hosting.frame = NSRect(x: 0, y: 0, width: 1180, height: 760)
 
@@ -729,6 +743,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         saveFrame()
         mouseForwarder?.detach()
+        hcWorkspace?.stop()
         store.disconnect()
     }
 }

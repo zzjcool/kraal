@@ -94,3 +94,55 @@ struct HcWireTests {
         #expect(try second.next()?.payload == Data([0, 0, 0, 0]))
     }
 }
+
+@Suite("Frame decoder after compaction")
+struct HcFrameDecoderCompactionTests {
+    @Test("frames still decode after the buffer has compacted")
+    func decodesPastCompaction() throws {
+        var encoder = HcFrameDecoderHarness()
+        var decoder = HcFrameDecoder()
+        // 10k × 11 bytes = 110 KiB, so `compactIfNeeded` runs mid-stream.
+        for index in 0 ..< 10_000 {
+            let payload = Data([UInt8(index & 0xFF), UInt8((index >> 8) & 0xFF)])
+            let frame = try HcWire.dataFrame(channel: UInt32(index % 7 + 1), payload: payload)
+            encoder.frames.append(frame)
+        }
+        // Feed in chunks so compaction happens between frames, not at the end.
+        for chunk in stride(from: 0, to: encoder.frames.count, by: 97) {
+            let end = min(chunk + 97, encoder.frames.count)
+            decoder.append(encoder.frames[chunk ..< end].reduce(into: Data()) { $0.append($1) })
+            while try decoder.next() != nil {}
+        }
+        // The last frame must still carry its own bytes.
+        var tailDecoder = HcFrameDecoder()
+        tailDecoder.append(encoder.frames.last ?? Data())
+        let tail = try #require(try tailDecoder.next())
+        #expect(tail.channel == UInt32(9_999 % 7 + 1))
+        #expect(tail.payload == Data([UInt8(9_999 & 0xFF), UInt8((9_999 >> 8) & 0xFF)]))
+    }
+
+    @Test("a frame split across the compaction boundary survives")
+    func splitAtBoundary() throws {
+        var decoder = HcFrameDecoder()
+        let filler = try HcWire.dataFrame(channel: 1, payload: Data(repeating: 0x41, count: 1024))
+        var stream = Data()
+        for _ in 0 ..< 100 { stream.append(filler) } // 103 KiB, forces compaction
+        let last = try HcWire.dataFrame(channel: 2, payload: Data("tail".utf8))
+        stream.append(last)
+        decoder.append(stream)
+
+        var frames = 0
+        var final: HcFrame?
+        while let frame = try decoder.next() {
+            frames += 1
+            final = frame
+        }
+        #expect(frames == 101)
+        #expect(final?.channel == 2)
+        #expect(final?.payload == Data("tail".utf8))
+    }
+}
+
+private struct HcFrameDecoderHarness {
+    var frames: [Data] = []
+}

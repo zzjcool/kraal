@@ -99,6 +99,32 @@ tart exec kraal-agent /bin/bash -lc \
 
 ---
 
+## 2.1 herdr-core 模式（M0）
+
+```bash
+make run-hc          # 与 make run 同一个 bundle，只是入口换成 herdr-core
+```
+
+窗口左边是 `terminal.list`，右边是一个 attach 的 Ghostty pane。它和旧入口
+**不是同一条路径**：不构造 Herdr 1 的 store，也不做 cell 编码。
+
+默认连本机 `default` core。隔离实验要自己给全套环境（`hc` 也用同一套）：
+
+```bash
+export HC_SESSION=kraal-test
+export XDG_STATE_HOME=/tmp/kraal-test/state
+export XDG_CONFIG_HOME=/tmp/kraal-test/config
+hc run --bg --name demo --keep -- sh -c 'printf "hello\n"; cat'
+make run-hc
+hc get <address> --json | jq '{cols, rows, state}'
+```
+
+判据不是“窗口打开了”，而是核心侧变了：attach 用的 80×24 会被窗口真实网格
+覆盖（实测 98×38）。日志里 `hc: ready core=…` / `hc: attached t1` 是给以后
+gui.sh 断言用的证据。`KRAAL_HC_SOCKET` 可以显式指定一个 socket。
+
+---
+
 ## 3. 日常改一个 UI 功能
 
 ```bash

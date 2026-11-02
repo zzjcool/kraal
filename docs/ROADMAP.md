@@ -46,5 +46,14 @@ SPDX-FileCopyrightText: 2026 zzjcool
 
 ## 3. 当前状态
 
-迁移刚开始：目标已冻结（[HERDR2.md](HERDR2.md)），issue 已按 M0–M3 重建。
-旧 issue（#1–#219）全部关闭，理由写在各条评论里；历史仍可查。
+目标已冻结（[HERDR2.md](HERDR2.md)），issue 按 M0–M3 重建；旧 issue（#1–#219）
+全部关闭，理由写在各条评论里。
+
+- **#223 已完成**：`KraalHC`（JSON-RPC、帧、路径、hello 门禁、重连）。
+  46 个测试 + 真实 `hc` 冒烟。
+- **#224 已完成**：`HcAttachStream` / `HcTerminalSession`，原始字节进 Ghostty；
+  M0 窗口 `make run-hc`（终端列表 + 一个 pane）。实测窗口的网格
+  98×38 已写回核心，截图可见重放内容；真实 core 的 headless 测试同时验证
+  输入回显与 RESIZE。
+- **下一步**：#225（events 归约）、#226（machines），然后 M1 的共享文档与模型。
+- `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

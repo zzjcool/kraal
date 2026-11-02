@@ -181,7 +181,12 @@ public struct HcFrameDecoder {
     private mutating func compactIfNeeded() {
         // Amortised: drop consumed bytes once they dominate, not per frame.
         guard offset > 64 * 1024, offset * 2 > buffer.count else { return }
-        buffer.removeFirst(offset)
+        // `Data.removeFirst` leaves `startIndex` at the removed count, and every
+        // read below indexes from zero. Re-base with a copy instead: it costs one
+        // small memmove per 64 KiB and keeps the index arithmetic honest. Found
+        // by a 5 MiB attach stream (SIGTRAP in `readUInt32` after the first
+        // compaction); no unit test under 64 KiB could reach it.
+        buffer = Data(buffer.dropFirst(offset))
         offset = 0
     }
 }

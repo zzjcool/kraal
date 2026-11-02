@@ -69,6 +69,14 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
+            name: "KraalHCTerminal",
+            dependencies: [
+                "KraalHC",
+                .product(name: "GhosttyTerminal", package: "libghostty-spm"),
+            ],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .target(
             name: "KraalTerminalView",
             dependencies: [
                 "KraalClient",
@@ -96,13 +104,20 @@ let package = Package(
         ),
         .executableTarget(
             name: "KraalMac",
-            dependencies: ["KraalClient", "KraalSidebar", "KraalUI", "KraalTerminalView"],
+            dependencies: [
+                "KraalClient", "KraalSidebar", "KraalUI", "KraalTerminalView", "KraalHC", "KraalHCTerminal",
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
             name: "KraalProtocolTests",
             dependencies: ["KraalProtocol"],
             resources: [.copy("Fixtures")],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "KraalHCTerminalTests",
+            dependencies: ["KraalHCTerminal", "KraalHC"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
