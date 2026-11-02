@@ -143,8 +143,8 @@ public struct HcLayoutDocument: Sendable, Equatable {
               let root = tab["root"]
         else { return false }
 
-        guard let updated = Self.split(node: root, target: request.paneID, axis: request.axis,
-                                       newNode: request.newNode, containerID: request.containerID)
+        guard let updated = HcLayoutTree.split(root, target: request.paneID, axis: request.axis,
+                                               newNode: request.newNode, containerID: request.containerID)
         else { return false }
         tab["root"] = updated
         tabs[tabIndex] = .object(tab)
@@ -161,69 +161,5 @@ public struct HcLayoutDocument: Sendable, Equatable {
             "type": .string("block"),
             "content": .object(["terminal": .string(terminal)]),
         ])
-    }
-
-    // MARK: Tree
-
-    private static func split(
-        node: JSONValue,
-        target: String,
-        axis: HcLayoutAxis,
-        newNode: JSONValue,
-        containerID: String
-    ) -> JSONValue? {
-        guard var object = node.objectValue else { return nil }
-
-        // The parent already runs along this axis: insert beside the target and
-        // halve its weight (a pixel-sized pane keeps its pixels).
-        if object["type"]?.stringValue == axis.type,
-           var children = object["children"]?.arrayValue,
-           let index = children.firstIndex(where: { $0["id"]?.stringValue == target }) {
-            var targetNode = children[index]
-            let share = targetNode["size"]?["weight"]?.doubleValue ?? 1
-            if targetNode["size"]?["px"] == nil {
-                targetNode.setSize(weight: share / 2)
-                children[index] = targetNode
-            }
-            var inserted = newNode
-            inserted.setSize(weight: share / 2)
-            children.insert(inserted, at: index + 1)
-            object["children"] = .array(children)
-            return .object(object)
-        }
-
-        if let children = object["children"]?.arrayValue {
-            for (index, child) in children.enumerated() {
-                if let updated = split(node: child, target: target, axis: axis,
-                                       newNode: newNode, containerID: containerID) {
-                    var children = children
-                    children[index] = updated
-                    object["children"] = .array(children)
-                    return .object(object)
-                }
-            }
-        }
-
-        guard object["id"]?.stringValue == target else { return nil }
-        let slotSize = object["size"]
-        object.removeValue(forKey: "size")
-
-        // A fresh container's children start equal: no size on either, as in
-        // herdr-app (a 0.5 weight would render the same but not serialize alike).
-        var wrapper: [String: JSONValue] = [
-            "id": .string(containerID),
-            "type": .string(axis.type),
-            "children": .array([.object(object), newNode]),
-        ]
-        if let slotSize { wrapper["size"] = slotSize }
-        return .object(wrapper)
-    }
-}
-
-private extension JSONValue {
-    mutating func setSize(weight: Double) {
-        guard var object = objectValue else { return }
-        object["size"] = .object(["weight": .number(weight)])
-        self = .object(object)
     }
 }
