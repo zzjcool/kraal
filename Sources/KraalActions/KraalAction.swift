@@ -213,10 +213,11 @@ public enum KraalActions {
         return try action.validate(arguments)
     }
 
-    /// What `herdr-app commands` would print, restricted to actions Kraal
-    /// implements natively. Unsupported actions stay in `all` with a reason.
+    /// What `herdr-app commands` prints: every action, in source order, with
+    /// upstream's `{name, args, about}` shape. Unsupported actions stay in the
+    /// list too, so a script sees the same names; `do` reports the reason.
     public static var listing: [KraalActionListing] {
-        all.filter(\.isNative).map(KraalActionListing.init)
+        all.map(KraalActionListing.init)
     }
 
     public static func listingJSON(pretty: Bool = true) throws -> String {

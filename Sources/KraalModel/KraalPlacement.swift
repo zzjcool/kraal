@@ -56,6 +56,7 @@ extension KraalModel {
         terminal address: String,
         space spaceID: String,
         tab tabID: String? = nil,
+        tabName: String = "",
         folder: String = "",
         machine: String? = nil
     ) -> String? {
@@ -67,6 +68,7 @@ extension KraalModel {
             let paneID = freshPaneID(machine: machine)
             let seed = KraalTabSeed(
                 id: tabID ?? freshTabID(machine: machine),
+                name: tabName,
                 paneID: paneID,
                 terminal: address
             )
@@ -99,7 +101,7 @@ extension KraalModel {
         // A label naming a tab of another space must not move it: use a fresh
         // id in the space the terminal actually claims.
         let seedTabID = tabID.flatMap { tab($0) == nil ? $0 : nil } ?? freshTabID(machine: machine)
-        let seed = KraalTabSeed(id: seedTabID, paneID: paneID, terminal: address)
+        let seed = KraalTabSeed(id: seedTabID, name: tabName, paneID: paneID, terminal: address)
         guard addTab(space: spaceID, tab: seed) else { return nil }
         view.activeTabs[spaceID] = activeTab
         return paneID

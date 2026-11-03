@@ -85,6 +85,7 @@ let package = Package(
         .target(
             name: "KraalHCTerminal",
             dependencies: [
+                "KraalActions",
                 "KraalHC",
                 "KraalModel",
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
@@ -103,7 +104,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "KraalCLI",
-            dependencies: ["KraalProtocol", "KraalTransport", "KraalClient"],
+            dependencies: ["KraalActions", "KraalProtocol", "KraalTransport", "KraalClient"],
             path: "Sources/KraalCLI",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

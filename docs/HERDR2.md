@@ -210,6 +210,13 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > 一次；mark unread 写 `turn-1`。blocked 新出现或 busy→quiet 且没在看时给
 > toast/系统通知/声音，子 agent 与不属于任何 space 的终端不告警。旧
 > `KraalUI` 的 `SnapshotNotices`/agent 解析仍在旧窗口路径上，随 #234 一起删除。
+>
+> #231 的动作面：`KraalActions` 不是 UI 的副本，而是唯一表；`kraal commands`
+> 由它生成，`HcWorkspaceModel.performAction` 只负责把名字翻译成模型调用。菜单与
+> ⌘K 面板共用这个 runner，`implementedActions` 之外的 native action 暂时不展示
+> （`pane.go/swap`、`terminal.right_click`、主题/缩放等留给后续阶段）；不支持的
+> action 保留原因，帮助浮层按官方名字列出。命令面不引 JS mods，`layout.*`/
+> `mod.*`/`overlay.*` 永远不在 Kraal 的可执行集合里。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

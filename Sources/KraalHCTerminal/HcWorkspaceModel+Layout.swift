@@ -69,9 +69,30 @@ extension HcWorkspaceModel {
         }
     }
 
+    /// Serializes writes to one machine's document. Adoption and the action
+    /// that started the terminal can both save the same edit; queueing keeps the
+    /// second write on the version produced by the first instead of CAS'ing a
+    /// stale one and reporting a conflict.
+    func saveLayout(machine: String?) async {
+        let key = key(machine)
+        let previous = layoutSaveChains[key]
+        let generation = (layoutSaveGeneration[key] ?? 0) + 1
+        layoutSaveGeneration[key] = generation
+        let task = Task { [weak self] in
+            _ = await previous?.value
+            guard let self else { return }
+            await self.writeLayout(machine: machine)
+        }
+        layoutSaveChains[key] = task
+        await task.value
+        if layoutSaveGeneration[key] == generation {
+            layoutSaveChains[key] = nil
+        }
+    }
+
     /// Writes the whole machine document. A conflict means someone else wrote
     /// first: their version is read and shown, not merged.
-    func saveLayout(machine: String?) async {
+    private func writeLayout(machine: String?) async {
         let key = key(machine)
         guard layoutLoaded.contains(key), let sync = layoutSyncs[key],
               let document = workspace.project(for: machine)
@@ -296,6 +317,52 @@ extension HcWorkspaceModel {
         publish()
     }
 
+    public func renameSpace(_ id: String, name: String) async {
+        guard let space = workspace.space(id),
+              layoutLoaded.contains(key(space.machine)) else { return }
+        guard workspace.renameSpace(id, to: name) else { return }
+        publish()
+        await saveLayout(machine: space.machine)
+    }
+
+    public func moveSpace(_ id: String, index: Int) async {
+        guard let space = workspace.space(id),
+              layoutLoaded.contains(key(space.machine)) else { return }
+        guard workspace.moveSpace(id, to: max(0, index - 1)) else { return }
+        publish()
+        await saveLayout(machine: space.machine)
+    }
+
+    public func renameTab(_ id: String, name: String) async {
+        guard let space = workspace.space(of: id),
+              layoutLoaded.contains(key(space.machine)) else { return }
+        guard workspace.renameTab(id, to: name) else { return }
+        publish()
+        await saveLayout(machine: space.machine)
+    }
+
+    public func moveTab(_ id: String, index: Int) async {
+        guard let space = workspace.space(of: id),
+              layoutLoaded.contains(key(space.machine)) else { return }
+        guard workspace.moveTab(id, to: index) else { return }
+        publish()
+        await saveLayout(machine: space.machine)
+    }
+
+    public func settleTab(_ id: String? = nil) {
+        guard let tab = id.flatMap({ workspace.tab($0) }) ?? workspace.activeTab else { return }
+        guard workspace.settle(tab.id, at: UInt64(Date().timeIntervalSince1970 * 1000)) else { return }
+        publish()
+        scheduleViewSave()
+    }
+
+    public func unsettleTab(_ id: String? = nil) {
+        guard let tab = id.flatMap({ workspace.tab($0) }) ?? workspace.activeTab else { return }
+        guard workspace.unsettle(tab.id) else { return }
+        publish()
+        scheduleViewSave()
+    }
+
     public func focusPane(_ id: String) {
         guard workspace.focus(pane: id) else { return }
         publish()
@@ -318,40 +385,112 @@ extension HcWorkspaceModel {
         publish()
     }
 
-    public func newTab(name: String? = nil) async {
+    public func newTab(
+        name: String? = nil,
+        tabName: String? = nil,
+        folder: String? = nil,
+        space spaceID: String? = nil,
+        argv: [String] = []
+    ) async {
         guard client.isConnected else { return }
-        let space = workspace.activeSpace
-        let machine = space?.machine
+        let selected = spaceID.flatMap { workspace.space($0) } ?? workspace.activeSpace
+        let machine = selected?.machine
         guard layoutLoaded.contains(key(machine)) else {
             layoutError = "This machine's layout is unavailable. Try again when it reconnects."
             return
         }
-        let spaceID = space?.id ?? workspace.freshSpaceID(machine: machine)
-        let tabID = workspace.freshTabID(machine: machine)
-        let folder = space?.folder ?? workspace.home
+        if let selected, selected.id != workspace.activeSpace?.id {
+            workspace.setActiveSpace(selected.id)
+        }
+        let space = selected?.id ?? workspace.freshSpaceID(machine: machine)
+        let tab = workspace.freshTabID(machine: machine)
+        let cwd = folder ?? selected?.folder ?? workspace.home
         guard let terminal = await startTerminal(
-            space: spaceID,
-            tab: tabID,
-            cwd: folder,
+            space: space,
+            tab: tab,
+            cwd: cwd,
             name: name,
+            argv: argv,
             machine: machine
         ) else { return }
-        guard workspace.adopt(
+        guard let pane = workspace.adopt(
             terminal: terminal.address,
-            space: spaceID,
-            tab: tabID,
-            folder: folder,
+            space: space,
+            tab: tab,
+            tabName: tabName ?? "",
+            folder: cwd,
             machine: machine
-        ) != nil else {
+        ) else {
             layoutError = "The terminal started, but its tab could not be added."
             await killCascade(terminal.address)
             return
+        }
+        // Adoption may have won the race while `terminal.run` was in flight and
+        // created the tab with a guessed id/name. Keep its id, apply the name.
+        if let actual = workspace.tab(ofPane: pane) {
+            if let tabName, !tabName.isEmpty, actual.name != tabName {
+                _ = workspace.renameTab(actual.id, to: tabName)
+            }
+            // Adoption restores the previous active tab on purpose (it is how a
+            // labelled terminal from elsewhere must behave). An explicit
+            // `tab.new` is the opposite: show the tab it just made.
+            _ = workspace.selectTab(actual.id)
         }
         publish()
         await saveLayout(machine: machine)
     }
 
-    public func splitFocusedPane(_ axis: KraalAxis) async {
+    /// Make a space with its first terminal; used by `space.new` and the empty
+    /// window. `folder` empty means the machine's home.
+    public func newSpace(
+        name: String? = nil,
+        folder: String? = nil,
+        tabName: String? = nil,
+        argv: [String] = [],
+        machine: String? = nil
+    ) async {
+        guard client.isConnected, layoutLoaded.contains(key(machine)) else {
+            layoutError = "This machine's layout is unavailable. Try again when it reconnects."
+            return
+        }
+        let spaceID = workspace.freshSpaceID(machine: machine)
+        let tabID = workspace.freshTabID(machine: machine)
+        let cwd = folder ?? (machine == nil ? workspace.home : "")
+        guard let terminal = await startTerminal(
+            space: spaceID,
+            tab: tabID,
+            cwd: cwd,
+            argv: argv,
+            machine: machine
+        ) else { return }
+        // `adopt` is the only path that survives the terminal event arriving
+        // before `terminal.run`'s reply: it may already have made the space with
+        // a fresh tab. Do not add a second one.
+        guard let pane = workspace.adopt(
+            terminal: terminal.address,
+            space: spaceID,
+            tab: tabID,
+            tabName: tabName ?? "",
+            folder: cwd,
+            machine: machine
+        ) else {
+            layoutError = "The terminal started, but its space could not be added."
+            await killCascade(terminal.address)
+            return
+        }
+        if let name, !name.isEmpty {
+            _ = workspace.renameSpace(spaceID, to: name)
+        }
+        if let tabName, !tabName.isEmpty,
+           let actual = workspace.tab(ofPane: pane), actual.name != tabName {
+            _ = workspace.renameTab(actual.id, to: tabName)
+        }
+        workspace.setActiveSpace(spaceID)
+        publish()
+        await saveLayout(machine: machine)
+    }
+
+    public func splitFocusedPane(_ axis: KraalAxis, argv: [String] = []) async {
         guard client.isConnected, let tab = workspace.activeTab,
               let target = tab.focusedPane, let space = workspace.space(of: tab.id)
         else { return }
@@ -364,6 +503,7 @@ extension HcWorkspaceModel {
             space: space.id,
             tab: tab.id,
             cwd: space.folder,
+            argv: argv,
             machine: space.machine
         ) else { return }
         let placed = workspace.paneID(ofTerminal: terminal.address)
@@ -498,6 +638,11 @@ extension HcWorkspaceModel {
         }
     }
 
+    /// End a terminal and the sub-agents that belong to its space.
+    public func killTerminal(_ address: String) async {
+        await killCascade(address)
+    }
+
     /// Takes a terminal out of the layout without ending it: empty labels and
     /// no keep. It becomes a worker in the sidebar.
     public func parkTerminal(_ address: String) async {
@@ -558,11 +703,12 @@ extension HcWorkspaceModel {
 
     // MARK: Starting terminals
 
-    private func startTerminal(
+    func startTerminal(
         space: String,
         tab: String,
         cwd: String,
         name: String? = nil,
+        argv: [String] = [],
         machine: String?
     ) async -> HcTerminal? {
         let labels = [
@@ -571,12 +717,13 @@ extension HcWorkspaceModel {
             "herdr.seen": "0",
         ]
         let cleanName = name.map(HcTerminalName.suggested).flatMap { $0.isEmpty ? nil : $0 }
-        if let name, cleanName == nil {
+        if name != nil, cleanName == nil {
             layoutError = "A terminal name is 1–32 of a-z 0-9 - _."
             return nil
         }
         do {
             return try await client.runTerminal(
+                argv: argv,
                 cwd: cwd.isEmpty ? nil : cwd,
                 env: Self.terminalEnvironment,
                 labels: labels,

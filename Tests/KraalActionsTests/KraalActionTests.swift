@@ -44,7 +44,7 @@ struct KraalActionTests {
         #expect(KraalActions.all.count == 69)
         #expect(KraalActions.all.map(\.name) == upstreamNames)
         #expect(Set(KraalActions.all.map(\.name)).count == 69)
-        #expect(KraalActions.listing.count == 47)
+        #expect(KraalActions.listing.count == 69)
         #expect(KraalActions.unsupported.count == 22)
     }
 
@@ -68,7 +68,7 @@ struct KraalActionTests {
         #expect(KraalActions.find("space.next")?.validArguments == "none")
     }
 
-    @Test("unsupported actions carry a reason and are not in the listing")
+    @Test("unsupported actions carry a reason but keep their upstream name")
     func unsupported() {
         for action in KraalActions.unsupported {
             guard case let .unsupported(reason) = action.support else {
@@ -77,9 +77,9 @@ struct KraalActionTests {
             }
             #expect(!reason.isEmpty)
         }
-        #expect(!KraalActions.listing.contains { $0.name == "layout.set" })
-        #expect(!KraalActions.listing.contains { $0.name == "mod.open" })
-        #expect(!KraalActions.listing.contains { $0.name == "terminal.copy" })
+        #expect(KraalActions.listing.contains { $0.name == "layout.set" })
+        #expect(KraalActions.listing.contains { $0.name == "mod.open" })
+        #expect(KraalActions.listing.contains { $0.name == "terminal.copy" })
         #expect(KraalActions.listing.contains { $0.name == "pane.split" })
     }
 

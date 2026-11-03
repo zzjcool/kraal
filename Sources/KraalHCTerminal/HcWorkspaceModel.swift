@@ -49,6 +49,9 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public internal(set) var agents: [HcAgent] = []
     @Published public internal(set) var agentGroups: [HcAgentGroup] = []
     @Published public var agentViewMode: HcAgentViewMode = .priority
+    @Published public var showPalette = false
+    @Published public var showHelp = false
+    @Published public var showSettings = false
     /// A blocked/done event shown in the window; the system notification is
     /// delivered next to it.
     @Published public var agentToast: HcAgentToast?
@@ -92,6 +95,11 @@ public final class HcWorkspaceModel: ObservableObject {
     var localName = "This core"
     /// One sync per machine, keyed by `""` for this core.
     var layoutSyncs: [String: HcDocumentSync] = [:]
+    /// One save at a time per machine. Adoption and the action that started the
+    /// terminal both write the same document; without this they CAS the same
+    /// version and the second one reports a fake conflict.
+    var layoutSaveChains: [String: Task<Void, Never>] = [:]
+    var layoutSaveGeneration: [String: Int] = [:]
     /// A load that started before a newer doc event must not overwrite the
     /// newer read when it happens to finish last.
     var layoutGenerations: [String: Int] = [:]
@@ -417,7 +425,7 @@ public final class HcWorkspaceModel: ObservableObject {
 
     /// Writes are debounced: focus changes arrive in bursts, and a view from a
     /// closed window is not worth a write per keystroke.
-    private func scheduleViewSave() {
+    func scheduleViewSave() {
         guard hasSnapshot, !layoutLoaded.isEmpty, let data = try? workspace.encodedView() else { return }
         guard data != writtenView else { return }
         viewSaveTask?.cancel()

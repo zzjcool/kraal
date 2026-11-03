@@ -149,6 +149,25 @@ extension KraalModel {
         return true
     }
 
+    /// Move a tab to a 1-based position in its space, removing it first so a
+    /// backward drag lands in the target's slot (the same rule as `tab.move`).
+    @discardableResult
+    public mutating func moveTab(_ id: String, to target: Int) -> Bool {
+        guard let location = tabLocation(id),
+              var space = spacesValue[location.space]?.objectValue,
+              var tabs = space["tabs"]?.arrayValue,
+              tabs.indices.contains(location.tab)
+        else { return false }
+        let moved = tabs.remove(at: location.tab)
+        let destination = min(max(target - 1, 0), tabs.count)
+        tabs.insert(moved, at: destination)
+        space["tabs"] = .array(tabs)
+        var all = spacesValue.arrayValue ?? []
+        all[location.space] = .object(space)
+        spacesValue = .array(all)
+        return true
+    }
+
     @discardableResult
     public mutating func settle(_ id: String, at now: UInt64) -> Bool {
         guard let location = tabLocation(id) else { return false }

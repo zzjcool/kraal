@@ -31,6 +31,7 @@ extension KraalAppDelegate {
         model.log = { kraalLog($0) }
         hcWorkspace = model
         window = makeWindow(root: HcRootView(model: model))
+        HcMenuBar.install(workspace: model)
         model.start()
     }
 }
