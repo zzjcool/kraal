@@ -51,6 +51,19 @@ struct KraalLayoutModelTests {
         #expect(root.panes.map(\.id) == ["p3", "p2", "p1"])
     }
 
+    @Test("split weights change without touching unknown fields")
+    func weights() throws {
+        var model = modelWithOne()
+        model.split(pane: "p1", axis: .row, newPane: "p2", terminal: "t2")
+        let container = try #require(model.tab("tb1")?.root.id)
+        let didResize = model.setSplitWeights(container, weights: [0.75, 0.25])
+        #expect(didResize)
+        let root = try #require(model.tab("tb1")?.root)
+        #expect(root.children.map { $0.raw["size"]?["weight"]?.doubleValue } == [0.75, 0.25])
+        let empty = model.setSplitWeights("missing", weights: [1, 1])
+        #expect(!empty)
+    }
+
     @Test("directional focus walks up to a shared axis")
     func neighbors() throws {
         var model = threePanes()

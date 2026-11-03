@@ -223,6 +223,14 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > 没有运行时。文件默认在 `~/.config/kraal/keys.json`，坏文件不会覆盖上一份
 > 可用绑定；`ctrl-alt-shift-escape` 只恢复键位，不动共享布局。默认表来自
 > herdr-app 的 `defaults/keys.macos.json`，`pane.go`/`pane.swap` 已可用。
+>
+> #231 的分隔条：拖动只改 JSON 的 `size.weight`，两兄弟权重和不变，每侧最小
+> 36pt；命中区比 1pt 线宽，AX 可每次调 5%；文档只在手势结束写一次。tab 条用
+> SwiftUI drag/drop，落到哪个 tab 就 `tab.move` 到它的 1-based 位置。
+>
+> #231 的分隔条：拖动只改 JSON 的 `size.weight`，两兄弟权重和不变，每侧最小
+> 36pt；命中区比 1pt 线宽，AX 可每次调 5%；文档只在手势结束写一次。tab 条用
+> SwiftUI drag/drop，落到哪个 tab 就 `tab.move` 到它的 1-based 位置。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

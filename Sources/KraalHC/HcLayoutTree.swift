@@ -96,6 +96,29 @@ public enum HcLayoutTree {
         return (newRoot, removed)
     }
 
+    /// Replaces the weights of one row/column. Unknown fields on the container
+    /// and its children stay as they are; only `size.weight` changes.
+    public static func resizing(_ root: JSONValue, container: String, weights: [Double]) -> JSONValue? {
+        guard let targetPath = path(to: container, in: root),
+              var target = node(at: targetPath, in: root),
+              let type = target["type"]?.stringValue, type == "row" || type == "column",
+              var children = target["children"]?.arrayValue,
+              children.count == weights.count,
+              weights.allSatisfy({ $0 > 0 })
+        else { return nil }
+        for index in children.indices {
+            var child = children[index]
+            child.setLayoutSize(weight: weights[index])
+            children[index] = child
+        }
+        guard var object = target.objectValue else { return nil }
+        object["children"] = .array(children)
+        target = .object(object)
+        var updated = root
+        guard setNode(target, at: targetPath, in: &updated) else { return nil }
+        return updated
+    }
+
     /// Exchanges two nodes' places; sizes stay with the places, ids with the content.
     /// Makes `child` the visible block of a stack.
     public static func selecting(_ root: JSONValue, stack: String, child: String) -> JSONValue? {

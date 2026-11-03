@@ -152,6 +152,131 @@ private struct HcLayoutToolbar: View {
         }
         .buttonStyle(.plain)
         .help(tab.name.isEmpty ? "Tab \(tab.displayName)" : tab.name)
+        .draggable(tab.id)
+        .dropDestination(for: String.self) { items, _ in
+            guard let source = items.first, source != tab.id else { return false }
+            let destination = (model.workspace.activeSpace?.tabs.firstIndex { $0.id == tab.id } ?? 0) + 1
+            Task { await model.moveTab(source, index: destination) }
+            return true
+        }
+    }
+}
+
+private struct HcSplitHandle: View {
+    static let thickness: CGFloat = 7
+
+    @ObservedObject var model: HcWorkspaceModel
+    let container: String
+    let index: Int
+    let axis: Axis
+    let weights: [Double]
+    let available: CGFloat
+    @State private var startWeights: [Double]?
+    @State private var lastWeights: [Double]?
+    @State private var hovering = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .overlay {
+                Rectangle()
+                    .fill(hovering ? Color.accentColor.opacity(0.5) : Color.secondary.opacity(0.25))
+                    .frame(width: axis == .horizontal ? 1 : nil,
+                           height: axis == .vertical ? 1 : nil)
+            }
+            .frame(width: axis == .horizontal ? Self.thickness : nil,
+                   height: axis == .vertical ? Self.thickness : nil)
+            // Upstream gives a divider a wide grab region even though its line
+            // is one pixel; the overlap is what makes it possible to hit.
+            .contentShape(Rectangle().inset(by: -16))
+            .onHover { inside in
+                let was = hovering
+                hovering = inside
+                guard inside != was else { return }
+                if inside {
+                    (axis == .horizontal ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDisappear {
+                if hovering { NSCursor.pop() }
+            }
+            .gesture(drag)
+            .accessibilityLabel("Resize panes")
+            .accessibilityValue("\(Int((weights[safe: index] ?? 0) * 100))%")
+            .accessibilityAdjustableAction { direction in
+                adjust(direction == .increment ? 0.05 : -0.05)
+            }
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                guard available > 0, weights.indices.contains(index + 1) else { return }
+                let start = startWeights ?? weights
+                startWeights = start
+                let translation = axis == .horizontal ? value.translation.width : value.translation.height
+                guard let next = HcSplitMath.resized(
+                    start, index: index, translation: Double(translation), available: Double(available)
+                ) else { return }
+                lastWeights = next
+                model.setSplitWeights(container, weights: next, persist: false)
+            }
+            .onEnded { _ in
+                if let lastWeights {
+                    model.setSplitWeights(container, weights: lastWeights, persist: true)
+                }
+                startWeights = nil
+                lastWeights = nil
+            }
+    }
+
+    private func adjust(_ delta: Double) {
+        guard let next = HcSplitMath.adjusted(weights, index: index, delta: delta) else { return }
+        model.setSplitWeights(container, weights: next, persist: true)
+    }
+}
+
+enum HcSplitMath {
+    static let minimumPoints: Double = 36
+
+    /// New weights for the pair around a divider after a drag. The pair's total
+    /// is what stays constant; the rest of the row/column is untouched.
+    static func resized(
+        _ start: [Double],
+        index: Int,
+        translation: Double,
+        available: Double,
+        minimumPoints: Double = minimumPoints
+    ) -> [Double]? {
+        guard start.indices.contains(index + 1), available > 0 else { return nil }
+        let total = start.reduce(0, +)
+        guard total > 0 else { return nil }
+        let pair = start[index] + start[index + 1]
+        let minimum = total * minimumPoints / available
+        guard pair > minimum * 2 else { return nil }
+        let left = min(max(start[index] + translation / available * total, minimum), pair - minimum)
+        var next = start
+        next[index] = left
+        next[index + 1] = pair - left
+        return next
+    }
+
+    static func adjusted(_ weights: [Double], index: Int, delta: Double) -> [Double]? {
+        guard weights.indices.contains(index + 1) else { return nil }
+        var next = weights
+        let pair = next[index] + next[index + 1]
+        guard pair > 0.1 else { return nil }
+        next[index] = min(max(next[index] + delta, 0.05), pair - 0.05)
+        next[index + 1] = pair - next[index]
+        return next
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
@@ -178,23 +303,33 @@ struct HcPaneTreeView: View {
                 max(child.raw["size"]?["weight"]?.doubleValue ?? 1, 0.01)
             }
             let total = weights.reduce(0, +)
-            let spacing = CGFloat(max(node.children.count - 1, 0))
-            let length = axis == .horizontal
-                ? max(geometry.size.width - spacing, 0)
-                : max(geometry.size.height - spacing, 0)
+            let gaps = CGFloat(max(node.children.count - 1, 0)) * HcSplitHandle.thickness
+            let length = max((axis == .horizontal ? geometry.size.width : geometry.size.height) - gaps, 0)
             let sizes = weights.map { length * CGFloat($0 / total) }
             if axis == .horizontal {
-                HStack(spacing: 1) {
+                HStack(spacing: 0) {
                     ForEach(Array(node.children.enumerated()), id: \.offset) { index, child in
                         HcPaneTreeView(node: child, model: model)
                             .frame(width: sizes[index])
+                        if index < node.children.count - 1 {
+                            HcSplitHandle(
+                                model: model, container: node.id, index: index,
+                                axis: axis, weights: weights, available: length
+                            )
+                        }
                     }
                 }
             } else {
-                VStack(spacing: 1) {
+                VStack(spacing: 0) {
                     ForEach(Array(node.children.enumerated()), id: \.offset) { index, child in
                         HcPaneTreeView(node: child, model: model)
                             .frame(height: sizes[index])
+                        if index < node.children.count - 1 {
+                            HcSplitHandle(
+                                model: model, container: node.id, index: index,
+                                axis: axis, weights: weights, available: length
+                            )
+                        }
                     }
                 }
             }

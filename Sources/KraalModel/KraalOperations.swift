@@ -306,6 +306,17 @@ extension KraalModel {
         return true
     }
 
+    /// Replaces the weights of a row/column. The UI calls this on every drag
+    /// change; only the final call should persist the document.
+    @discardableResult
+    public mutating func setSplitWeights(_ container: String, weights: [Double]) -> Bool {
+        guard let location = tabLocation(node: container), let root = root(at: location),
+              let updated = HcLayoutTree.resizing(root, container: container, weights: weights)
+        else { return false }
+        setRoot(updated, at: location)
+        return true
+    }
+
     /// The pane a directional move would land on. Walks up until an ancestor
     /// shares the direction's axis, then takes the sibling on that side and
     /// descends to the edge nearest the source.
@@ -559,6 +570,18 @@ extension KraalModel {
         for (spaceIndex, space) in (spacesValue.arrayValue ?? []).enumerated() {
             for (tabIndex, tab) in (space["tabs"]?.arrayValue ?? []).enumerated()
             where tab["id"]?.stringValue == id {
+                return Location(space: spaceIndex, tab: tabIndex, id: id)
+            }
+        }
+        return nil
+    }
+
+    func tabLocation(node: String) -> Location? {
+        for (spaceIndex, space) in (spacesValue.arrayValue ?? []).enumerated() {
+            for (tabIndex, tab) in (space["tabs"]?.arrayValue ?? []).enumerated() {
+                guard let id = tab["id"]?.stringValue,
+                      KraalNode(raw: tab["root"] ?? .null).find(node) != nil
+                else { continue }
                 return Location(space: spaceIndex, tab: tabIndex, id: id)
             }
         }
