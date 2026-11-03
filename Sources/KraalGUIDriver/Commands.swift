@@ -28,7 +28,7 @@ let commandSpecs: [CommandSpec] = [
     ),
     CommandSpec(
         name: "ax",
-        signature: "ax [--out FILE] [--depth N]",
+        signature: "ax [--out FILE] [--depth N] [--client PID]",
         summary: "dump the accessibility tree"
     ),
     CommandSpec(
@@ -43,7 +43,7 @@ let commandSpecs: [CommandSpec] = [
     ),
     CommandSpec(
         name: "window",
-        signature: "window",
+        signature: "window [--client PID]",
         summary: "print window frame + window number"
     ),
     CommandSpec(
@@ -53,7 +53,7 @@ let commandSpecs: [CommandSpec] = [
     ),
     CommandSpec(
         name: "shot",
-        signature: "shot -o FILE [--full]",
+        signature: "shot -o FILE [--full] [--client PID]",
         summary: "screenshot one window"
     ),
     CommandSpec(
@@ -68,7 +68,7 @@ let commandSpecs: [CommandSpec] = [
     ),
     CommandSpec(
         name: "drag",
-        signature: "drag --from X,Y --to X,Y [--steps N]",
+        signature: "drag --from X,Y --to X,Y [--steps N] [--client PID]",
         summary: "synthetic drag, both points window-relative"
     ),
     CommandSpec(
@@ -110,6 +110,11 @@ let commandSpecs: [CommandSpec] = [
         name: "launch",
         signature: "launch --app PATH [--env K=V] [--wait-window T] [--match NAME]",
         summary: "start the app under test"
+    ),
+    CommandSpec(
+        name: "activate",
+        signature: "activate [--client PID]",
+        summary: "bring one instance to the front and wait until it is there"
     ),
     CommandSpec(
         name: "quit",

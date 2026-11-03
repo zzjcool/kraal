@@ -158,9 +158,7 @@ func commandProbe(_ args: Arguments) -> Never {
 /// those duplicates as separate elements is what made "is this title unique?"
 /// answer wrong.
 func commandAX(_ args: Arguments) -> Never {
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
+    let app = resolveClient(args)
     let maxDepth = args.int("depth") ?? 16
     var nodes: [AXNode] = []
     var visited = Set<CFHashCode>()
@@ -335,9 +333,7 @@ func commandWait(_ args: Arguments) -> Never {
 /// the first attempt: a window that has just been ordered in exists but may not
 /// have its final bounds yet.
 func commandWindow(_ args: Arguments) -> Never {
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
+    let app = resolveClient(args)
     let timeout = args.double("timeout") ?? 10
     let deadline = Date().addingTimeInterval(timeout)
     var found: WindowInfo?
@@ -374,9 +370,7 @@ func commandWindow(_ args: Arguments) -> Never {
 /// geometry the rest of the driver trusts, so the fallback is not a guess.
 func commandShot(_ args: Arguments) -> Never {
     guard let out = args.string("out") else { fail(.harness, "shot needs -o/--out") }
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
+    let app = resolveClient(args)
     guard !args.has("full") else {
         runCapture(["-x", out], label: "full", out: out)
     }
@@ -665,6 +659,16 @@ func commandLaunch(_ args: Arguments) -> Never {
     exit(Exit.success.rawValue)
 }
 
+func commandActivate(_ args: Arguments) -> Never {
+    let app = resolveClient(args)
+    guard activateAndConfirm(app) else {
+        fail(.harness, explanation(for: app))
+    }
+    print("activated pid=\(app.pid)")
+    requireAlive(app, context: "activate")
+    exit(Exit.success.rawValue)
+}
+
 func commandQuit(_ args: Arguments) -> Never {
     guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
         print("not running")
@@ -842,6 +846,7 @@ case "shot": commandShot(args)
 case "pixels": commandPixels(args)
 case "rowscan": commandRowScan(args)
 case "type": commandType(args)
+case "activate": commandActivate(args)
 case "launch": commandLaunch(args)
 case "quit": commandQuit(args)
 case "click": commandClick(args)

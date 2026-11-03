@@ -99,8 +99,10 @@ tart exec kraal-agent cat /tmp/file > ./file
 
 ## 3. GUI 验证
 
-`Scripts/gui.sh` 已删除。当前按 [AUTOMATION.md](AUTOMATION.md) 的 VM 手工配方：
-隔离 `HC_SESSION`、推 `hc`/`Kraal.app`/`kraal-gui`、`KRAAL_DEV_BACKGROUND=0`
+`./Scripts/gui.sh` 是三层 GUI 门禁（`client` / `core` / `pixels`），默认 Tart VM
+`kraal-agent`；`local` 需要 `KRAAL_GUI_ALLOW_HOST=1`。命令、隔离和注入证据见
+[AUTOMATION.md](AUTOMATION.md)。门禁没覆盖的 UI 改动仍按那里的 VM 手工配方：
+隔离 `HC_SESSION`、推 `hc`/`Kraal.app`/`KraalGUIDriver`、`KRAAL_DEV_BACKGROUND=0`
 启动、用 `kraal ls/status` 断言。
 
 宿主锁屏只影响**宿主桌面**的 AX/CGEvent；VM 内 `tart exec` 仍是 Aqua 会话，
