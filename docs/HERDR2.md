@@ -135,5 +135,4 @@ socket 路径：`KRAAL_CONTROL_SOCKET` → `KRAAL_HC_VIEW` 同目录
 - Cmd-click 打开 `pane/t7` 需要库提供 openURL/hover delegate，尚未接。
 - IME 候选窗、alt-screen 滚轮、文件拖放、`terminal.right_click=program`
   未实现；见 #232。
-- GUI 自动化套件已删，重写前 UI 证据靠 VM 手工流程（#235）。
 - 性能基线在旧渲染链路上测得，不能代表 HC；#237 重录。

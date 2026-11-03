@@ -59,18 +59,20 @@ alt-screen 滚轮、`terminal.right_click=program`。
 - `KraalMac` 单一 HC 入口；无 `KRAAL_HC` 开关
 - `KraalSupport`（日志/DevSession）独立
 - `kraal` 控制面 + 单实例 raise
-- 旧 `gui.sh` / `bench.sh` / 旧 probe 删除
+- Herdr 1 的 `gui.sh` / `bench.sh` / 旧 probe 删除
+- #235 三层 GUI 门禁重建：`Scripts/gui.sh`（`kraal ls/status` + `hc get --json`
+  + `KraalGUIDriver` 像素），四个用例 + 注入证据（`docs/AUTOMATION.md`）
 
 剩余：
 
 | 项 | 说明 |
 |---|---|
-| #235 GUI 自动化重写 | 44 个旧用例改成 `kraal ls/status/do` + AX；补回 GUI 门禁 |
 | #237 性能基线 | attach 吞吐、N pane 主线程占用、输入→回显；新基线 |
 | #236 iOS | 先把 `KraalModel`/`KraalHC` 抽成跨平台，再接 SwiftUI iOS |
 | #242/#243 | 直连 ssh、VM SSH fixture（core 能力验证） |
 
-验收：`./Scripts/verify.sh` 全绿；GUI 门禁恢复后能故意注入失败并变红。
+验收：`./Scripts/verify.sh` 全绿；`./Scripts/gui.sh run` 4/4 且故意注入能变红
+（证据表见 `docs/AUTOMATION.md` §6）。
 
 ---
 

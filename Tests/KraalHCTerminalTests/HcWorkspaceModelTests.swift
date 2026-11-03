@@ -68,4 +68,38 @@ struct HcWorkspaceModelTests {
         model.reconcile()
         #expect(model.workspace.space("sp1") == nil)
     }
+
+    @Test("control listing carries the focused pane and the tab tree")
+    func controlListingTree() {
+        let model = modelWithOnePane()
+        let tab = model.controlListing()["spaces"]?.arrayValue?.first?["tabs"]?.arrayValue?.first
+        #expect(tab?["focused"]?.stringValue == "p1")
+        // `tree` is the node tree verbatim, so a gate reads exactly what the
+        // shared document holds: a row over the block that owns t1.
+        let tree = tab?["tree"]
+        let stored = model.workspace.space("sp1")?.tabs.first
+        #expect(tree == stored?.root.raw)
+        #expect(tree?["type"]?.stringValue == "row")
+        let block = tree?["children"]?.arrayValue?.first
+        #expect(block?["type"]?.stringValue == "block")
+        #expect(block?["id"]?.stringValue == "p1")
+        #expect(block?["content"]?["terminal"]?.stringValue == "t1")
+        // The fields the listing already had keep their shape.
+        #expect(tab?["id"]?.stringValue == "tb1")
+        #expect(tab?["terminals"]?.arrayValue?.first?["terminal"]?.stringValue == "t1")
+        #expect(tab?["terminals"]?.arrayValue?.first?["pane"]?.stringValue == "p1")
+    }
+
+    @Test("control status carries app activation, the seen-write guard")
+    func controlStatusActive() {
+        let model = modelWithOnePane()
+        #expect(!model.appActive)
+        let inactive: JSONValue? = model.controlStatus()["active"]
+        #expect(inactive == JSONValue.bool(false))
+        model.appActive = true
+        let active: JSONValue? = model.controlStatus()["active"]
+        #expect(active == JSONValue.bool(true))
+        // The very flag `shareSeen` gates `herdr.seen` writes on.
+        #expect(model.appActive)
+    }
 }
