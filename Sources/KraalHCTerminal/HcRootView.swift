@@ -54,6 +54,9 @@ public struct HcRootView: View {
         }
         .animation(.easeOut(duration: 0.2), value: model.agentToast)
         .animation(.easeOut(duration: 0.2), value: model.peekAddress)
+        .sheet(isPresented: $model.showSettings) {
+            HcSettingsView(model: model)
+        }
         .sheet(isPresented: $model.showHelp) {
             HcHelpView(workspace: model, keyBindings: keymap.bindings)
         }
@@ -117,6 +120,13 @@ public struct HcRootView: View {
                     Label("Commands", systemImage: "command")
                 }
                 .keyboardShortcut("k", modifiers: .command)
+            }
+            ToolbarItem {
+                Button {
+                    model.showSettings = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
             }
             ToolbarItem(placement: .status) {
                 Text(statusText)

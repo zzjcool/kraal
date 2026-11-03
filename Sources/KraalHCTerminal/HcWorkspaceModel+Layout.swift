@@ -275,6 +275,7 @@ extension HcWorkspaceModel {
                     session.close()
                     return
                 }
+                session.apply(self.settings)
                 self.paneSessions[pane] = session
                 self.log?("hc: attached \(address) to \(pane)")
             } catch {

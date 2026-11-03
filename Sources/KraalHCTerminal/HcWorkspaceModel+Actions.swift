@@ -35,6 +35,14 @@ extension HcWorkspaceModel {
     /// Menus validate against this rather than reaching into the transport.
     public var isConnected: Bool { client.isConnected }
 
+    /// Pushes the current look into every live surface. Called when settings
+    /// change and once when a pane attaches.
+    public func applySettings() {
+        NSApp?.appearance = settings.appearance.nsAppearance
+        for session in paneSessions.values { session.apply(settings) }
+        peekSession?.apply(settings)
+    }
+
     /// Actions the runner can execute today. The palette and menus hide the
     /// rest until their phase lands; the catalog still describes them.
     public static let implementedActions: Set<String> = [
@@ -46,7 +54,7 @@ extension HcWorkspaceModel {
         "terminal.open", "terminal.keep", "terminal.park", "terminal.pin",
         "terminal.kill", "terminal.peek", "terminal.show",
         "agent.focus", "agent.next", "agent.prev",
-        "app.palette", "app.help", "app.quit", "app.hide",
+        "app.palette", "app.settings", "app.help", "app.quit", "app.hide",
         "app.hide_others", "app.show_all",
         "window.close", "window.minimize", "window.maximize",
     ]
@@ -344,6 +352,9 @@ extension HcWorkspaceModel {
         switch name {
         case "app.palette":
             showPalette.toggle()
+            return .ok()
+        case "app.settings":
+            showSettings = true
             return .ok()
         case "app.help":
             showHelp = true

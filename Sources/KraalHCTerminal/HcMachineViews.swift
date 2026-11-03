@@ -99,7 +99,7 @@ struct HcSidebarView: View {
             .font(.caption)
         }
         .padding(.leading, CGFloat(agent.depth) * 12)
-        .padding(.vertical, 2)
+        .padding(.vertical, model.settings.density.rowPadding)
         .background(
             agent.pane == model.workspace.focusedPane
                 ? Color.accentColor.opacity(0.12)
@@ -213,7 +213,7 @@ struct HcSidebarView: View {
                 .help("Machine actions")
             }
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, model.settings.density.rowPadding / 2)
     }
 
     @ViewBuilder

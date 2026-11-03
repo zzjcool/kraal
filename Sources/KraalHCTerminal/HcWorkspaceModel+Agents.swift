@@ -152,6 +152,7 @@ extension HcWorkspaceModel {
                 session.close()
                 return
             }
+            session.apply(settings)
             peekSession = session
             peekAddress = address
             updateAgents()
@@ -186,7 +187,7 @@ extension HcWorkspaceModel {
         let notification = NSUserNotification()
         notification.title = alert.title
         notification.informativeText = alert.detail
-        notification.soundName = NSUserNotificationDefaultSoundName
+        notification.soundName = settings.soundEnabled ? NSUserNotificationDefaultSoundName : nil
         NSUserNotificationCenter.default.deliver(notification)
     }
 

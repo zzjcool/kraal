@@ -49,6 +49,12 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public internal(set) var agents: [HcAgent] = []
     @Published public internal(set) var agentGroups: [HcAgentGroup] = []
     @Published public var agentViewMode: HcAgentViewMode = .priority
+    @Published public var settings: HcTerminalSettings = .load() {
+        didSet {
+            settings.save()
+            applySettings()
+        }
+    }
     @Published public var showPalette = false
     @Published public var showHelp = false
     @Published public var showSettings = false
@@ -144,30 +150,6 @@ public final class HcWorkspaceModel: ObservableObject {
         heartbeatTask?.cancel()
         machinePollTask?.cancel()
         resubscribeTask?.cancel()
-    }
-
-    public func start() {
-        guard !started else { return }
-        started = true
-        loadViewFile()
-        observeActivation()
-        status = .connecting
-        client.start()
-        eventsTask = Task { [weak self] in
-            guard let self else { return }
-            for await event in self.client.events {
-                await self.handle(event)
-            }
-        }
-        heartbeatTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
-                guard let self else { return }
-                if self.client.isConnected, self.store.heartbeatIsStale() {
-                    self.heartbeatStale = true
-                }
-            }
-        }
     }
 
     public func stop() {
@@ -512,5 +494,32 @@ public final class HcWorkspaceModel: ObservableObject {
         for session in paneSessions.values { session.close() }
         paneSessions = [:]
         attachingPanes = []
+    }
+}
+
+extension HcWorkspaceModel {
+    public func start() {
+        guard !started else { return }
+        started = true
+        loadViewFile()
+        applySettings()
+        observeActivation()
+        status = .connecting
+        client.start()
+        eventsTask = Task { [weak self] in
+            guard let self else { return }
+            for await event in self.client.events {
+                await self.handle(event)
+            }
+        }
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self else { return }
+                if self.client.isConnected, self.store.heartbeatIsStale() {
+                    self.heartbeatStale = true
+                }
+            }
+        }
     }
 }
