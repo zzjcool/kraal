@@ -9,6 +9,11 @@
 // the link is down fail with `notConnected` instead of queueing forever.
 
 import Foundation
+import KraalSocket
+
+/// Creates a fresh byte pipe on every reconnect attempt. The closure must not
+/// reuse a closed link.
+public typealias HcLinkFactory = @Sendable () throws -> any HcByteLink
 
 public enum HcClientEvent: Sendable {
     case connecting(attempt: Int)
@@ -20,9 +25,12 @@ public enum HcClientEvent: Sendable {
 }
 
 public final class HcClient: @unchecked Sendable {
+    /// A human-readable label for logs/status. For a socket this is the path;
+    /// for SSH it is `ssh:<host>`.
     public let path: String
     public let events: AsyncStream<HcClientEvent>
 
+    private let linkFactory: HcLinkFactory
     private let eventContinuation: AsyncStream<HcClientEvent>.Continuation
     private let stateLock = NSLock()
     private let initialBackoff: TimeInterval
@@ -31,18 +39,60 @@ public final class HcClient: @unchecked Sendable {
     private var runTask: Task<Void, Never>?
     private var stopped = false
 
-    public init(
+    public convenience init(
         path: String,
         initialBackoff: TimeInterval = 0.5,
         maxBackoff: TimeInterval = 30
     ) {
-        self.path = path
+        self.init(
+            linkFactory: {
+                let socket = try UnixSocket.connect(path: path, timeoutSeconds: 10)
+                return socket
+            },
+            label: path,
+            initialBackoff: initialBackoff,
+            maxBackoff: maxBackoff
+        )
+    }
+
+    /// Connects through an injected pipe. The factory is called once per
+    /// reconnect, so an SSH implementation can start a fresh `ssh -T host hc
+    /// connect` after the old process exits.
+    public init(
+        linkFactory: @escaping HcLinkFactory,
+        label: String,
+        initialBackoff: TimeInterval = 0.5,
+        maxBackoff: TimeInterval = 30
+    ) {
+        self.path = label
+        self.linkFactory = linkFactory
         self.initialBackoff = initialBackoff
         self.maxBackoff = maxBackoff
         let (stream, continuation) = AsyncStream<HcClientEvent>.makeStream()
         events = stream
         eventContinuation = continuation
     }
+
+    #if os(macOS)
+    /// The `ssh -T <host> hc connect` transport. The remote command is passed
+    /// as a single argument to ssh, which is what makes it a remote shell
+    /// command rather than a local one.
+    public convenience init(
+        sshHost: String,
+        remoteCommand: String = "hc connect",
+        initialBackoff: TimeInterval = 0.5,
+        maxBackoff: TimeInterval = 30
+    ) {
+        self.init(
+            linkFactory: {
+                try HcSSHLink(host: sshHost, remoteCommand: remoteCommand)
+            },
+            label: "ssh:\(sshHost)",
+            initialBackoff: initialBackoff,
+            maxBackoff: maxBackoff
+        )
+    }
+    #endif
 
     public var isConnected: Bool {
         stateLock.lock()
@@ -269,9 +319,10 @@ public final class HcClient: @unchecked Sendable {
                 let opened = try await withCheckedThrowingContinuation { continuation in
                     // The handshake blocks; keep it off the cooperative pool so
                     // it cannot starve the tasks waiting for this one.
-                    DispatchQueue.global(qos: .userInitiated).async { [path] in
+                    let factory = linkFactory
+                    DispatchQueue.global(qos: .userInitiated).async {
                         do {
-                            continuation.resume(returning: try HcConnection.open(path: path))
+                            continuation.resume(returning: try HcConnection.open(link: try factory()))
                         } catch {
                             continuation.resume(throwing: error)
                         }

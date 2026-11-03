@@ -89,7 +89,24 @@ kraal shot /tmp/demo.png
 
 没有窗口时 exit 2；动作失败 exit 1。`kraal commands` 不需要窗口。
 
-## 4. 测试 / lint / 打包
+## 4. SSH 直连（未纳管 core）
+
+如果目标 core 没有加进 `hc machine`，或者客户端没有本机 core，可以直接把
+`ssh -T host hc connect` 当传输：
+
+```bash
+KRAAL_HC_SSH=user@host make run FOCUS=0
+
+# 远端使用隔离会话，避免碰默认 core
+KRAAL_HC_SSH=user@host \
+KRAAL_HC_SSH_COMMAND='HC_SESSION=qa XDG_STATE_HOME=/tmp/qa/state hc connect' \
+  make run FOCUS=0
+```
+
+远端 `hc` 必须在非交互 shell 的 `PATH` 上（或写绝对路径）。这条路径不经过
+`machine.*`，不会自动重连/管理远端 core；重连由 `HcClient` 以新 ssh 进程重试。
+
+## 5. 测试 / lint / 打包
 
 ```bash
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -110,7 +127,7 @@ shellcheck -S warning Scripts/*.sh
 
 live 套件会自建 `HC_SESSION` 和临时 XDG 目录，不会碰默认 core。
 
-## 5. 新机器 / VM
+## 6. 新机器 / VM
 
 宿主：
 
@@ -123,13 +140,14 @@ VM 里没有 Xcode，所以**构建/测试/打包在宿主做**；UI 和截图�
 完整配方（推 `hc`、`Kraal.app`、`KraalGUIDriver`，启动隔离 core）见
 `docs/AUTOMATION.md`。
 
-## 6. 常见问题
+## 7. 常见问题
 
 | 现象 | 原因 |
 |---|---|
 | `no such module 'Testing'` / `XCTest` | `DEVELOPER_DIR` 指向了 CLT |
 | `no running Kraal window at ...` | app 没开，或 `KRAAL_CONTROL_SOCKET` 不一致 |
 | `hc: ready ...` 后没有 pane | core 在跑，但 layout 文档为空；`kraal do space.new` |
+| SSH 连接一直 `connecting` | 远端 `hc` 不在 PATH，或 host key/密钥未授权；看 `HcSSHLink` 收集的 stderr |
 | 第二个实例一闪而过 | 已有窗口响应了 `raise`，这是单实例转发，不是崩溃 |
 | 点 pane 没焦点 | 检查 `kraal status focused_pane`；HC 点击会同步模型焦点 |
 | 屏幕截图全黑 | 窗口被遮挡/无 Screen Recording 权限；用 `screencapture -l <windowNumber>` |

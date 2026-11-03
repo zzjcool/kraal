@@ -16,6 +16,7 @@ import AppKit
 import Foundation
 import KraalHC
 import KraalModel
+import KraalSocket
 
 public enum HcMachineSheet: Identifiable, Equatable {
     case add
@@ -155,10 +156,16 @@ public final class HcWorkspaceModel: ObservableObject {
     private var acceptingEvents = false
     private var started = false
 
-    public init(path: String, viewPath: URL? = nil) {
-        self.path = path
+    /// A window over an injected transport (SSH today). The label is only for
+    /// status/logs; the factory is called again for every reconnect.
+    public init(
+        linkFactory: @escaping HcLinkFactory,
+        label: String,
+        viewPath: URL? = nil
+    ) {
+        path = label
         viewURL = viewPath ?? Self.defaultViewPath
-        client = HcClient(path: path)
+        client = HcClient(linkFactory: linkFactory, label: label)
     }
 
     deinit {
@@ -538,5 +545,19 @@ extension HcWorkspaceModel {
                 }
             }
         }
+    }
+}
+
+public extension HcWorkspaceModel {
+    /// The normal local-core window: a fresh unix socket per reconnect.
+    convenience init(path: String, viewPath: URL? = nil) {
+        self.init(
+            linkFactory: {
+                let socket = try UnixSocket.connect(path: path, timeoutSeconds: 10)
+                return socket
+            },
+            label: path,
+            viewPath: viewPath
+        )
     }
 }

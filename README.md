@@ -67,6 +67,18 @@ build/Kraal.app/Contents/MacOS/KraalMac-bin
 debug bundle 的 `KraalMac` 是启动器；直接启动 `KraalMac-bin` 才能让
 `NSRunningApplication` 拿到真实 pid（见 `docs/AUTOMATION.md`）。
 
+没有纳管成 machine、或者没有本机 core 时，可以走 SSH 直连：
+
+```bash
+KRAAL_HC_SSH=user@host make run FOCUS=0
+# 指定远端会话/命令
+KRAAL_HC_SSH=user@host \
+KRAAL_HC_SSH_COMMAND='HC_SESSION=qa hc connect' make run FOCUS=0
+```
+
+这条路径只把 `ssh -T host hc connect` 当成字节管道；远端仍需要 `hc` 在
+`PATH` 上。
+
 ---
 
 ## 控制面
@@ -100,6 +112,8 @@ kraal shot /tmp/window.png
 | `HC_SESSION` | core 会话名；默认 `default` |
 | `HC_SOCKET` | core API socket；覆盖路径解析 |
 | `KRAAL_HC_SOCKET` | 只覆盖 app 读取的 core socket（VM/scratch 用） |
+| `KRAAL_HC_SSH` | 直接 `ssh <host> hc connect`，不经过 machine 名册 |
+| `KRAAL_HC_SSH_COMMAND` | SSH 远端命令，默认 `hc connect` |
 | `KRAAL_HC_VIEW` | 每屏私有状态 `view.json`；同目录默认 control socket |
 | `KRAAL_CONTROL_SOCKET` | app/CLI 控制 socket |
 | `KRAAL_DEV_SESSION` | 日志与窗口位置的命名空间 |

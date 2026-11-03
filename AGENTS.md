@@ -106,7 +106,8 @@ XDG_CONFIG_HOME=/tmp/kraal-qa/config hc server start
 ## 3. 架构边界
 
 - `KraalSocket`：Unix socket / listener，无业务。
-- `KraalHC`：JSON-RPC、framed streams、hello、events、doc、machine、control。
+- `KraalHC`：JSON-RPC、framed streams、hello、events、doc、machine、control；
+  传输层 `HcByteLink`，本机 socket 与 `HcSSHLink` 共用握手。
 - `KraalModel`：space/tab/pane 树、命名、focus、zoom；不依赖 UI。
 - `KraalActions`：69 条动作目录、参数校验、keys.json。
 - `KraalHCTerminal`：Ghostty 接线 + SwiftUI chrome + workspace model。
@@ -116,7 +117,9 @@ XDG_CONFIG_HOME=/tmp/kraal-qa/config hc server start
 
 约束：
 
-- 客户端不自己维护 SSH；远端只用 `hc machine.*`。
+- 客户端不自己维护 SSH 隧道；远端默认只用 `hc machine.*`。
+  `KRAAL_HC_SSH` 是例外：直接 `ssh -T host hc connect`，只把字节管道接进同一个
+  `HcConnection`，不要在这条路径里另造协议。
 - 共享文档 `doc name="herdr-app"`：只改自己拥有的子树，未知字段原样透传；
   CAS 冲突后最新胜出。
 - focus / zoom / settled / recent / active 只进 `view.json`，不进共享文档。

@@ -23,6 +23,9 @@ herdr-core 把终端运行时留在 core，客户端通过 attach 流拿原始 P
 
 ## 2. 连接与协议
 
+- 本机默认走 unix socket；`KRAAL_HC_SSH=host` 时走
+  `ssh -T host hc connect`，字节流完全一样。`HcByteLink` 是这层传输的接缝，
+  `HcSSHLink` 管理 ssh 进程、stdin/stdout、stderr 和关闭。
 - API socket：`$XDG_STATE_HOME/herdr-core/<session>/<session>.sock`
   （`HC_SESSION` / `HC_SOCKET` 控制；客户端自己按同样的规则解析）。
 - 普通请求：一行 JSON-RPC（`Content-Length` framing 由 `hc` 的 stdio 模式使用；

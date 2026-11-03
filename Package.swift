@@ -58,6 +58,7 @@ let package = Package(
                 "KraalActions",
                 "KraalHC",
                 "KraalModel",
+                "KraalSocket",
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
