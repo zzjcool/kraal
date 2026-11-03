@@ -36,6 +36,20 @@ struct HcSettingsTests {
         #expect(config != .init())
     }
 
+    @Test("older settings blobs keep their values")
+    func olderBlob() throws {
+        let json = """
+        {"fontSize":16,"paddingX":4,"paddingY":6,"backgroundOpacity":0.8,
+         "minimumContrast":0.2,"density":"compact","soundEnabled":false,
+         "appearance":"dark"}
+        """
+        let value = try JSONDecoder().decode(HcTerminalSettings.self, from: Data(json.utf8))
+        #expect(value.fontSize == 16)
+        #expect(value.density == .compact)
+        #expect(value.appearance == .dark)
+        #expect(value.optionAsAlt == false)
+    }
+
     @Test("zoom steps one point and clamps")
     func zoom() {
         #expect(HcFontZoom.next(13, by: 1) == 14)

@@ -52,6 +52,23 @@ public struct HcTerminalSettings: Codable, Equatable, Sendable {
 
     public static let defaultsKey = "kraal.hc.terminal-settings"
 
+    public init() {}
+
+    /// Added fields must not reset an existing settings blob. Every field is
+    /// decoded with a fallback for the same reason.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize) ?? 13
+        paddingX = try container.decodeIfPresent(Int.self, forKey: .paddingX) ?? 0
+        paddingY = try container.decodeIfPresent(Int.self, forKey: .paddingY) ?? 0
+        backgroundOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity) ?? 1
+        minimumContrast = try container.decodeIfPresent(Double.self, forKey: .minimumContrast) ?? 0
+        density = try container.decodeIfPresent(HcDensity.self, forKey: .density) ?? .comfortable
+        soundEnabled = try container.decodeIfPresent(Bool.self, forKey: .soundEnabled) ?? true
+        appearance = try container.decodeIfPresent(HcAppearance.self, forKey: .appearance) ?? .system
+        optionAsAlt = try container.decodeIfPresent(Bool.self, forKey: .optionAsAlt) ?? false
+    }
+
     public static func load(from defaults: UserDefaults = .standard) -> HcTerminalSettings {
         guard let data = defaults.data(forKey: defaultsKey),
               let value = try? JSONDecoder().decode(HcTerminalSettings.self, from: data)
