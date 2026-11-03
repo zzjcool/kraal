@@ -9,6 +9,7 @@
 // encodes images, or diffs rows — the engine is the terminal, as it is for
 // every other Ghostty host.
 
+import AppKit
 import Foundation
 import GhosttyTerminal
 import KraalHC
@@ -24,6 +25,12 @@ public final class HcTerminalSession {
     /// The socket or core went away; the pane should reattach, not show an exit.
     public private(set) var lost = false
     public var onEnd: ((HcTerminalEnd) -> Void)?
+
+    /// Built by the model so a menu item can target a pane without this
+    /// session knowing about workspaces. Read when the menu opens, not when
+    /// the surface is created.
+    public var contextMenuProvider: (() -> NSMenu?)?
+    public var onFocusRequest: (() -> Void)?
 
     private let engine: InMemoryTerminalSession
     private let stream: HcAttachStream
@@ -45,6 +52,12 @@ public final class HcTerminalSession {
         self.gate = gate
         self.endRelay = endRelay
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(engine))
+        state.makePlatformView = { [weak self] in
+            let view = HcTerminalPlatformView(frame: .zero)
+            view.menuProvider = { [weak self] in self?.contextMenuProvider?() }
+            view.onFocusRequest = { [weak self] in self?.onFocusRequest?() }
+            return view
+        }
         endRelay.connect { [weak self] event in
             self?.apply(event)
         }

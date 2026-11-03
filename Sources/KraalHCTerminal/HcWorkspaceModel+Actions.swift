@@ -71,7 +71,7 @@ extension HcWorkspaceModel {
         "tab.settle", "tab.unsettle", "tab.next", "tab.prev",
         "pane.split", "pane.close", "pane.zoom", "pane.focus", "pane.go", "pane.swap",
         "terminal.open", "terminal.keep", "terminal.park", "terminal.pin",
-        "terminal.kill", "terminal.peek", "terminal.show",
+        "terminal.kill", "terminal.peek", "terminal.show", "terminal.copy", "terminal.paste",
         "agent.focus", "agent.next", "agent.prev",
         "app.palette", "app.settings", "app.help", "app.quit", "app.hide",
         "app.zoom_in", "app.zoom_out", "app.zoom_reset", "layout.toggle",
@@ -312,6 +312,9 @@ extension HcWorkspaceModel {
     }
 
     private func dispatchTerminal(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
+        if name == "terminal.copy" || name == "terminal.paste" {
+            return terminalClipboard(name)
+        }
         switch name {
         case "terminal.open":
             let place = values["place"]?.stringValue
@@ -371,6 +374,25 @@ extension HcWorkspaceModel {
         default:
             return .fail("\(name) is not implemented in this window yet")
         }
+    }
+
+    private func terminalClipboard(_ name: String) -> HcActionOutcome {
+        guard let pane = workspace.focusedPane, let session = paneSessions[pane] else {
+            return .fail("\(name): no focused terminal")
+        }
+        if name == "terminal.copy" {
+            guard session.state.surface?.hasSelection() == true else {
+                return .fail("terminal.copy: nothing is selected")
+            }
+            guard session.state.performBindingAction("copy_to_clipboard") else {
+                return .fail("terminal.copy: the terminal refused the copy")
+            }
+            return .ok()
+        }
+        guard pasteClipboard(into: pane) else {
+            return .fail("terminal.paste: the clipboard has no text or the terminal is not ready")
+        }
+        return .ok()
     }
 
     private func dispatchAgent(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
@@ -439,14 +461,101 @@ extension HcWorkspaceModel {
         }
     }
 
+    /// The pane menu is built here, not in the terminal view: every item calls
+    /// the same action or binding the keyboard uses.
+    func paneContextMenu(for pane: String) -> NSMenu? {
+        guard let session = paneSessions[pane] else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        var targets: [HcMenuAction] = []
+
+        func add(_ title: String, enabled: Bool = true, _ action: @escaping () -> Void) {
+            let target = HcMenuAction(action)
+            targets.append(target)
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(HcMenuAction.run(_:)),
+                keyEquivalent: ""
+            )
+            item.target = target
+            item.isEnabled = enabled
+            menu.addItem(item)
+        }
+
+        add("Copy", enabled: session.state.surface?.hasSelection() == true) { [weak self] in
+            _ = self?.copySelection(in: pane)
+        }
+        add("Paste", enabled: NSPasteboard.general.string(forType: .string) != nil) { [weak self] in
+            guard let self else { return }
+            if !self.pasteClipboard(into: pane) {
+                self.showToast(
+                    title: "Could not paste",
+                    detail: "The terminal is not ready.",
+                    level: .error
+                )
+            }
+        }
+        add("Select All") { [weak self] in
+            _ = self?.paneSessions[pane]?.state.performBindingAction("select_all")
+        }
+        add("Clear") { [weak self] in
+            _ = self?.paneSessions[pane]?.state.performBindingAction("clear_screen")
+        }
+        menu.addItem(.separator())
+        add("Split Right") { [weak self] in
+            self?.runMenuAction("pane.split", pane: pane, extra: ["direction": "right"])
+        }
+        add("Split Down") { [weak self] in
+            self?.runMenuAction("pane.split", pane: pane, extra: ["direction": "down"])
+        }
+        if let address = workspace.terminal(ofPane: pane) {
+            add("Peek") { [weak self] in
+                self?.runMenuAction("terminal.peek", pane: nil, extra: ["terminal": address])
+            }
+        }
+        menu.addItem(.separator())
+        add("Close Pane") { [weak self] in
+            self?.runMenuAction("pane.close", pane: pane)
+        }
+
+        contextMenuTargets = targets
+        return menu
+    }
+
+    private func runMenuAction(_ name: String, pane: String?, extra: [String: String] = [:]) {
+        var values = extra.mapValues(JSONValue.string)
+        if let pane { values["pane"] = .string(pane) }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.performAction(name, arguments: .object(values))
+            if let error = outcome.error {
+                self.showToast(title: "Action failed", detail: error, level: .error)
+            }
+        }
+    }
+
+    private func copySelection(in pane: String) -> Bool {
+        guard let session = paneSessions[pane],
+              session.state.surface?.hasSelection() == true
+        else { return false }
+        return session.state.performBindingAction("copy_to_clipboard")
+    }
+
+    private func pasteClipboard(into pane: String) -> Bool {
+        guard let session = paneSessions[pane],
+              let text = NSPasteboard.general.string(forType: .string)
+        else { return false }
+        return session.state.paste(text: text)
+    }
+
     // MARK: Arguments and targets
 
     /// Type into the terminal that owns the focused pane; `send:` bindings use
     /// this instead of a synthetic key event.
     public func sendToFocused(_ text: String) {
+        // `paneSessions` is keyed by pane id, not by terminal/address.
         guard let pane = workspace.focusedPane,
-              let address = workspace.terminal(ofPane: pane),
-              let session = paneSessions[address]
+              let session = paneSessions[pane]
         else { return }
         session.send(Data(text.utf8))
     }

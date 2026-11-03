@@ -165,7 +165,7 @@ public struct HcRootView: View {
         if model.workspace.activeTab != nil {
             HcLayoutView(model: model)
         } else if let session = model.session {
-            HcTerminalPaneView(session: session)
+            HcTerminalPaneView(session: session, isFocused: model.terminalFocusAllowed)
                 .id(ObjectIdentifier(session))
         } else {
             VStack(spacing: 8) {

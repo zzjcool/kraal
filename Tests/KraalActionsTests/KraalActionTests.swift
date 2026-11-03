@@ -45,7 +45,7 @@ struct KraalActionTests {
         #expect(KraalActions.all.map(\.name) == upstreamNames)
         #expect(Set(KraalActions.all.map(\.name)).count == 69)
         #expect(KraalActions.listing.count == 69)
-        #expect(KraalActions.unsupported.count == 21)
+        #expect(KraalActions.unsupported.count == 19)
     }
 
     @Test("argument names and required flags match herdr-app")

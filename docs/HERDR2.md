@@ -238,6 +238,11 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > `layout.toggle` 的 Kraal 子集（其他 layout 节点仍 unsupported）；F2/shift-F2
 > 打开 rename sheet，不把键值当名字。
 >
+> #232 的第一刀不重画终端：选择/复制/粘贴交给 Ghostty（`copy_to_clipboard`、
+> `paste(text:)`），右键菜单只做 AppKit 的壳并回调模型动作；scrollback 用
+> Ghostty 的 `scrollback-limit-lines` / `scrollback-limit` 两个键，10,000 行与
+> 10 MB 先到为准。Kraal 不解析 VT，也不维护第二份滚动缓冲。
+>
 > #233 的控制面照 herdr-app 的「一行 JSON、一条连接一个命令」做，不引入
 > 第二套 RPC。窗口是唯一写入者：`do` 走 `performAction`，`ls/status` 只是
 > 模型投影；创建型动作回读 adopt 后的 id，而不是相信调用方猜的 id。控制
@@ -256,6 +261,11 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > #231 的收尾：`app.zoom_*` 只改设置里的字号；`layout.toggle:sidebar` 是
 > `layout.toggle` 的 Kraal 子集（其他 layout 节点仍 unsupported）；F2/shift-F2
 > 打开 rename sheet，不把键值当名字。
+>
+> #232 的第一刀不重画终端：选择/复制/粘贴交给 Ghostty（`copy_to_clipboard`、
+> `paste(text:)`），右键菜单只做 AppKit 的壳并回调模型动作；scrollback 用
+> Ghostty 的 `scrollback-limit-lines` / `scrollback-limit` 两个键，10,000 行与
+> 10 MB 先到为准。Kraal 不解析 VT，也不维护第二份滚动缓冲。
 >
 > #233 的控制面照 herdr-app 的「一行 JSON、一条连接一个命令」做，不引入
 > 第二套 RPC。窗口是唯一写入者：`do` 走 `performAction`，`ls/status` 只是
