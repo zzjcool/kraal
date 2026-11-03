@@ -45,6 +45,13 @@ struct HcWelcomeView: View {
         .focusEffectDisabled()
         .focused($focused)
         .onAppear { focused = true }
+        .task {
+            // The overlay exists before AppKit hands the window a first
+            // responder; without this, Esc and the arrows reach the terminal and
+            // the tour cannot be left from the keyboard (caught in the Tart VM).
+            try? await Task.sleep(for: .milliseconds(50))
+            focused = true
+        }
         .onExitCommand { model.dismissWelcome() }
         // Nothing on these pages takes text, so the arrows are always free.
         .onKeyPress(.leftArrow) {
@@ -128,9 +135,19 @@ struct HcWelcomeView: View {
         }
     }
 
-    /// Page 1 is the three cards alone: the header already says what this is.
+    /// Page 1 answers "what am I looking at" before the three cards do their work.
     private var pageOne: some View {
         VStack(alignment: .leading, spacing: 14) {
+            pageTitle("Kraal runs your terminals in the background")
+            Text(
+                "The terminals and agents you open here do not live in this window. "
+                    + "They run in herdr-core, a small program on your computer: close Kraal, "
+                    + "and they keep working."
+            )
+            .font(.system(size: 12.5))
+            .foregroundStyle(theme.muted.color)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.bottom, 4)
             card(
                 icon: "command",
                 title: "One key opens everything",

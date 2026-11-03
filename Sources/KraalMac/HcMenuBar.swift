@@ -178,11 +178,23 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
     @objc private func previousTab() { workspace?.previousTab() }
     @objc private func toggleZoom() { workspace?.toggleZoom() }
 
+    /// A menu key equivalent is dispatched before the window's key monitor, so
+    /// this is where an overlay could be opened on top of another one (⇧⌘P while
+    /// the welcome tour is up). The palette toggles; everything else stays shut.
+    private var overlayOpen: Bool {
+        guard let workspace else { return true }
+        return workspace.showWelcome || workspace.showHelp || workspace.showSettings
+            || workspace.pickerVisible || workspace.machineSheet != nil
+            || workspace.renameRequest != nil || workspace.closeRequest != nil
+    }
+
     @objc private func openPalette() {
-        workspace?.showPalette = true
+        guard !overlayOpen else { return }
+        workspace?.showPalette.toggle()
     }
 
     @objc private func openSettings() {
+        guard !overlayOpen else { return }
         workspace?.showSettings = true
     }
 
@@ -199,6 +211,7 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
     }
 
     @objc private func openHelp() {
+        guard !overlayOpen else { return }
         workspace?.showHelp = true
     }
 }
