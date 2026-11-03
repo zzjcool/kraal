@@ -41,6 +41,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     private var themeStore: ThemeStore?
     /// The herdr-core window's model, when this launch is in hc mode.
     var hcWorkspace: HcWorkspaceModel?
+    /// The local control socket that serves `kraal ls/status/do/shot`.
+    var hcControl: HcControlServer?
 
     /// Whether this launch is allowed to take the desktop.
     ///
@@ -743,6 +745,7 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         saveFrame()
         mouseForwarder?.detach()
+        hcControl?.stop()
         hcWorkspace?.stop()
         store.disconnect()
     }

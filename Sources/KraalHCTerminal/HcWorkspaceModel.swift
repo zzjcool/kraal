@@ -90,6 +90,9 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public var removingMachine: HcMachine?
 
     public let path: String
+    /// Set by the app after the window exists; `kraal status`/`shot` use it.
+    public var windowNumber: Int?
+    public var controlSocketPath: String?
     private let viewURL: URL
     /// Optional sink for one-line state changes; the app routes this to `kraalLog`
     /// so a GUI run can prove what the window did without a screenshot.
@@ -112,6 +115,7 @@ public final class HcWorkspaceModel: ObservableObject {
     /// newer read when it happens to finish last.
     var layoutGenerations: [String: Int] = [:]
     var layoutLoaded: Set<String> = []
+    var layoutVersions: [String: UInt64] = [:]
     var adoptedKeep: Set<String> = []
     var attachingPanes: Set<String> = []
     /// Terminals whose pane was just closed. Their labels still name the space

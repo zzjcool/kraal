@@ -234,6 +234,14 @@ public final class UnixSocket: @unchecked Sendable {
         }
     }
 
+    /// Wraps a descriptor that `accept(2)` already connected.
+    ///
+    /// The server owns the listening socket, not this stream; the caller closes
+    /// the stream when the one command is answered.
+    static func connected(handle: Int32) -> UnixSocket {
+        UnixSocket(handle: handle)
+    }
+
     public func close() {
         writeLock.lock()
         defer { writeLock.unlock() }

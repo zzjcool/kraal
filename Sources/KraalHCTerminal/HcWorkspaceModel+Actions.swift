@@ -31,6 +31,25 @@ public struct HcActionOutcome: Sendable, Equatable {
     }
 }
 
+/// IDs produced by an action that creates something. The window ignores them;
+/// `kraal do` prints them so a script can address the new resource without
+/// guessing what the next `ls` will contain.
+public struct HcActionResources: Sendable, Equatable {
+    var space: String?
+    var tab: String?
+    var pane: String?
+    var terminal: String?
+
+    var fields: [String: JSONValue] {
+        var value: [String: JSONValue] = [:]
+        if let space { value["space"] = .string(space) }
+        if let tab { value["tab"] = .string(tab) }
+        if let pane { value["pane"] = .string(pane) }
+        if let terminal { value["terminal"] = .string(terminal) }
+        return value
+    }
+}
+
 extension HcWorkspaceModel {
     /// Menus validate against this rather than reaching into the transport.
     public var isConnected: Bool { client.isConnected }
@@ -85,6 +104,9 @@ extension HcWorkspaceModel {
         guard canPerformAction(name) else {
             return .fail("\(name) is not implemented in this window yet")
         }
+        // A stale layout failure from the previous command must not make this
+        // command look failed: actions that still need the layout set it again.
+        layoutError = nil
         do {
             return await dispatch(name, try action.validate(arguments))
         } catch {
@@ -107,14 +129,15 @@ extension HcWorkspaceModel {
     private func dispatchSpace(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
         switch name {
         case "space.new":
-            await newSpace(
+            let created = await newSpace(
                 name: values["name"]?.stringValue,
                 folder: values["folder"]?.stringValue,
                 tabName: values["tab"]?.stringValue,
                 argv: argv(values),
                 machine: values["machine"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
             )
-            return layoutError.map(HcActionOutcome.fail) ?? .ok()
+            if let created { return .ok(created.fields) }
+            return layoutError.map(HcActionOutcome.fail) ?? .fail("space.new: could not create a space")
         case "space.close":
             guard let space = targetSpace(values, id: "id") else {
                 return .fail("space.close: no space to close")
@@ -161,13 +184,14 @@ extension HcWorkspaceModel {
             if values["mod"] != nil || values["props"] != nil {
                 return .fail("tab.new: mods are not supported by Kraal")
             }
-            await newTab(
+            let created = await newTab(
                 tabName: values["name"]?.stringValue,
                 folder: values["folder"]?.stringValue,
                 space: values["space"]?.stringValue,
                 argv: argv(values)
             )
-            return layoutError.map(HcActionOutcome.fail) ?? .ok()
+            if let created { return .ok(created.fields) }
+            return layoutError.map(HcActionOutcome.fail) ?? .fail("tab.new: could not create a tab")
         case "tab.close":
             guard let tab = targetTab(values, id: "id") else {
                 return .fail("tab.close: no tab to close")
@@ -231,8 +255,9 @@ extension HcWorkspaceModel {
                 }
                 focusPane(pane)
             }
-            await splitFocusedPane(axis, argv: argv(values))
-            return layoutError.map(HcActionOutcome.fail) ?? .ok()
+            let created = await splitFocusedPane(axis, argv: argv(values))
+            if let created { return .ok(created.fields) }
+            return layoutError.map(HcActionOutcome.fail) ?? .fail("pane.split: could not split the pane")
         case "pane.close":
             guard let pane = targetPane(values) else {
                 return .fail("pane.close: no pane to close")
@@ -289,19 +314,19 @@ extension HcWorkspaceModel {
     private func dispatchTerminal(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
         switch name {
         case "terminal.open":
-            if values["place"]?.stringValue == "right" || values["place"]?.stringValue == "down" {
-                await splitFocusedPane(
-                    values["place"]?.stringValue == "down" ? .column : .row,
-                    argv: argv(values)
-                )
+            let place = values["place"]?.stringValue
+            let created: HcActionResources?
+            if place == "right" || place == "down" {
+                created = await splitFocusedPane(place == "down" ? .column : .row, argv: argv(values))
             } else {
-                await newTab(
+                created = await newTab(
                     name: values["name"]?.stringValue,
                     folder: values["folder"]?.stringValue,
                     argv: argv(values)
                 )
             }
-            return layoutError.map(HcActionOutcome.fail) ?? .ok()
+            if let created { return .ok(created.fields) }
+            return layoutError.map(HcActionOutcome.fail) ?? .fail("terminal.open: could not open a terminal")
         case "terminal.keep":
             guard let address = values["terminal"]?.stringValue else {
                 return .fail("terminal.keep needs terminal")

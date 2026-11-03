@@ -32,6 +32,34 @@ struct HcWorkspaceModelTests {
         #expect(model.workspace.space("sp1")?.tabs.first?.terminals == ["t1"])
     }
 
+    @Test("control listing mirrors spaces, tabs and placed panes")
+    func controlListing() {
+        let model = modelWithOnePane()
+        let listing = model.controlListing()
+        let space = listing["spaces"]?.arrayValue?.first
+        #expect(space?["id"]?.stringValue == "sp1")
+        #expect(space?["active"]?.boolValue == true)
+        let tab = space?["tabs"]?.arrayValue?.first
+        #expect(tab?["id"]?.stringValue == "tb1")
+        #expect(tab?["active"]?.boolValue == true)
+        let terminal = tab?["terminals"]?.arrayValue?.first
+        #expect(terminal?["terminal"]?.stringValue == "t1")
+        #expect(terminal?["pane"]?.stringValue == "p1")
+        #expect(terminal?["status"]?.isNull == true)
+    }
+
+    @Test("control status reports the focused tab and open overlays")
+    func controlStatus() {
+        let model = modelWithOnePane()
+        model.showHelp = true
+        let status = model.controlStatus()
+        #expect(status["space"]?.stringValue == "sp1")
+        #expect(status["tab"]?.stringValue == "tb1")
+        #expect(status["focused_pane"]?.stringValue == "p1")
+        #expect(status["overlays"]?.arrayValue?.first?.stringValue == "help")
+        #expect(status["status"]?.stringValue == "idle")
+    }
+
     @Test("after a snapshot, a pane whose terminal is gone is dropped")
     func afterSnapshot() {
         let model = modelWithOnePane()

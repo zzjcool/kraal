@@ -114,6 +114,17 @@ SPDX-FileCopyrightText: 2026 zzjcool
   keys 路径只读展示、`option_as_alt`；值存 `UserDefaults`，改一项立即
   `setTerminalConfiguration` 到所有 live surface（含 peek），不需要重启。
   `app.zoom_in/out/reset` 改字号（8–32），F2/shift-F2 打开 tab/space rename sheet。
-- **#231 还差**：`mod.open`（Kraal 不做 JS mods）、`layout.*` 的其他节点操作；
-  `kraal do` 需要 #233 的窗口控制 socket。
+- **#231 还差**：`mod.open`（Kraal 不做 JS mods）、`layout.*` 的其他节点操作。
+- **#233 控制面（第一阶段）**：app 内 `HcControlServer` 监听一行 JSON 的
+  Unix socket（`KRAAL_CONTROL_SOCKET` → `KRAAL_HC_VIEW` 同目录 `control.sock`
+  → `$XDG_CONFIG_HOME/kraal/control.sock`），一条连接只处理一个命令。
+  `kraal ls/status/do/commands/shot` 已可用：`ls` 输出 spaces/tabs/terminals
+  （含 pane、status、app、sub_agents、recent），`status` 输出 focus/zoom/
+  documents/errors/window，`do` 返回创建动作的 `space/tab/pane/terminal` id，
+  `shot` 用 `screencapture -l` 抓指定窗口。第二个实例只发 `raise`，不再开
+  第二个窗口。`commands --help` 不再被 JSON 短路。
+  实测（VM `kraal-agent`，隔离 core）：`space.new` 返回 `sp-…/tb-…/p-…/t1`，
+  `pane.split --direction right` 返回 t2，`ls` 能看到两个 pane；未知参数
+  exit 1，无窗口 exit 2；`shot` 生成非黑 1180×760 PNG；第二次启动只剩一个
+  client。**还没做**：gui.sh 断言迁移到这些命令（#235）。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

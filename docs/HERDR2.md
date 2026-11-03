@@ -238,6 +238,11 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > `layout.toggle` 的 Kraal 子集（其他 layout 节点仍 unsupported）；F2/shift-F2
 > 打开 rename sheet，不把键值当名字。
 >
+> #233 的控制面照 herdr-app 的「一行 JSON、一条连接一个命令」做，不引入
+> 第二套 RPC。窗口是唯一写入者：`do` 走 `performAction`，`ls/status` 只是
+> 模型投影；创建型动作回读 adopt 后的 id，而不是相信调用方猜的 id。控制
+> socket 只在本机，权限 0600；第二个实例发 `{"raise":true}` 后退出。
+>
 > #231 的分隔条：拖动只改 JSON 的 `size.weight`，两兄弟权重和不变，每侧最小
 > 36pt；命中区比 1pt 线宽，AX 可每次调 5%；文档只在手势结束写一次。tab 条用
 > SwiftUI drag/drop，落到哪个 tab 就 `tab.move` 到它的 1-based 位置。
@@ -251,6 +256,11 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > #231 的收尾：`app.zoom_*` 只改设置里的字号；`layout.toggle:sidebar` 是
 > `layout.toggle` 的 Kraal 子集（其他 layout 节点仍 unsupported）；F2/shift-F2
 > 打开 rename sheet，不把键值当名字。
+>
+> #233 的控制面照 herdr-app 的「一行 JSON、一条连接一个命令」做，不引入
+> 第二套 RPC。窗口是唯一写入者：`do` 走 `performAction`，`ls/status` 只是
+> 模型投影；创建型动作回读 adopt 后的 id，而不是相信调用方猜的 id。控制
+> socket 只在本机，权限 0600；第二个实例发 `{"raise":true}` 后退出。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。
