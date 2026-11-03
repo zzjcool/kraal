@@ -159,7 +159,9 @@ struct HcSidebarView: View {
                     .foregroundStyle(colors.dim)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 2)
+                    .padding(.bottom, 12)
             }
             ScrollView {
                 VStack(spacing: 0) {
@@ -245,7 +247,7 @@ struct HcSidebarView: View {
                         .truncationMode(.tail)
                     let secondary = secondaryName(agent)
                     if !secondary.isEmpty {
-                        Text("· \(secondary)")
+                        Text(secondary)
                             .font(.system(size: 13))
                             .foregroundStyle(colors.dim)
                             .lineLimit(1)
@@ -377,7 +379,6 @@ struct HcSidebarView: View {
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.top, 4)
             .padding(.bottom, 51)
         }
         .frame(height: HcChromeMetrics.sidebarFooterHeight, alignment: .top)

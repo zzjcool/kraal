@@ -57,7 +57,7 @@ struct HcTitlebarView: View {
         // The traffic lights are drawn by AppKit over this view; 78pt is where
         // the official window starts its own content.
         .padding(.leading, 78)
-        .padding(.trailing, 10)
+        .padding(.trailing, 46)
         .frame(width: HcChromeMetrics.sidebarWidth)
     }
 

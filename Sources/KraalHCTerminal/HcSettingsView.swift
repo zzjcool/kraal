@@ -123,6 +123,7 @@ private struct HcSettingsRail: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusable(false)
     }
 
     /// Kraal has nowhere to send feedback, so the button says so instead of
@@ -138,6 +139,7 @@ private struct HcSettingsRail: View {
             Text("Send feedback").frame(maxWidth: .infinity)
         }
         .buttonStyle(HcQuietButtonStyle())
+        .focusable(false)
     }
 }
 
@@ -145,11 +147,15 @@ private struct HcSettingsRail: View {
 
 private struct HcLookPage: View {
     @ObservedObject var model: HcWorkspaceModel
+    @Environment(\.hcTheme) private var theme
+
+    private var themeBorder: Color { theme.border.color }
+    private var themeMuted: Color { theme.muted.color }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HcPanelHeading("Layout")
-            HcSettingGap(8)
+            HcSettingGap(14)
             HStack(spacing: 8) {
                 ForEach(HcLayoutKind.allCases) { kind in
                     HcLayoutCard(kind: kind, selected: kind == .herdr) {
@@ -157,15 +163,23 @@ private struct HcLookPage: View {
                     }
                 }
             }
-            HcSettingGap(18)
+            HcSettingGap(28)
             HcPanelHeading("Theme")
-            HcSettingGap(4)
+            HcSettingGap(30)
             HcSettingRow("Appearance", detail: "Light or dark, or as your system is now.") {
                 HcSegmented(
                     items: HcAppearance.allCases.map { (value: $0, label: $0.title) },
                     selection: setting(\.appearance)
                 )
             }
+            HcSettingGap(12)
+            Rectangle()
+                .fill(themeBorder)
+                .frame(height: 1)
+            HcSettingGap(10)
+            Text("For the layout you're in: each layout keeps its own light and dark theme.")
+                .font(.system(size: 12))
+                .foregroundStyle(themeMuted)
             HcSettingGap(12)
             HcSettingSubheading("Dark")
             HcSettingGap(6)
@@ -176,7 +190,7 @@ private struct HcLookPage: View {
                     }
                 }
             }
-            HcSettingGap(10)
+            HcSettingGap(26)
             HcSettingSubheading("Light")
             HcSettingGap(6)
             HStack(spacing: 8) {
@@ -186,7 +200,7 @@ private struct HcLookPage: View {
                     }
                 }
             }
-            HcSettingGap(18)
+            HcSettingGap(40)
             HcPanelHeading("Size and fonts")
             HcSettingGap(4)
             zoomRow

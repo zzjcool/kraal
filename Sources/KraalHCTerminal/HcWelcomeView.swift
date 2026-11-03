@@ -107,6 +107,10 @@ struct HcWelcomeView: View {
         .frame(height: 52)
     }
 
+    private var nextTitle: String {
+        page == 2 && model.machines.isEmpty ? "Not now" : "Next"
+    }
+
     private var footer: some View {
         HStack(spacing: 6) {
             dots
@@ -116,11 +120,17 @@ struct HcWelcomeView: View {
                 Button("Back") { turn(to: page - 1) }
                     .buttonStyle(HcQuietButtonStyle())
             }
-            Button(page < Self.pageCount ? "Next" : "Open a space") {
+            Button {
                 if page < Self.pageCount {
                     turn(to: page + 1)
                 } else {
                     openSpace()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(page < Self.pageCount ? nextTitle : "Open a space")
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 11, weight: .semibold))
                 }
             }
             .buttonStyle(HcPrimaryButtonStyle())
@@ -152,34 +162,39 @@ struct HcWelcomeView: View {
 
     /// Page 1 answers "what am I looking at" before the three cards do their work.
     private var pageOne: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             pageTitle("Kraal runs your terminals in the background")
             Text(
                 "The terminals and agents you open here do not live in this window. "
-                    + "They run in herdr-core, a small program on your computer: close Kraal, "
-                    + "and they keep working."
+                    + "They run in herdr-core, a small background program on your computer. "
+                    + "Close Kraal, update it, or let it crash, and your agents keep working. "
+                    + "Open it again and everything is where you left it, as long as the "
+                    + "computer is on."
             )
             .font(.system(size: 12.5))
             .foregroundStyle(theme.muted.color)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.bottom, 4)
             card(
-                icon: "command",
-                title: "One key opens everything",
-                detail: "⇧⌘P lists every command, with its key on the right."
+                icon: "bell.badge",
+                title: "Agents tell you when they need you",
+                detail: "A ring while one works, “Needs you” when it asks something, "
+                    + "a sound when it finishes."
+            )
+            card(
+                icon: "person.2",
+                title: "Agents can start helpers",
+                detail: "They show up under the agent that started them. Click one to watch it."
             )
             card(
                 icon: "server.rack",
-                title: "Your terminals live on their machines",
-                detail: "Close the window and they keep running; add a machine over ssh."
-            )
-            card(
-                icon: "rectangle.on.rectangle",
-                title: "Kraal is the window; herdr-core does the work",
-                detail: "Spaces, tabs and panes come from the core, so an agent sees the same layout."
+                title: "Your other machines, in the same window",
+                detail: "A server or a Mac mini runs its own herdr-core, so its agents "
+                    + "keep going even while this laptop sleeps."
             )
             HcWelcomeHairline()
-                .padding(.vertical, 2)
+                .padding(.top, 40)
+                .padding(.bottom, 2)
             HStack(spacing: 12) {
                 rowLabel("Appearance")
                 HcSegmented(
@@ -198,26 +213,80 @@ struct HcWelcomeView: View {
         }
     }
 
-    /// Both controls write `model.settings`, whose didSet saves and applies, so
-    /// the window behind the dialog changes while the person is still on it.
+    /// The official second page: the machines already known, then the same
+    /// `Add machine` dialog the sidebar opens. The intro is not a dead end if a
+    /// person skips it — the sidebar footer keeps the same button.
     private var pageTwo: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            pageTitle("Make it yours")
-            HStack(spacing: 12) {
-                rowLabel("Appearance")
-                HcSegmented(
-                    items: HcAppearance.allCases.map { (value: $0, label: $0.title) },
-                    selection: $model.settings.appearance
-                )
+        VStack(alignment: .leading, spacing: 18) {
+            pageTitle("Add your other machines")
+            Text(
+                "Pick a host from your ssh config. Kraal connects, starts herdr-core "
+                    + "there if it is missing, and lists that machine in the sidebar "
+                    + "with its own spaces."
+            )
+            .font(.system(size: 12.5))
+            .foregroundStyle(theme.muted.color)
+            .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 0) {
+                machineRow(icon: "laptopcomputer", name: "This computer", note: "here", connected: true)
+                ForEach(model.machines) { machine in
+                    machineRow(
+                        icon: "server",
+                        name: machine.name,
+                        note: machine.state.label,
+                        connected: machine.state == .connected
+                    )
+                }
+                Button {
+                    model.dismissWelcome()
+                    model.machineSheet = .add
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus").font(.system(size: 13))
+                        Text("Add a machine")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.accent.color)
+                    .padding(.horizontal, 12)
+                    .frame(height: 42)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            HStack(spacing: 12) {
-                rowLabel("Size")
-                HcStepper(
-                    value: "\(Int(model.settings.fontSize)) pt",
-                    decrement: { zoom(by: -1) },
-                    increment: { zoom(by: 1) }
-                )
+            .background(theme.background.color, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(theme.border.color, lineWidth: 1)
             }
+            Text("Not now? Add machine is at the bottom of the sidebar too.")
+                .font(.system(size: 12.5))
+                .foregroundStyle(theme.muted.color)
+        }
+    }
+
+    private func machineRow(icon: String, name: String, note: String, connected: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(theme.muted.color)
+                .frame(width: 16)
+            Text(name)
+                .font(.system(size: 13))
+                .foregroundStyle(theme.foreground.color)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(note)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.dim.color)
+            Circle()
+                .fill((connected ? theme.done : theme.dim).color)
+                .frame(width: 8, height: 8)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 42)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.border.color).frame(height: 1)
         }
     }
 
@@ -254,8 +323,13 @@ struct HcWelcomeView: View {
             Image(systemName: icon)
                 .font(.system(size: 15))
                 .foregroundStyle(theme.accent.color)
-                .frame(width: 22, height: 22)
-            VStack(alignment: .leading, spacing: 4) {
+                .frame(width: 32, height: 32)
+                .background(theme.raised.color, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(theme.border.color, lineWidth: 1)
+                }
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(theme.foreground.color)
@@ -266,8 +340,6 @@ struct HcWelcomeView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(14)
-        .background(theme.raised.color, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func pageTitle(_ text: String) -> some View {

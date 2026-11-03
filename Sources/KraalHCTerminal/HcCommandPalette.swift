@@ -455,12 +455,13 @@ public struct HcCommandPalette: View {
     private var theme: HcTheme { workspace.resolvedTheme }
 
     public var body: some View {
-        // The presenter centres this over its scrim, so the card hangs 60pt below
-        // the top of the window. The empty area below the card must not catch
-        // clicks (no background, no contentShape) or the scrim's tap-to-close
-        // would stop working everywhere but on the card itself.
+        // The presenter centres this over its scrim, so the card hangs 21pt below
+        // the top of the workspace (y=61 with the 40pt titlebar). The empty area
+        // below the card must not catch clicks (no background, no contentShape)
+        // or the scrim's tap-to-close would stop working everywhere but on the
+        // card itself.
         VStack(spacing: 0) {
-            card.padding(.top, 60)
+            card.padding(.top, 32)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -488,7 +489,7 @@ public struct HcCommandPalette: View {
             results
         }
         .padding(18)
-        .frame(width: 620, height: 370)
+        .frame(width: 616, height: 412)
         .background(theme.popover.color, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
