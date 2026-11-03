@@ -24,7 +24,10 @@ public struct HcRootView: View {
             detail
                 .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task { model.start() }
+        .task {
+            model.start()
+            model.welcomeIfNeeded()
+        }
         .onAppear { keymap.attach() }
         .onDisappear { keymap.detach() }
         .overlay(alignment: .topTrailing) {
@@ -54,6 +57,28 @@ public struct HcRootView: View {
                 .transition(.opacity)
             }
         }
+        .overlay {
+            if model.pickerVisible {
+                ZStack {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.pickerVisible = false }
+                    HcSpaceTabPicker(model: model)
+                }
+                .transition(.opacity)
+            }
+        }
+        .overlay {
+            if model.showWelcome {
+                ZStack {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.dismissWelcome() }
+                    HcWelcomeView(model: model)
+                }
+                .transition(.opacity)
+            }
+        }
         .animation(.easeOut(duration: 0.2), value: model.agentToast)
         .animation(.easeOut(duration: 0.2), value: model.peekAddress)
         .sheet(item: $model.renameRequest) { request in
@@ -63,12 +88,12 @@ public struct HcRootView: View {
             HcSettingsView(model: model)
         }
         .sheet(isPresented: $model.showHelp) {
-            HcHelpView(workspace: model, keyBindings: keymap.bindings)
+            HcKeybindingsView(workspace: model, keyBindings: keymap.bindings)
         }
         .sheet(item: $model.machineSheet) { sheet in
             switch sheet {
             case .add:
-                HcAddMachineView(model: model)
+                HcAddMachineDialog(model: model)
             case let .rename(machine):
                 HcRenameMachineView(machine: machine, model: model)
             }
@@ -158,6 +183,9 @@ public struct HcRootView: View {
                 .disabled(!isReady)
             }
         }
+        // Applied last: overlays and sheets are modifiers above this point, so the
+        // environment has to wrap the whole chain or they would paint the default.
+        .hcTheme(model.resolvedTheme)
     }
 
     @ViewBuilder

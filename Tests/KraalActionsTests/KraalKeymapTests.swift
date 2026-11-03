@@ -16,6 +16,57 @@ struct KraalKeymapTests {
         #expect(bindings.contains { $0.keys == "cmd-shift-]" && $0.action == "tab.next" })
     }
 
+    @Test("shipped defaults are herdr-app's keys.macos.json, picker entries included")
+    func upstreamDefaults() throws {
+        let bindings = try KraalKeymap.parse(KraalKeymap.defaultMacOS)
+        let global = bindings.filter { $0.section == "global" }
+        func bound(_ keys: String) -> String? {
+            global.first { $0.keys == keys }?.action
+        }
+        #expect(bound("cmd-p") == "mod.open:picker")
+        #expect(bound("cmd-,") == "app.settings")
+        #expect(bound("cmd-shift-p") == "app.palette")
+        #expect(bound("cmd-b") == "layout.toggle:sidebar")
+        #expect(bound("cmd-shift-l") == "layout.switch")
+        // herdr-app 0.1.12 `app/defaults/keys.macos.json`: 57 global, 9 terminal.
+        // The counts are the guard against silently dropping an entry.
+        #expect(global.count == 57)
+        #expect(bindings.filter { $0.section == "terminal" }.count == 9)
+    }
+
+    @Test("every shipped global binding is a real action or a namespaced skip")
+    func shippedActions() throws {
+        let global = try KraalKeymap.parse(KraalKeymap.defaultMacOS).filter { $0.section == "global" }
+        #expect(!global.isEmpty)
+        for binding in global {
+            let name = binding.action.split(separator: ":", maxSplits: 1).first.map(String.init)
+                ?? binding.action
+            // `mod.`/`layout.` are herdr-app mod commands. `HcKeymapController`
+            // must skip them rather than fail the keyboard, so an unknown one is
+            // allowed here — an unknown name outside those namespaces is not.
+            let namespaced = name.hasPrefix("mod.") || name.hasPrefix("layout.")
+            #expect(
+                KraalActions.find(name) != nil || namespaced,
+                "\(binding.keys) -> \(binding.action) is neither a known action nor namespaced"
+            )
+        }
+    }
+
+    @Test("the picker entry survives the 0.1.x migration unchanged")
+    func pickerEntry() {
+        #expect(KraalKeymap.current("mod.open:picker") == "mod.open:picker")
+    }
+
+    @Test("the escape hatch stays reserved and unbound")
+    func escapeHatch() throws {
+        let bindings = try KraalKeymap.parse(KraalKeymap.defaultMacOS)
+        #expect(!bindings.contains { $0.keys == KraalKeymap.escapeHatch })
+        #expect(!bindings.contains { $0.action == KraalKeymap.escapeHatch })
+        #expect(throws: KraalKeymapError.self) {
+            try KraalKeymap.parse(#"{"global": {"cmd-x": "ctrl-alt-shift-escape"}}"#)
+        }
+    }
+
     @Test("modifiers and shifted punctuation normalize to the physical key")
     func combos() throws {
         let plus = try KraalKeyCombo("cmd-+")

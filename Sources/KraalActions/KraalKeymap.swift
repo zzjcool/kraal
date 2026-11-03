@@ -112,8 +112,12 @@ public enum KraalKeymap {
     /// The official escape hatch; it is never allowed as a user binding.
     public static let escapeHatch = "ctrl-alt-shift-escape"
 
-    /// The macOS defaults shipped by herdr-app. They are written once when the
-    /// user's file is missing, exactly like the official app does.
+    /// The macOS defaults shipped by herdr-app 0.1.12
+    /// (`app/defaults/keys.macos.json`), key for key and in the same order. They
+    /// are written once when the user's file is missing, exactly like the
+    /// official app does. Three entries name herdr-app mod commands rather than
+    /// Kraal actions: ⌘P (`mod.open:picker`) opens Kraal's own place picker, and
+    /// `layout.switch` is skipped by the window instead of failing the keyboard.
     public static let defaultMacOS = """
     {
       "global": {
@@ -130,8 +134,11 @@ public enum KraalKeymap {
         "cmd-alt-[": "space.prev",
         "cmd-]": "agent.next",
         "cmd-[": "agent.prev",
+        "cmd-shift-l": "layout.switch",
         "cmd-n": "space.new",
+        "cmd-p": "mod.open:picker",
         "cmd-shift-p": "app.palette",
+        "cmd-,": "app.settings",
         "cmd-d": "pane.split:right",
         "cmd-shift-d": "pane.split:down",
         "cmd-shift-w": "pane.close",
@@ -148,6 +155,7 @@ public enum KraalKeymap {
         "shift-f2": "space.rename",
         "cmd-/": "app.help",
         "cmd-shift-/": "app.help",
+        "cmd-b": "layout.toggle:sidebar",
         "cmd-=": "app.zoom_in",
         "cmd-+": "app.zoom_in",
         "cmd--": "app.zoom_out",
