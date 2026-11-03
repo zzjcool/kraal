@@ -142,7 +142,33 @@ tart exec "$VM" /bin/bash -lc "$DRV scroll --at 640,400 --lines -3"
 `--allow-ambiguous` 或 `--within-*`。`click` 目前没有 `--mod`，Cmd-click
 需要后续扩展。
 
-## 7. 取证清单
+## 7. SSH 直连回环
+
+VM 里启用 Remote Login 后，可以用宿主的 `Kraal.app` 直连 guest core：
+
+```bash
+# guest: 安装 hc 到 PATH，启动隔离 core
+tart exec kraal-agent /bin/bash -lc 'sudo -n cp /tmp/.../hc /usr/local/bin/hc'
+tart exec kraal-agent /bin/bash -lc '
+  HC_SESSION=sshqa XDG_STATE_HOME=/tmp/kraal-ssh-test/state   XDG_CONFIG_HOME=/tmp/kraal-ssh-test/config hc server start'
+```
+
+宿主启动 app：
+
+```bash
+KRAAL_HC_SSH=admin@<guest-ip> KRAAL_HC_SSH_COMMAND='HC_SESSION=sshqa XDG_STATE_HOME=... hc connect'   build/Kraal.app/Contents/MacOS/KraalMac-bin
+```
+
+断言 `kraal status` 的 `core.socket` 是 `ssh:<host>`、`connected=true`；再
+`kraal do space.new`，用远端会话的 `hc ls --json` 和 `hc read t1` 验证终端。
+
+可选的 live 测试（不跑默认门禁）：
+
+```bash
+KRAAL_LIVE_SSH=admin@<guest-ip> KRAAL_LIVE_SSH_COMMAND='... hc connect'   swift test --filter LiveHcSSHTests
+```
+
+## 8. 取证清单
 
 一个 UI 修复至少留：
 
@@ -152,7 +178,7 @@ tart exec "$VM" /bin/bash -lc "$DRV scroll --at 640,400 --lines -3"
 4. 日志里对应的 `hc:` 行；
 5. 如果改了 wire/字段，附 core 侧 `hc get/list/read --json` 证据。
 
-## 8. 清理
+## 9. 清理
 
 ```bash
 tart exec "$VM" /bin/bash -lc "pkill -f KraalMac-bin || true"

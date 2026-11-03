@@ -11,6 +11,35 @@
 import Foundation
 import KraalSocket
 
+/// A byte pipe to a core. Unix sockets are the normal implementation; an SSH
+/// process or an iOS transport can provide the same four operations.
+///
+/// `setReadTimeout` belongs to the handshake, not the byte stream: a peer that
+/// accepts and says nothing must not block forever. Zero restores an unbounded
+/// read for the frame loop.
+public protocol HcByteLink: AnyObject, Sendable {
+    func read(maxLength: Int) throws -> Data?
+    func write(_ data: Data) throws
+    func setReadTimeout(_ seconds: TimeInterval)
+    func close()
+
+    /// Human-readable failure detail collected by the link (SSH stderr, for
+    /// example). It is consulted when the byte source ends during the handshake.
+    var failureDescription: String? { get }
+}
+
+public extension HcByteLink {
+    var failureDescription: String? { nil }
+}
+
+/// Thrown by links whose handshake read has a deadline (SSH pipes cannot use
+/// `SO_RCVTIMEO`).
+public struct HcLinkTimeout: Error {
+    public init() {}
+}
+
+extension UnixSocket: HcByteLink {}
+
 public enum HcConnectionError: Error, CustomStringConvertible {
     case socket(String)
     case notConnected
@@ -67,7 +96,7 @@ public final class HcConnection: @unchecked Sendable {
     /// Finishes after the connection ends; yields the reason once when known.
     public let closed: AsyncStream<String?>
 
-    private let socket: UnixSocket
+    private let link: any HcByteLink
     /// Bytes that arrived in the same read as the hello reply's newline. They
     /// belong to the frame stream and must not be dropped.
     private let initialBytes: Data
@@ -92,8 +121,8 @@ public final class HcConnection: @unchecked Sendable {
 
     private static let maxEarlyBytes = 1024 * 1024
 
-    private init(socket: UnixSocket, hello: HcHelloResult, initialBytes: Data) {
-        self.socket = socket
+    private init(link: any HcByteLink, hello: HcHelloResult, initialBytes: Data) {
+        self.link = link
         self.hello = hello
         self.initialBytes = initialBytes
 
@@ -115,7 +144,13 @@ public final class HcConnection: @unchecked Sendable {
         } catch {
             throw HcConnectionError.socket("\(error)")
         }
+        return try open(link: socket, timeout: timeout)
+    }
 
+    /// Opens a connection over an injected byte pipe (SSH, a fake link, or an
+    /// iOS transport). Blocking, like `open(path:)`; callers off the main thread
+    /// must still own the handshake.
+    public static func open(link: any HcByteLink, timeout: TimeInterval = 10) throws -> HcConnection {
         do {
             let request = try HcRPC.requestLine(
                 id: 1,
@@ -125,8 +160,8 @@ public final class HcConnection: @unchecked Sendable {
                     "generation": .int(HcProtocol.generation),
                 ])
             )
-            try socket.write(request)
-            let (reply, rest) = try readLine(socket: socket, timeout: timeout)
+            try link.write(request)
+            let (reply, rest) = try readLine(link: link, timeout: timeout)
             let incoming = try HcRPC.decode(reply)
             switch incoming {
             case let .response(id, result) where id == 1:
@@ -134,8 +169,8 @@ public final class HcConnection: @unchecked Sendable {
                 guard hello.framed else {
                     throw HcConnectionError.protocolViolation("the core did not switch to framed mode")
                 }
-                socket.setReadTimeout(0)
-                let connection = HcConnection(socket: socket, hello: hello, initialBytes: rest)
+                link.setReadTimeout(0)
+                let connection = HcConnection(link: link, hello: hello, initialBytes: rest)
                 connection.startReader()
                 return connection
             case let .failure(_, error):
@@ -144,11 +179,21 @@ public final class HcConnection: @unchecked Sendable {
                 throw HcConnectionError.protocolViolation("unexpected hello reply")
             }
         } catch {
-            socket.close()
-            if error is SocketTimeout {
+            let detail = link.failureDescription
+            link.close()
+            if error is SocketTimeout || error is HcLinkTimeout {
                 throw HcConnectionError.handshakeTimeout
             }
-            throw error
+            // A transport failure often arrives before the protocol has a
+            // message (ssh exits, EPIPE); keep the link's stderr so the caller
+            // can show "Permission denied" instead of a bare broken pipe.
+            if error is HcRPCError || error is HcConnectionError {
+                throw error
+            }
+            if let detail, !detail.isEmpty {
+                throw HcConnectionError.socket(detail)
+            }
+            throw HcConnectionError.socket("\(error)")
         }
     }
 
@@ -227,7 +272,7 @@ public final class HcConnection: @unchecked Sendable {
     // MARK: - Handshake
 
     private static func readLine(
-        socket: UnixSocket,
+        link: any HcByteLink,
         timeout: TimeInterval
     ) throws -> (line: Data, rest: Data) {
         let deadline = Date().addingTimeInterval(timeout)
@@ -241,8 +286,9 @@ public final class HcConnection: @unchecked Sendable {
             if Date() > deadline {
                 throw HcConnectionError.handshakeTimeout
             }
-            guard let chunk = try socket.read(maxLength: 64 * 1024) else {
-                throw HcConnectionError.closed(reason: "end of stream during hello")
+            guard let chunk = try link.read(maxLength: 64 * 1024) else {
+                let detail = link.failureDescription.map { "link ended during hello: \($0)" }
+                throw HcConnectionError.closed(reason: detail ?? "end of stream during hello")
             }
             buffer.append(chunk)
             guard buffer.count <= 4 * 1024 * 1024 else {
@@ -283,13 +329,14 @@ public final class HcConnection: @unchecked Sendable {
             }
             let chunk: Data?
             do {
-                chunk = try socket.read()
+                chunk = try link.read(maxLength: 64 * 1024)
             } catch {
-                finish(reason: "read failed: \(error)")
+                let detail = link.failureDescription.map { "; \($0)" } ?? ""
+                finish(reason: "read failed: \(error)\(detail)")
                 return
             }
             guard let chunk else {
-                finish(reason: nil)
+                finish(reason: link.failureDescription)
                 return
             }
             decoder.append(chunk)
@@ -442,7 +489,7 @@ public final class HcConnection: @unchecked Sendable {
 
     fileprivate func write(_ data: Data) throws {
         do {
-            try socket.write(data)
+            try link.write(data)
         } catch {
             noteWriteFailure(error)
             throw HcConnectionError.socket("\(error)")
@@ -509,7 +556,7 @@ public final class HcConnection: @unchecked Sendable {
         cancelledIDs.removeAll()
         stateLock.unlock()
 
-        socket.close()
+        link.close()
 
         for (_, continuation) in waiting {
             continuation.resume(throwing: HcConnectionError.closed(reason: reason))

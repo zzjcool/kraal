@@ -53,6 +53,8 @@ Kraal 自己：
 | 变量 | 默认 |
 |---|---|
 | `KRAAL_HC_SOCKET` | `HcPaths.resolve()` |
+| `KRAAL_HC_SSH` | 空；设置后走 `ssh -T <host> hc connect` |
+| `KRAAL_HC_SSH_COMMAND` | `hc connect`（远端命令） |
 | `KRAAL_HC_VIEW` | `$XDG_CONFIG_HOME/kraal/view.json`（实际由 app 解析） |
 | `KRAAL_CONTROL_SOCKET` | `KRAAL_HC_VIEW` 同目录 `control.sock`，否则 `$XDG_CONFIG_HOME/kraal/control.sock` |
 | `KRAAL_KEYS` | `~/.config/kraal/keys.json` |
@@ -111,6 +113,7 @@ tart exec kraal-agent cat /tmp/file > ./file
 | `no such module 'XCTest'` | `DEVELOPER_DIR` 指向 CLT |
 | `No such module 'KraalHCTerminal'` | SourceKit-LSP 跨工具链误报；`swift build` 绿就忽略 |
 | `kraal ls` exit 2 | 没有窗口，或 control socket 路径不一致 |
+| SSH 一直 connecting | 远端 `hc` 不在 PATH / host key / 密钥；`HcSSHLink` 会把 stderr 带进错误 |
 | 第二个实例立即退出 | 已有窗口收到 `raise`，单实例转发，正常 |
 | AXPress 无效 | VM 未处于 Aqua，或 TCC 丢失 |
 | 合成键盘不到窗口 | `KRAAL_DEV_BACKGROUND=1` 时 `.accessory` 无法 frontmost；验证键盘用 `0` |

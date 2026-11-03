@@ -31,6 +31,22 @@ func openTestConnection(path: String) async throws -> HcConnection {
     }
 }
 
+/// Opens a connection over an injected link, off the cooperative pool.
+func openTestConnection(link: any HcByteLink) async throws -> HcConnection {
+    try await withCheckedThrowingContinuation { continuation in
+        let thread = Thread {
+            do {
+                continuation.resume(returning: try HcConnection.open(link: link))
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+        thread.name = "kraal.test.link"
+        thread.stackSize = 512 * 1024
+        thread.start()
+    }
+}
+
 func withTempDirectory(_ body: (String) async throws -> Void) async throws {
     // /tmp keeps the unix socket path inside sun_path's 103-byte budget; the
     // per-user temporary directory on macOS is already ~50 bytes.

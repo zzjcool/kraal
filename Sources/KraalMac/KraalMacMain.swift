@@ -38,6 +38,14 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
 
+        let environment = ProcessInfo.processInfo.environment
+        if let sshHost = environment["KRAAL_HC_SSH"], !sshHost.isEmpty {
+            let remote = environment["KRAAL_HC_SSH_COMMAND"] ?? "hc connect"
+            kraalLog("launch: mode=herdr-core ssh=\(sshHost) command=\(remote)")
+            presentHcWindow(sshHost: sshHost, remoteCommand: remote)
+            return
+        }
+
         do {
             let socket = try Self.hcSocketPath()
             kraalLog("launch: mode=herdr-core socket=\(socket)")

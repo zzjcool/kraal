@@ -40,6 +40,20 @@ extension KraalAppDelegate {
         }
 
         let model = HcWorkspaceModel(path: path)
+        presentHcWindow(model: model)
+    }
+
+    /// A window whose transport is `ssh -T <host> hc connect`, for a core that
+    /// is not added as a machine (or on a platform without a local core).
+    func presentHcWindow(sshHost: String, remoteCommand: String = "hc connect") {
+        let model = HcWorkspaceModel(
+            linkFactory: { try HcSSHLink(host: sshHost, remoteCommand: remoteCommand) },
+            label: "ssh:\(sshHost)"
+        )
+        presentHcWindow(model: model)
+    }
+
+    private func presentHcWindow(model: HcWorkspaceModel) {
         model.log = { kraalLog($0) }
         hcWorkspace = model
         let window = makeWindow(root: HcRootView(model: model))
@@ -47,6 +61,7 @@ extension KraalAppDelegate {
         model.windowNumber = window.windowNumber
         HcMenuBar.install(workspace: model)
 
+        let controlPath = try? HcControlPaths.resolve()
         if let controlPath {
             do {
                 let server = HcControlServer(path: controlPath) { [weak self] request in
