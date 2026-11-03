@@ -115,6 +115,22 @@ SPDX-FileCopyrightText: 2026 zzjcool
   `setTerminalConfiguration` 到所有 live surface（含 peek），不需要重启。
   `app.zoom_in/out/reset` 改字号（8–32），F2/shift-F2 打开 tab/space rename sheet。
 - **#231 还差**：`mod.open`（Kraal 不做 JS mods）、`layout.*` 的其他节点操作。
+- **#232 终端 UX（第一刀）**：`terminal.copy`/`terminal.paste` 从 unsupported
+  改为 native（都走 Ghostty 的 `copy_to_clipboard`/`paste(text:)`，不自己拼
+  bracketed-paste 框）；Focused pane 右键菜单（Copy/Paste/Select All/Clear/
+  Split Right/Split Down/Peek/Close Pane）由 `HcTerminalPlatformView` 提供，
+  所有条目复用 `performAction` 或绑定 action；scrollback 上限设为 **10,000 行 /
+  10 MB 先到为准**，并开启 `copy-on-select`；`send:` 绑定修掉用 terminal id
+  查 pane-keyed 字典的静默失效。
+  VM 实测：`seq 1 1 12000` 后 scrollback total=9345（10 MB 先到），滚轮一格
+  offset 9305→9302（3 行）；右键无选区仍出现菜单；菜单 Split Right 后
+  `kraal ls` 从 3 个终端变 4 个；菜单 Select All→Copy 后剪贴板是终端文本；
+  `kraal do terminal.paste` 在另一 pane 得到文本；无选区 `terminal.copy`
+  exit 1；点击左/右 pane 的 `focused_pane` 真的切换（之前 AppKit 收到了
+  点击、模型没收到）。焦点绑定打开后 ⌘K 输入 `rename` 仍得到
+  `AXTextField value=rename`，命令面板没有被终端抢回 first responder。
+  **还没做**：链接 Cmd-click 的 t7/machine peek、hover、拖放、
+  kitty graphics 像素回归、IME 候选窗截图、alt-screen 滚轮探针。
 - **#233 控制面（第一阶段）**：app 内 `HcControlServer` 监听一行 JSON 的
   Unix socket（`KRAAL_CONTROL_SOCKET` → `KRAAL_HC_VIEW` 同目录 `control.sock`
   → `$XDG_CONFIG_HOME/kraal/control.sock`），一条连接只处理一个命令。

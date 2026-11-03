@@ -64,6 +64,9 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public var agentToast: HcAgentToast?
     /// A sub-agent peeked from the sidebar; not the focused pane.
     @Published public internal(set) var peekSession: HcTerminalSession?
+    /// NSMenuItem targets are not retained; this keeps the current menu's
+    /// actions alive until the menu closes.
+    var contextMenuTargets: [HcMenuAction] = []
     @Published public internal(set) var peekAddress: String?
     @Published public internal(set) var selected: String?
     @Published public private(set) var session: HcTerminalSession?
@@ -83,6 +86,14 @@ public final class HcWorkspaceModel: ObservableObject {
     /// A close that needs confirmation because it would end several terminals.
     @Published public var closeRequest: HcCloseRequest?
     @Published public var renameRequest: HcRenameRequest?
+
+    /// A sheet or overlay owns the keyboard while it is open. The terminal
+    /// keeps its AppKit first responder until the overlay asks for it, so
+    /// binding focus to this flag cannot steal the palette's search field.
+    var terminalFocusAllowed: Bool {
+        !showPalette && !showSettings && !showHelp
+            && renameRequest == nil && closeRequest == nil
+    }
     /// A failed machine action, shown until dismissed. Add/rename keep their
     /// sheet open instead, so the typed values are not lost.
     @Published public var machineError: String?

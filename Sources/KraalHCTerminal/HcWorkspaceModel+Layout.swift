@@ -295,6 +295,10 @@ extension HcWorkspaceModel {
                     return
                 }
                 session.apply(self.settings)
+                session.contextMenuProvider = { [weak self] in
+                    self?.paneContextMenu(for: pane)
+                }
+                session.onFocusRequest = { [weak self] in self?.focusPane(pane) }
                 self.paneSessions[pane] = session
                 self.log?("hc: attached \(address) to \(pane)")
             } catch {

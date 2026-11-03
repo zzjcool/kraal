@@ -52,6 +52,11 @@ public struct HcTerminalSettings: Codable, Equatable, Sendable {
 
     public static let defaultsKey = "kraal.hc.terminal-settings"
 
+    /// The upstream app keeps both a line and a byte ceiling and stops at
+    /// whichever comes first. Ghostty applies them as it trims scrollback.
+    public static let scrollbackLines = 10_000
+    public static let scrollbackBytes = 10 * 1024 * 1024
+
     public init() {}
 
     /// Added fields must not reset an existing settings blob. Every field is
@@ -91,6 +96,9 @@ public struct HcTerminalSettings: Codable, Equatable, Sendable {
             .backgroundOpacity(min(max(backgroundOpacity, 0.1), 1))
             .minimumContrast(min(max(minimumContrast, 0), 1))
             .custom("macos-option-as-alt", optionAsAlt ? "true" : "false")
+            .custom("copy-on-select", "true")
+            .custom("scrollback-limit-lines", String(Self.scrollbackLines))
+            .custom("scrollback-limit", String(Self.scrollbackBytes))
     }
 }
 

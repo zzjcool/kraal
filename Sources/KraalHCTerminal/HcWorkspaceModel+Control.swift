@@ -66,9 +66,19 @@ extension HcWorkspaceModel {
         let active = workspace.activeTab
         let documents = documentStatus()
         let errors = [layoutError, openError, machineError].compactMap { $0 }
+        let scrollback = paneSessions.keys.sorted().compactMap { pane -> JSONValue? in
+            guard let bar = paneSessions[pane]?.state.scrollbar else { return nil }
+            return .object([
+                "pane": .string(pane),
+                "total": .number(Double(bar.total)),
+                "offset": .number(Double(bar.offset)),
+                "len": .number(Double(bar.len)),
+            ])
+        }
         var fields: [String: JSONValue] = [:]
         fields["zoom"] = .number(((settings.fontSize / HcFontZoom.base) * 100).rounded() / 100)
         fields["font_size"] = .number(settings.fontSize)
+        fields["scrollback"] = .array(scrollback)
         fields["ui_font_size"] = .number(settings.fontSize)
         fields["space"] = workspace.activeSpace.map { .string($0.id) } ?? .null
         fields["tab"] = active.map { .string($0.id) } ?? .null

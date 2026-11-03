@@ -58,6 +58,7 @@ struct HcWorkspaceModelTests {
         #expect(status["focused_pane"]?.stringValue == "p1")
         #expect(status["overlays"]?.arrayValue?.first?.stringValue == "help")
         #expect(status["status"]?.stringValue == "idle")
+        #expect(status["scrollback"]?.arrayValue?.isEmpty == true)
     }
 
     @Test("after a snapshot, a pane whose terminal is gone is dropped")

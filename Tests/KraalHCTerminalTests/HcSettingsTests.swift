@@ -50,6 +50,12 @@ struct HcSettingsTests {
         #expect(value.optionAsAlt == false)
     }
 
+    @Test("scrollback uses the upstream line and byte ceilings")
+    func scrollbackLimits() {
+        #expect(HcTerminalSettings.scrollbackLines == 10_000)
+        #expect(HcTerminalSettings.scrollbackBytes == 10 * 1024 * 1024)
+    }
+
     @Test("zoom steps one point and clamps")
     func zoom() {
         #expect(HcFontZoom.next(13, by: 1) == 14)

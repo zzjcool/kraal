@@ -11,13 +11,19 @@ import SwiftUI
 
 public struct HcTerminalPaneView: View {
     private let session: HcTerminalSession
+    private let isFocused: Bool
+    @FocusState private var focused: Bool
 
-    public init(session: HcTerminalSession) {
+    public init(session: HcTerminalSession, isFocused: Bool = false) {
         self.session = session
+        self.isFocused = isFocused
     }
 
     public var body: some View {
         TerminalSurfaceView(context: session.state)
+            .terminalFocused($focused)
             .background(Color.clear)
+            .onAppear { focused = isFocused }
+            .onChange(of: isFocused) { _, value in focused = value }
     }
 }

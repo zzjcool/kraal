@@ -365,8 +365,12 @@ struct HcPaneTreeView: View {
     private var block: some View {
         if let terminal = node.terminal {
             if let session = model.paneSessions[node.id] {
-                HcTerminalPaneView(session: session)
-                    .overlay(focusBorder)
+                HcTerminalPaneView(
+                    session: session,
+                    isFocused: model.terminalFocusAllowed
+                        && model.workspace.activeTab?.focusedPane == node.id
+                )
+                .overlay(focusBorder)
                     .onTapGesture { model.focusPane(node.id) }
             } else {
                 VStack(spacing: 6) {

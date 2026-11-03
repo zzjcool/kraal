@@ -139,18 +139,8 @@ extension KraalActions {
             [a("terminal"), a("pane")],
             "Show a terminal in a pane for now; no terminal goes back."
         ),
-        unsupportedAction(
-            "terminal.copy",
-            [],
-            "Copy the focused terminal's selection.",
-            "Terminal selection and copy land with the Ghostty UX work (#232)."
-        ),
-        unsupportedAction(
-            "terminal.paste",
-            [],
-            "Paste into the focused terminal.",
-            "Terminal paste lands with the Ghostty UX work (#232)."
-        ),
+        native("terminal.copy", [], "Copy the focused terminal's selection."),
+        native("terminal.paste", [], "Paste text into the focused terminal."),
         unsupportedAction(
             "terminal.paste_image",
             [],
