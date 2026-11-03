@@ -10,6 +10,22 @@ import Foundation
 import KraalHC
 import KraalModel
 
+public struct HcRenameRequest: Identifiable, Equatable {
+    public enum Kind: Equatable {
+        case space(String)
+        case tab(String)
+    }
+
+    public let id = UUID()
+    public let kind: Kind
+    public let current: String
+
+    public init(kind: Kind, current: String) {
+        self.kind = kind
+        self.current = current
+    }
+}
+
 public struct HcCloseRequest: Identifiable, Equatable {
     public enum Kind: Equatable {
         case space(String)
@@ -316,6 +332,26 @@ extension HcWorkspaceModel {
     public func previousTab() {
         guard workspace.previousTab() else { return }
         publish()
+    }
+
+    /// F2 / shift-F2 and the rename palette actions open this instead of
+    /// inventing a name from the key value (the first arg is `id`, not `name`).
+    public func requestRename(space id: String) {
+        guard let space = workspace.space(id) else { return }
+        renameRequest = HcRenameRequest(kind: .space(id), current: space.name)
+    }
+
+    public func requestRename(tab id: String) {
+        guard let tab = workspace.tab(id) else { return }
+        renameRequest = HcRenameRequest(kind: .tab(id), current: tab.name)
+    }
+
+    public func commitRename(_ request: HcRenameRequest, name: String) async {
+        renameRequest = nil
+        switch request.kind {
+        case let .space(id): await renameSpace(id, name: name)
+        case let .tab(id): await renameTab(id, name: name)
+        }
     }
 
     public func renameSpace(_ id: String, name: String) async {

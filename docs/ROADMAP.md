@@ -85,12 +85,12 @@ SPDX-FileCopyrightText: 2026 zzjcool
   `LiveHcAgentTests` 用真实 core + PTY 覆盖 working→blocked→done、seen、pin、
   后台不写、子 agent peek 与 mark unread；截图见 `/tmp/km-ui-agent2/`。
 - **#231 进行中（动作目录 + 第一批 chrome）**：`KraalActions` 单一表冻结
-  `herdr-app` 的 69 个 action 名/参数/必填和上游错误文案；47 个 native，22 个
+  `herdr-app` 的 69 个 action 名/参数/必填和上游错误文案；48 个 native，21 个
   显式 `unsupported(reason)`（mods/JS、chrome 布局文件、updater、copy/paste 等）。
   `kraal commands [--json]` 直接由该表生成，输出上游的 `[{name,args,about}]` 形状，
   不需要连接 daemon。窗口侧 `HcWorkspaceModel.performAction` 统一校验与分发，
   菜单（Kraal/File/Edit/View/Window/Help）和 ⌘K 命令面板都走同一个 runner；
-  面板支持模糊匹配、分组、上下键与回车，只列当前能执行的 39 个 action。
+  面板支持模糊匹配、分组、上下键与回车，只列当前能执行的 action。
   实测：`File > New Space` 后 `hc ls` 出现 live t1；`Split Right/Down` 增加
   pane；面板搜 `split` 只剩 `pane.split`，执行后 `t3` 被 kill；布局保存
   v1→v2 不再出现假 conflict（每机器 save 串行化）。
@@ -101,7 +101,8 @@ SPDX-FileCopyrightText: 2026 zzjcool
   可用绑定。`HcKeymapController` 把 NSEvent 归一到 `cmd/ctrl/alt/shift + 物理键`
   （`cmd-+`、`cmd-shift-]` 等按物理键匹配），`send:` 直接写入聚焦终端；
   `ctrl-alt-shift-escape` 恢复默认键位。帮助浮层现在同时列 KEYS 和 COMMANDS。
-  `pane.go`/`pane.swap` 已实现并接入 `cmd-alt-arrow` 默认键位。
+  `pane.go`/`pane.swap` 已实现并接入 `cmd-alt-arrow` 默认键位；
+  `layout.toggle:sidebar` 也走同一 runner（`cmd-b`）。
 - **#231 分隔条/tab 拖动（第三批）**：`HcLayoutTree.resizing` 只改
   `size.weight`，`HcSplitHandle` 的拖动按两兄弟的权重和守恒、每侧至少 36pt；
   7pt 视觉线 + 两侧扩展命中区，指针悬停显示 resize cursor；AX
@@ -110,9 +111,9 @@ SPDX-FileCopyrightText: 2026 zzjcool
 - **#231 设置（第四批）**：`HcSettingsView`（工具栏齿轮 / `⌘,` / 命令面板）：
   App system/light/dark、侧栏 Density（comfortable/compact）、字体 8–32pt、
   水平/垂直 padding、背景透明度、最小对比度、agent 通知声音；core socket 与
-  keys 路径只读展示。值存 `UserDefaults`，改一项立即 `setTerminalConfiguration`
-  到所有 live surface（含 peek），不需要重启。
-- **#231 还差**：`option_as_alt`（Ghostty 输入层）、`app.zoom_*`/
-  `layout.toggle`/`mod.open` 等尚未执行；`kraal do` 需要 #233 的窗口控制
-  socket；rename 的输入 UI 也还没接。
+  keys 路径只读展示、`option_as_alt`；值存 `UserDefaults`，改一项立即
+  `setTerminalConfiguration` 到所有 live surface（含 peek），不需要重启。
+  `app.zoom_in/out/reset` 改字号（8–32），F2/shift-F2 打开 tab/space rename sheet。
+- **#231 还差**：`mod.open`（Kraal 不做 JS mods）、`layout.*` 的其他节点操作；
+  `kraal do` 需要 #233 的窗口控制 socket。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

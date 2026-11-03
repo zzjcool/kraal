@@ -191,11 +191,10 @@ extension KraalActions {
             "Replace a personal chrome layout tree.",
             "Kraal has no mod/chrome layout files."
         ),
-        unsupportedAction(
+        native(
             "layout.toggle",
             [a("id", true)],
-            "Hide or show a chrome layout node.",
-            "Kraal has no mod/chrome layout files."
+            "Hide or show a chrome panel; Kraal handles the sidebar only."
         ),
         unsupportedAction(
             "layout.show",

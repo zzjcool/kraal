@@ -71,6 +71,9 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
             target(self, "Close Pane", #selector(closePane), "w", [.command, .shift]),
             target(self, "Close Tab", #selector(closeTab), "w"),
             target(self, "Close Space", #selector(closeSpace), "w", [.command, .option]),
+            .separator(),
+            target(self, "Rename Tab…", #selector(renameTab), "f2", []),
+            target(self, "Rename Space…", #selector(renameSpace), "f2", [.shift]),
         ]
     }
 
@@ -89,6 +92,7 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
     private func viewMenu() -> [NSMenuItem] {
         [
             target(self, "Command Palette…", #selector(openPalette), "k"),
+            target(self, "Toggle Sidebar", #selector(toggleSidebar), "b"),
             target(self, "Next Space", #selector(nextSpace), "]"),
             target(self, "Previous Space", #selector(previousSpace), "[", [.command, .shift]),
             target(self, "Next Tab", #selector(nextTab), "]"),
@@ -180,6 +184,18 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
 
     @objc private func openSettings() {
         workspace?.showSettings = true
+    }
+
+    @objc private func toggleSidebar() {
+        workspace?.sidebarVisible.toggle()
+    }
+
+    @objc private func renameTab() {
+        if let id = workspace?.workspace.activeTab?.id { workspace?.requestRename(tab: id) }
+    }
+
+    @objc private func renameSpace() {
+        if let id = workspace?.workspace.activeSpace?.id { workspace?.requestRename(space: id) }
     }
 
     @objc private func openHelp() {

@@ -22,6 +22,7 @@ struct HcSettingsTests {
         settings.density = .compact
         settings.soundEnabled = false
         settings.appearance = .dark
+        settings.optionAsAlt = true
         settings.save(to: defaults)
         #expect(HcTerminalSettings.load(from: defaults) == settings)
     }
@@ -33,6 +34,14 @@ struct HcSettingsTests {
         settings.minimumContrast = 2
         let config = settings.terminalConfiguration
         #expect(config != .init())
+    }
+
+    @Test("zoom steps one point and clamps")
+    func zoom() {
+        #expect(HcFontZoom.next(13, by: 1) == 14)
+        #expect(HcFontZoom.next(32, by: 1) == 32)
+        #expect(HcFontZoom.next(8, by: -1) == 8)
+        #expect(HcFontZoom.reset() == 13)
     }
 
     @Test("density changes row and tab padding")

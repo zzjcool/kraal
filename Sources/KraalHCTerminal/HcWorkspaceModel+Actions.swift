@@ -55,6 +55,7 @@ extension HcWorkspaceModel {
         "terminal.kill", "terminal.peek", "terminal.show",
         "agent.focus", "agent.next", "agent.prev",
         "app.palette", "app.settings", "app.help", "app.quit", "app.hide",
+        "app.zoom_in", "app.zoom_out", "app.zoom_reset", "layout.toggle",
         "app.hide_others", "app.show_all",
         "window.close", "window.minimize", "window.maximize",
     ]
@@ -62,6 +63,14 @@ extension HcWorkspaceModel {
     public func canPerformAction(_ name: String) -> Bool {
         Self.implementedActions.contains(name)
     }
+
+    /// Actions whose missing required value is asked for in a sheet instead of
+    /// being rejected. Keymap bindings use this to allow F2/shift-F2.
+    public func canPromptAction(_ name: String) -> Bool {
+        Self.promptActions.contains(name)
+    }
+
+    static let promptActions: Set<String> = ["space.rename", "tab.rename"]
 
     /// Validate and execute one catalog action. Busy/no-window errors are the
     /// caller's problem; this returns the same `{ok|error}` shape as `hc`/the
@@ -117,7 +126,8 @@ extension HcWorkspaceModel {
                 return .fail("space.rename: no space to rename")
             }
             guard let newName = values["name"]?.stringValue else {
-                return .fail("space.rename needs name (empty: automatic)")
+                requestRename(space: space)
+                return .asked("rename")
             }
             await renameSpace(space, name: newName)
             return layoutError.map(HcActionOutcome.fail) ?? .ok()
@@ -169,7 +179,8 @@ extension HcWorkspaceModel {
                 return .fail("tab.rename: no tab to rename")
             }
             guard let newName = values["name"]?.stringValue else {
-                return .fail("tab.rename needs name (empty: its number)")
+                requestRename(tab: tab)
+                return .asked("rename")
             }
             await renameTab(tab, name: newName)
             return layoutError.map(HcActionOutcome.fail) ?? .ok()
@@ -204,6 +215,9 @@ extension HcWorkspaceModel {
     }
 
     private func dispatchPane(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
+        if name == "pane.go" || name == "pane.swap" {
+            return await dispatchPaneMovement(name, values)
+        }
         switch name {
         case "pane.split":
             if values["mod"] != nil || values["props"] != nil {
@@ -233,37 +247,43 @@ extension HcWorkspaceModel {
             if pane != workspace.focusedPane { focusPane(pane) }
             toggleZoom()
             return .ok()
+        case "layout.toggle":
+            guard values["id"]?.stringValue ?? "sidebar" == "sidebar" else {
+                return .fail("layout.toggle: Kraal only supports the sidebar")
+            }
+            sidebarVisible.toggle()
+            return .ok()
+
         case "pane.focus":
             guard let pane = targetPane(values) else {
                 return .fail("pane.focus: no pane to focus")
             }
             focusPane(pane)
             return .ok()
-        case "pane.go":
-            guard let pane = targetPane(values), let direction = edge(values["direction"]) else {
-                return .fail("pane.go needs direction")
-            }
+        default:
+            return .fail("\(name) is not implemented in this window yet")
+        }
+    }
+
+    private func dispatchPaneMovement(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
+        guard let pane = targetPane(values), let direction = edge(values["direction"]) else {
+            return .fail("\(name) needs direction")
+        }
+        if name == "pane.go" {
             guard workspace.focusNeighbor(pane, direction: direction) else {
                 return .fail("pane.go: no pane that way")
             }
             publish()
             return .ok()
-        case "pane.swap":
-            guard let pane = targetPane(values), let direction = edge(values["direction"]) else {
-                return .fail("pane.swap needs direction")
-            }
-            guard workspace.swapWithNeighbor(pane, direction: direction) else {
-                return .fail("pane.swap: no pane that way")
-            }
-            publish()
-            if let space = workspace.tab(ofPane: pane).flatMap({ workspace.space(of: $0.id) }) {
-                await saveLayout(machine: space.machine)
-            }
-            return .ok()
-
-        default:
-            return .fail("\(name) is not implemented in this window yet")
         }
+        guard workspace.swapWithNeighbor(pane, direction: direction) else {
+            return .fail("pane.swap: no pane that way")
+        }
+        publish()
+        if let space = workspace.tab(ofPane: pane).flatMap({ workspace.space(of: $0.id) }) {
+            await saveLayout(machine: space.machine)
+        }
+        return .ok()
     }
 
     private func dispatchTerminal(_ name: String, _ values: [String: JSONValue]) async -> HcActionOutcome {
@@ -355,6 +375,15 @@ extension HcWorkspaceModel {
             return .ok()
         case "app.settings":
             showSettings = true
+            return .ok()
+        case "app.zoom_in":
+            settings.fontSize = HcFontZoom.next(settings.fontSize, by: 1)
+            return .ok()
+        case "app.zoom_out":
+            settings.fontSize = HcFontZoom.next(settings.fontSize, by: -1)
+            return .ok()
+        case "app.zoom_reset":
+            settings.fontSize = HcFontZoom.reset()
             return .ok()
         case "app.help":
             showHelp = true

@@ -48,6 +48,7 @@ public struct HcTerminalSettings: Codable, Equatable, Sendable {
     public var density: HcDensity = .comfortable
     public var soundEnabled = true
     public var appearance: HcAppearance = .system
+    public var optionAsAlt = false
 
     public static let defaultsKey = "kraal.hc.terminal-settings"
 
@@ -72,5 +73,18 @@ public struct HcTerminalSettings: Codable, Equatable, Sendable {
             .windowPaddingY(max(0, paddingY))
             .backgroundOpacity(min(max(backgroundOpacity, 0.1), 1))
             .minimumContrast(min(max(minimumContrast, 0), 1))
+            .custom("macos-option-as-alt", optionAsAlt ? "true" : "false")
     }
+}
+
+public enum HcFontZoom {
+    public static let base: Double = 13
+    public static let minimum: Double = 8
+    public static let maximum: Double = 32
+
+    public static func next(_ current: Double, by delta: Double) -> Double {
+        min(max(current + delta, minimum), maximum)
+    }
+
+    public static func reset() -> Double { base }
 }
