@@ -60,6 +60,16 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public var showPalette = false
     @Published public var showHelp = false
     @Published public var showSettings = false
+    /// The first-launch tour. Shown once (`kraal.hc.welcome-seen`); also the
+    /// empty state's offer.
+    @Published public var showWelcome = false
+    /// ⌘P's "Go to a space or tab" picker: places, not commands.
+    @Published public var pickerVisible = false
+    /// Which Settings page `app.settings:section` asked for.
+    @Published public var settingsSection: HcSettingsSection = .look
+    /// The colors every view paints from: `settings.appearance` × the light/dark
+    /// theme pair, with `systemIsDark` decided by the window's appearance.
+    @Published public internal(set) var resolvedTheme = HcTheme.resolve(.graphite)
     /// A blocked/done event shown in the window; the system notification is
     /// delivered next to it.
     @Published public var agentToast: HcAgentToast?
@@ -91,10 +101,6 @@ public final class HcWorkspaceModel: ObservableObject {
     /// A sheet or overlay owns the keyboard while it is open. The terminal
     /// keeps its AppKit first responder until the overlay asks for it, so
     /// binding focus to this flag cannot steal the palette's search field.
-    var terminalFocusAllowed: Bool {
-        !showPalette && !showSettings && !showHelp
-            && renameRequest == nil && closeRequest == nil
-    }
     /// A failed machine action, shown until dismissed. Add/rename keep their
     /// sheet open instead, so the typed values are not lost.
     @Published public var machineError: String?
@@ -143,7 +149,7 @@ public final class HcWorkspaceModel: ObservableObject {
     var unreadAgents: Set<String> = []
     /// The first snapshot is not news; only later blocked/quiet transitions alert.
     var listedAgents = false
-    private var activeObservers: [NSObjectProtocol] = []
+    var activeObservers: [NSObjectProtocol] = []
     var toastTask: Task<Void, Never>?
     private var viewSaveTask: Task<Void, Never>?
     private var writtenView: Data?
@@ -507,6 +513,8 @@ public final class HcWorkspaceModel: ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     self.appActive = NSApp?.isActive ?? false
+                    // The system's light/dark switch applies while we are away.
+                    self.refreshTheme()
                     self.publish()
                 }
             }
@@ -528,6 +536,7 @@ extension HcWorkspaceModel {
         loadViewFile()
         applySettings()
         observeActivation()
+        observeAppearance()
         status = .connecting
         client.start()
         eventsTask = Task { [weak self] in

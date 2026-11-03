@@ -132,8 +132,10 @@ extension HcWorkspaceModel {
     private var openOverlays: [String] {
         var names: [String] = []
         if showPalette { names.append("palette") }
+        if pickerVisible { names.append("picker") }
         if showHelp { names.append("help") }
         if showSettings { names.append("settings") }
+        if showWelcome { names.append("welcome") }
         if renameRequest != nil { names.append("rename") }
         if closeRequest != nil { names.append("close") }
         if machineSheet != nil { names.append("machine") }
