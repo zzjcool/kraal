@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 zzjcool
 //
-// The herdr-core launch path, kept out of `KraalMacMain.swift` (that file is at
-// swiftlint's length limit and this is a self-contained mode).
+// The herdr-core launch path, kept out of `KraalMacMain.swift` so the app
+// lifecycle and window construction stay readable.
 
 import AppKit
 import KraalHC
 import KraalHCTerminal
-import KraalUI
+import KraalSupport
 import SwiftUI
 
 extension KraalAppDelegate {
-    /// The socket this launch should use for herdr-core, if it asked for hc mode.
-    static func hcSocketPath() -> String? {
+    /// The socket this launch uses for herdr-core.
+    ///
+    /// `KRAAL_HC_SOCKET` is the explicit override used by VM/scratch sessions;
+    /// otherwise the same `HC_SESSION`/`HC_SOCKET`/XDG rules as `hc` apply.
+    /// A resolution failure is thrown, not turned into a second window: there
+    /// is only one client stack now.
+    static func hcSocketPath() throws -> String {
         let environment = ProcessInfo.processInfo.environment
-        let explicit = environment["KRAAL_HC_SOCKET"] ?? ""
-        guard environment["KRAAL_HC"] == "1" || !explicit.isEmpty else { return nil }
-        if !explicit.isEmpty { return explicit }
-        do {
-            return try HcPaths.resolve().socket
-        } catch {
-            kraalLog("launch: hc path resolution failed: \(error)")
-            return nil
+        if let explicit = environment["KRAAL_HC_SOCKET"], !explicit.isEmpty {
+            return explicit
         }
+        return try HcPaths.resolve().socket
     }
 
     /// Builds the herdr-core window: machines, the layout and its panes.

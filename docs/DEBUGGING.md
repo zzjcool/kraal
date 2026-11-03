@@ -1,697 +1,75 @@
-# 排查方法
+# 排查原则
 
-这份文档不描述代码怎么工作，只记录**怎么验证一件事是真的**。
+这份记录「怎么证明一件事是真的」。每条都对应一次真实白跑；改代码前先读。
 
-Kraal 有一类 bug 特别费时间：终端渲染错乱、切换机器后内容不对、点击没反应。
-它们的共同点是**看起来像 A，实际是 B**，而每一次我都先按 A 的方向查了一轮。
-下面每一条都对应一次真实白跑，写下来是为了下次少跑那一轮。
+## 1. 样本要能区分对错
 
----
+空 shell 的「正确」和「空白」长得一样。测终端要让它输出可识别的内容；测布局
+要同时看 pane 集合**和**几何，不是只数数量。
 
-## 1. 样本本身要能区分「正确」和「错误」
+## 2. A/B 回退能复现，才算定位
 
-**事故**：用户报「启动后终端空白，切一次 tab 才显示」。我复现时用一个只有 `#`
-提示符的空 shell，看到屏幕上只有 `#`，判定「只渲染了第一行」，然后花了几轮去查
-`SurfaceANSIRenderer` 的输出行数和 Ghostty 的 tick。
-
-那个 pane 本来就只有 `#`。**图像完全正确，我查的是一个不存在的症状。**
-
-换成有内容的 pane（写几行 `echo`）之后，真正的现象才露出来：**整片空白，连 `#`
-都没有**。这和「只画一行」是两个完全不同的方向。
-
-> 样本没内容时，空白和正确长得一模一样。
->
-> 动手前先问：这个样本在「对的」和「错的」两种情况下，屏幕上分别是什么？
-
-## 2. A/B 回退能复现，比修完看起来对更重要
-
-修完截图正常，只说明「现在没坏」。把改动 stash 掉还能复现原症状，才说明修的是
-那个原因。
-
-```bash
-git stash push Sources/SomeFile.swift
-./Scripts/build-app.sh && ./Scripts/dev-session.sh start
-# 截图：应该复现原症状
-git stash pop
-```
-
-三个渲染 bug 的结论都是这样确认的。其中「pane 越界」那次，回退后日志从
-`grid=118x40` 回到 `grid=128x40`、pane 宽度 977pt 回到 1062pt（越界 58.5pt），
-这才敢说修对了。
+修完看起来正常 ≠ 修的是那个原因。先让旧行为稳定变红，再让新行为变绿。
+不能复现就写「未验证」。
 
 ## 3. 探针要测对对象
 
-**事故**：怀疑 `.position` 让 NSView 撑满父容器，于是我读 `PaneFrameReporter`
-的 frame，得到 `actual=1088x742`（容器尺寸），自以为证实了猜测。
+先问「这个值是谁写的、应该多少」。`kraal status` 里的 focus 是模型状态，
+core 的 `focused` 可能是另一个概念；不要把两个字段当成同一个。
 
-那个 reporter 挂在 `.position` 之后的 `.background` 里，**本来就被设计成占满
-容器**——源码注释写得很清楚，它靠「容器 rect + pane offset」反算命中区域。
+## 4. 删探针用精确文本匹配
 
-真正该测的是终端视图本身。换一个 scout 用 `swift -` 从 stdin 编译最小复现，
-测出的是 `TERM-w1:p1 frame=(0,0,1062,333)`——尺寸正确、位置正确。**我的结论是错的。**
+不要跨行正则。清理后看 `git diff --stat`，确认没有顺手删掉真实逻辑。
 
-> 加探针前先确认：我读的这个值，是谁写的？它应该是多少？
+## 5. 临时改动是完整动作
 
-## 4. 删临时探针不要用跨行正则
+加 → 验 → 还原 → 干净重启 → 再确认。只「还原」不重启，残留状态会骗人。
 
-**事故**：用 `re.sub(r"\n *// PROBERESET\n.*?\n *\}\n", ...)` 清一段探针，正则
-吞掉了 `apply` 后半段的 `guard let grid`、grid mismatch 校验和 `reportCellMetrics`。
-文件从 497 行掉到 460 行。
+## 6. 自动化点击先激活窗口
 
-是提交前 `git diff` 看到「删除了 40 行」才发现的。
+再谈坐标。合成事件落在非 frontmost 窗口外的概率很高；VM 里
+`KRAAL_DEV_BACKGROUND=0` 是前提，`.accessory` 不参与 frontmost。
 
-> 删探针用精确文本匹配（`edit` 工具），不用跨行正则。
->
-> 每次清理后必须看 `git diff --stat` 的行数变化是否符合预期。
+## 7. 没证据就说「没验证」
 
-## 5. 临时改动是一个完整动作，不是一步
-
-加探针只是第一步。完整动作是：
-
-1. 加探针
-2. 跑起来验证
-3. **还原代码**
-4. **用干净环境重启**（清环境变量、清日志）
-5. **再确认一次**现象符合预期
-
-只做前两步的后果：下一次启动带着上次的 `launchctl setenv` 或残留代码跑，看起来
-像「bug 没修好」。这类事故发生过两次（`KRAAL_SHOW_MACHINES`、
-`KRAAL_SHOW_SETTINGS`）。
-
-## 6. 点击自动化：先激活，再谈坐标
-
-在后台会话里点控件没反应，第一怀疑对象是**窗口不在前台**，不是命中区域坏了。
-
-```bash
-osascript -e 'tell application "System Events" to tell process "KraalMac-bin" to set frontmost to true'
-```
-
-不激活就点，事件落到别的窗口，表现是「点了完全没反应」，和「hit area 有死区」
-一模一样。
-
-**但激活之后仍然点不中，那就真的是布局问题**——这时该去查
-`.frame` / `.padding` / `contentShape` 的实际数值，而不是继续微调坐标。机器行
-那次就是：行高 20pt，两个热区都只有 16pt，上下各留 2pt 死区，而行距是 0，
-于是每两行之间有连续的 4pt 无响应带。
-
-## 7. 没有证据时，说「没验证」
-
-跨机器 paneId 撞车那条修复，只有单元测试覆盖。我一度说「无法验证，因为只有一台
-daemon」——这是错的，沙箱里完全可以再起一个 session（见
-[ENVIRONMENT.md §4.4](ENVIRONMENT.md)）。
-
-真正该做的是：**先判断「造不出条件」是不是事实**。多数时候不是，是没想到；
-确实造不出来时，就明说哪一条没被验证，不要用「逻辑上应该对」代替证据。
+不要用「逻辑上应该对」代替。日志里一行 `call: ok` 不是证据；要看 core/控制面
+状态的前后 diff。
 
 ## 8. 「检查通过」可能只是检查没跑
 
-**事故**：`vm-bootstrap.sh --fix-tcc` 从来没生效过，而我两次在文档和回复里说
-「它会自动写 TCC 授权」。两个叠加缺陷：
-
-1. 分派处写的是 `provision`（无参数），而函数内用 `"${1:-}" = "--fix-tcc"` 判断
-   —— 参数永远进不来，分支进不去。
-2. 写入没加 `sudo`：`TCC.db` 是 `root:wheel 0644`，普通用户直接报
-   `attempt to write a readonly database`。
-
-真正致命的是它的**输出**：什么都没做，却打印 `ok: all three granted`。
-因为分支没进去，连"检查缺失"那一步都没执行。
-
-> **一条命令既检查又修复时，必须先确认它能报出「缺」。**
-> 否则「通过」只意味着它没看。
-
-验证这类工具的标准是 **A/B 三步**，缺一步都不算：
-
-```
-手工制造缺陷  →  工具必须报错
-工具修复      →  必须报"已修"
-复查          →  必须报健康
-并且，缺陷态下功能用例必须真的失败
-```
-
-这次实测：删掉 `kTCCServicePostEvent` → 报 `missing grants` → `--fix-tcc` 报
-`granted` → 复查 `all three granted` → `drag-divider` 两条断言全过。
-
-**推论**：任何"检测 + 修复"脚本，第一次运行前先在**已知健康**的环境里跑一遍，
-确认它报健康；再手工破坏，确认它报缺失。只验后者会漏掉"永远通过"。
-
-**同日第二例（`gui.sh` 的断言与退出码脱钩）**：`check` 把失败记进
-`ASSERTION_FAILURES`，但 `run_case` 只按 `fixture`/`action`/`assert` 的**返回码**
-判成败。`assert` 最后一条 `check` 通过就返回 0，于是一个打印了
-`✗ the app sent the text as a paste event` 的用例被判为 **passed**，退出码 0 ——
-门禁对它专门要抓的那个 bug 无法失败。
-
-它是一次真实观察暴露的：`paste` 用例的第一版 `assert` 以失败的 `check` 开头、
-以通过的 `check` 结尾，输出 `✗ … ✓ …` 却显示 `ok: paste passed`。
-修法是让 `ASSERTION_FAILURES > 0` 直接参与判定。
-
-> **一条门禁必须能红。** 写完断言先故意让它失败一次（本次是 A/B 回退成
-> `sendInput`），看到退出码 1 才算这条门禁存在。
+门禁要能红：故意改坏一个被断言的行为，确认对应断言变红且 exit 1。旧
+`gui.sh` 曾因为跳过/未执行而假绿；新自动化必须先做注入验证。
 
 ## 9. 前提错了，测试只会加固错误
 
-前八条讲的是「怎么验证代码对不对」。这一条讲更前面的一步：
-**代码符合了你的理解，而你的理解是错的。**
+改 wire 字段先去读消费方代码。协议文档只说字段叫什么，消费方决定它意味着
+什么；按文档推演出的「合理行为」可能是反的。
 
-**事故**：issue #20 第 7-7 条，daemon 发的 `ClientShellKeyboardReportAll`
-被丢弃。`docs/archive/GAP-VS-HERDR.md` 那句写在先：
+## 10. 路径含版本号 = 授权静默失效
 
-> "Kitty keyboard 模式的 pane 是否拿到 key release 完全取决于这个开关。"
-
-据此推出的修法很自然：开了 report-all，就该把 key 事件的
-`tracksRelease` 也置为 true —— 否则「程序知道要收 release、事件里却说没有」。
-改完 7 处、补上测试、`verify.sh` 全绿、A/B 回退也能红，**然后把它合并了**。
-
-第二天一份只读侦察报告指出上游把这两件事拆成两个开关。核实：
-
-| 概念 | 由什么决定 |
-|---|---|
-| 宿主是否上报所有按键 | `ClientShellKeyboardReportAll`（`render.rs:205-226`） |
-| 一个 press 之后是否会跟 release | key 自身 `generated_text.is_none() \|\| has_physical_identity()`（`protocol/wire.rs:315`） |
-
-真正致命的是 daemon 怎么用这个字段：
-
-```rust
-// server/clients.rs:275-311
-Key { kind: Press, tracks_release: true, .. } => {
-    shell_held_inputs.insert(id, ..);   // press 被挂起，等配对 release 再发
-}
-```
-
-而 Kraal **从不产生** `ClientKeyKind.release`（`.release` 有定义、编码器也支持，
-但全仓零调用点）。所以「修好」的版本会让**开了这个模式的程序完全收不到按键** ——
-比原来的静默丢弃更糟。
-
-### 为什么所有门禁都没拦住
-
-| 门禁 | 为什么无效 |
-|---|---|
-| `swift test` | 测试是**按错误前提写的**：断言 `tracksRelease == true`。前提错，测试就是把错误焊死 |
-| A/B 回退 | 删掉修复 → 红。它证明的是「测试在这行代码上生效」，不是「这行代码是对的」 |
-| `verify.sh` 全绿 | 只说明代码符合我的理解 |
-| 代码审查 | 没有第二轮独立视角 |
-
-> **测试的断言方向由前提决定。前提错了，测试只会加固错误。**
-
-### 唯一有效的检查
-
-**回到上游代码确认字段语义，而不是相信文档摘要。**
-
-这次有效的动作是二选一：
-
-1. 读发出方：`wire.rs:315` 那行 `tracks_release = ...` 的**实际表达式**
-2. 读消费方：`clients.rs:275-311` 怎么用这个布尔
-
-其中 (2) 更关键 —— 它告诉我**这个字段一旦为 true 会发生什么**（挂起输入），
-而 (1) 只告诉我它在什么条件下为 true。**能看出后果的那个方向，才拦得住错误。**
-
-### 沉淀成规则
-
-- **改 wire 字段前，先找消费方**。协议文档只说字段叫什么，消费方的代码才决定
-  它意味着什么。
-- **`docs/` 的性质断句要分开看**。「上游代码在第 X 行做了 Y」可核实；
-  「A 取决于 B」是**推演**，会错。本文自己就出过这种错。
-- **A/B 回退证明不了方向**。它能证明「测试覆盖了这行」，不能证明「这行是对的」。
-  两件事都成立才算修好。
-- 修完之后留一条**反向断言**：把「错误做法」写成测试。这次的正解是
-  `report-all-keys does not claim to track releases` —— 断言即使
-  `reportsAllKeys == true` 也不得声称跟踪 release。反向断言比正向断言更能
-  防住「同一个人第二次犯同一个错」。
-
-对应提交：`766836a`（错误的修复）→ `d5aed59`（撤回并修正文档）。
-
-## 10. 路径含版本号 = 授权会静默失效
-
-TCC 的 `client` 列存**解析符号链接后的绝对路径**，而 Homebrew 的 Cellar 路径含
-版本号：
-
-```
-TCC 里存:  /opt/homebrew/Cellar/tart-guest-agent/0.15.0/bin/tart-guest-agent
-实际执行:  /opt/homebrew/bin/tart-guest-agent -> ../Cellar/.../0.15.0/bin/...
-```
-
-`brew upgrade` 之后符号链接指向新版本目录，TCC 里那条旧路径再也没有进程匹配。
-**条目仍然存在**，所以"授权在不在"的检查永远通过，而症状和完全没授权一样。
-
-> 按路径授权的东西，路径里不能有版本号；有的话，升级就是一次静默失效。
-
-同类风险：`python` 的 venv 路径、`node` 的 nvm 路径、`/Applications/Foo 1.2.app`。
-检查这类问题时**不要只查条目存在**，要查 `client` 值是否等于当前实际运行的路径：
-
-```bash
-ps -Ao comm | grep foo        # 实际在跑的
-# 和 TCC/config 里记的比对，而不是只数条数
-```
+按路径授权的 TCC、socket、缓存不要带版本号；升级后路径变了，授权就静默
+失效，表现成产品 bug。
 
 ---
 
-## 11. 一个观察面代替不了另一个：AXTitle ≠ AXValue
+## 本仓库的具体教训
 
-要自动化地「点某一行」，会自然地去找那一行的 `AXTitle`。SwiftUI `Text` 不给：
+**带内报错。** herdr-core 的拒绝可能在正常 JSON 响应里（`{"error": ...}`），
+帧完整、socket 不报错。只 catch 异常的代码会把拒绝当成功。请求层要显式检查
+错误对象并记录 `ok / FAILED / BUSY / skipped`。
 
-```text
-$ kraal-gui ax --json --depth 20
-AXStaticText title='' desc='' id='' value='alpha-b'
-```
+**一条连接一个命令。** 控制面是一连接一命令；同一 tick 发两个请求，后一个会
+被 busy 拒绝。focus 和它要影响的动作不能并发。
 
-一行文本的内容在 **`AXValue`** 里，而 `AXTitle`/`AXDescription` 都是空的。产品代码也没写
-`accessibilityIdentifier`（`Selector.swift` 开头就写明零个）。所以按 title 找元素时：
+**SwiftUI 焦点是异步的。** 打开 palette/设置后立刻设 `FocusState` 会被覆盖；
+延迟到 `onAppear` 之后（实测 50ms）再设。
 
-```text
-$ kraal-gui press --title "alpha-b"
-kraal-gui: no element matching title=alpha-b
-```
+**终端状态别抄两遍。** 旧实现自己维护 cell 网格再重编码 ANSI，宽字符/差分/
+图形全部容易和真实程序不一致。HC 直接把原始 PTY 字节交给 Ghostty。
 
-这看起来像「界面没画出来」，实际上是**读错了属性**。同样的分叉出现在按钮上：面板里的
-`Rename` / `Remove` 只有 `AXDescription`、`AXTitle` 为空（`press --desc Rename` 就成功）。
+**`pid=-1` 是启动器的问题。** `KraalMac` 是 bash 启动器，脚本当
+`CFBundleExecutable` 会让 `NSRunningApplication` 报 `pid=-1`；启动
+`KraalMac-bin`。
 
-**教训**：换一种元素类型就重新确认一遍属性面。一次 `ax --json --depth 20 | grep` 就能回答
-「这个控件到底把文字放在哪个属性上」，比猜三次快。
-
-**并且不要再猜「怎么写法才能出 `AXTitle`」。** 2026-10-23 在 macOS 27.0.1 / 26A434 上
-逐个实测了 20 种 SwiftUI `Button` 写法（朴素、`label:` 闭包、`.borderless`、`.help`、
-`Label`、`.bordered`、`.borderedProminent`、`.link`、`.keyboardShortcut`、
-`.accessibilityLabel`、`.accessibilityElement(children:)`、`.accessibilityRepresentation`、
-`.accessibilityValue` …），**全部** `title=''`，文字都在 `AXDescription` 里；同一个窗口里
-裸的 AppKit `NSButton` 则**带** title。为排除「title 存在但不是 String」这个混杂因素，
-还把 driver 临时改成打印 `CFTypeID` —— 那些属性的 `copy()` 直接返回 nil。
-
-所以在本项目里：
-
-| 元素 | 文字在 | 能不能 `press --title` |
-| --- | --- | --- |
-| SwiftUI `Text` | `AXValue` | 不适用 |
-| SwiftUI `Button` | `AXDescription` | **不能**，用 `--desc` |
-| AppKit `NSButton` | `AXTitle` | 能 |
-
-issue #71 当初的判断（`.borderless` + `.help()` 是原因、`.accessibilityLabel` 会写 title）
-**两条都不对**：`--title` 在 SwiftUI 上不可达，而 `.accessibilityLabel` 改的是 `desc`。
-所以那个 issue 的正解不是「补 title」，而是**让 desc 唯一**：机器面板的行内按钮现在叫
-`Rename <机器名>` / `Remove <机器名>`，rename sheet 打开时 `desc=Rename` 从 3 个候选降回
-1 个，`press --desc` 不再需要 `--index` 猜。
-
-**推论**：门禁不要断言不可达的属性。`Scripts/gui.sh` 的 `machines-controls` 因此
-**故意不测** `--title`，只测「每个控件有一个唯一稳定的 desc」—— 断言一个永远不可能成立
-的东西，比没有门禁更糟。
-
-`kraal-gui ax` 现在同时输出 `value`，`press`/`select` 也支持 `--value` —— 但**侧边栏行仍然
-点不动**：`onTapGesture` 不响应 `AXPress`，真实点击只能靠 CGEvent，而这就又回到了
-「先激活窗口，再算坐标」。定位可以用 `value`（`Scripts/gui.sh` 的 `sidebar_row_point`），
-点击不行。
-
----
-
-## 12. 坐标有两个坐标系，混用不报错，只是点错地方
-
-`kraal-gui ax` 的 `frame` 是**屏幕坐标**（`CGWindow` 那个空间），`kraal-gui click --at` 的参数
-是**窗口相对坐标**：
-
-```swift
-let clamped = CGPoint(x: window.frame.origin.x + offsetX, y: window.frame.origin.y + offsetY)
-```
-
-VM 里窗口在 `(0, 350)`，所以把 AX 的 `y=729` 直接传给 `click --at` 得到的是
-`screen(590,1087)` —— 已经在窗口内容区之外。而**它不会报错**，只会点到别的东西或者什么都不点。
-
-实测症状：重命名 sheet 的输入框“点不中”，`type` 报 `typed via AX` 但名单没变，看日志像
-「提交按钮没触发」。真实原因是焦点从未到达输入框 —— 三层错误叠在一起，而最底层那个是
-两个坐标系。
-
-**教训**：坐标类工具第一次用先做一次往返验证（点一个已知元素，从那边的日志/状态确认命中），
-不要拿它去诊断别的问题。用 `ax` 读元素，把那个**屏幕**坐标原样交给 `click --at-screen`；
-只有自己按窗口几何算出偏移时才用 `click --at`（窗口相对）。
-
-**已修（issue #72）**：`click` 加了 `--at-screen`，且越界不再 clamp。原实现是
-
-```swift
-let clamped = CGPoint(x: window.frame.origin.x + min(max(offsetX, 0), width - 1), …)
-```
-
-越界点被拉到窗口边缘，点击「成功」、用例后面的断言失败，读起来像产品 bug。现在两种形式都
-先校验落点在窗口 frame 内，越界 `fail(.harness, …)` 退出码 2，消息里带窗口 frame 和实际
-算出的屏幕坐标。回归护栏是 `Scripts/gui.sh run click-coordinates`，它同时断言：
-`--at-screen` 原样点、`--at` 只加一次窗口原点、三种越界/混用各自被拒。
-
-判据用**窗口 frame**而不是内容区：AX 把 window 元素报成整个 frame（含标题栏），
-而 app 确实会往标题栏画东西，按内容区收窄会在没证据的前提下拒掉合法点。
-
-### 12.1 同一类错误的第二个方向：原点之外还有**方向**（issue #103，2026-10-25）
-
-修完「屏幕 vs 窗口」这个空间混淆后，同一个像素断言又量错了一次，因为还有第二个自由度：
-**y 从哪一端数**。
-
-- `pane_window_rect` 输出的是 **top-down**（y 从顶边往下，和窗口布局一致）
-- `CGContext` / `CGImage` 的位图行号是 **bottom-up**（y 从底边往上）
-
-`CGRect.intersection` 不报错，`context.draw` 也不报错。实测症状：断言报
-`matched=4032`（绿），但这个 4032 是从**另一条带子**里数出来的，恰好 blob 在两条带子的
-交集里。判据是 `sampled`：请求 `959×664 = 636776`，实际 `301126 = 959×314`。
-
-两个空间错误叠加时更难看出来，因为**数字都在合理范围内**。护栏有两条，缺一不可：
-
-1. `sampled == w * h * scale²` 的**对账断言** —— 它不看内容，只看「量的地方对不对」
-2. 驱动在裁剪发生时**报错退出**，而不是静默缩小区域 —— `fail(.harness, "region clamped
-   from WxH to WxHx — the rect and the image are in different coordinate spaces")`
-
-还有一条只对「值不值得信」有用的：`--match` 的谓词解析**不能 fail-open**。实测一个笔误
-`r>>200` 让断言从「图在不在」退化成「恒真」——`Int(">200") ?? 0` 把比较符吃掉了。
-断言变恒真是最坏的一类假绿：它绿得比真绿还稳。
-
-**这一条的要害**：翻转像素读法的变体我试了三个才对（`-minY` 反、`+minY` 全 0、
-`-(imageHeight - maxY)` 正确），**三个变体都不报错** —— 前两个只是给了错的数。所以
-「推导出来的」不算数，注释里记的是实测出来的那一个。
-
----
-
-## 附：观察工具
-
-```bash
-# 只截自己那个窗口，不需要激活、不需要 Accessibility
-screencapture -x -o -l "$(./Scripts/dev-session.sh status | grep -oE 'window: +[0-9]+' | grep -oE '[0-9]+')" out.png
-
-# CLI 探针：不启动 UI 也能看 surface 内容
-.build/debug/kraal --socket /tmp/kraal-mine/herdr-client.sock screenshot
-
-# 两台 daemon 是否真的不同机器
-.build/debug/kraal --socket <A> | grep ^boot
-.build/debug/kraal --socket <B> | grep ^boot
-```
-
-Ghostty 用 Metal 绘制，AX 树几乎是空的，所以**不要指望用 Accessibility 读终端
-内容**——读屏幕内容用 `kraal screenshot`，读渲染结果用窗口截图。
-
-### TOML 手写解析的三个真实缺陷（2026-10-22）
-
-`KeybindingProfile` 手工解析 daemon 的 `[keys]` 表（不引入 TOML 依赖，理由见该
-文件头注释）。第一次实现有三个 bug，全部「静默丢数据」而不是报错——用户看到的是
-「我改的配置没生效」，而不是「解析失败」。
-
-| 缺陷 | 原因 | 用户看到 |
-| --- | --- | --- |
-| 多行数组整块丢失 | 先按 `\n` 切行，再逐行解析。`prefix = [` 那一行没有 `]`，被跳过；续行没有 `=`，也被跳过 | 该绑定从面板消失 |
-| `key = "a\"b"` 被丢弃 | `scalar` 拒绝任何内部含引号的值 | 合法配置变成缺失行 |
-| `split_vertical = "prefix+["` 吞掉后续 | 计数括号时不区分是否在字符串内 | 该行之后的所有绑定消失 |
-
-**判断依据不是「TOML 允许什么」，而是「daemon 会发什么」**：`prefix = ["ctrl+a"`
-后跟新语句在真实 TOML 里是**语法错误**，daemon 不会产生它。所以解析器实际面对的是
-**截断文档**（写到一半被杀），此时括号不平衡就无法区分「续行」与「新键」。正确做法是
-把余下内容视为该值的一部分、并在 flush 时丢弃这个不平衡的值——前面已读到的绑定保留。
-
-一条老测试本来断言相反（跳过 `[` 行、保留 `new_tab`），那个期望是错的，已改。
-
-### 第二轮 review 又抓到一类：注释
-
-修复后的版本仍有一个 major：**值末尾的 `#` 注释从不清除**。
-
-| 输入 | 后果 | 实测 |
-| --- | --- | --- |
-| `new_tab = "prefix+t"  # see [docs` | 注释里的 `[` 让 `bracketDelta` 报 1，后续所有行被当成续行 | **整张表 0 条** |
-| `prefix = ["ctrl+a"]  # note` | 值不以 `]` 结尾，一个绑定丢失 | 1 条（应为 2） |
-| `[keys]  # the keys table` | 表头全等比较失败 | **整张表 0 条** |
-
-所以现在**先剥注释再解析**，且剥离必须 string-aware（`prefix+#` 里的 `#` 不是注释）——
-用 `split(separator: "#")` 会引入新的一类丢数据。
-
-另一条 minor：`\n` 转义会解成真换行，`trimmingCharacters` 只去首尾，中间的换行留在绑定里
-（SwiftUI 渲染成行高不齐）。改为一律拒绝含换行的项，而不是静默压成 `ab`——后者会显示
-一个不存在的绑定。
-
-注入验证（第二轮，三条都能红）：
-
-| 注入 | 结果 |
-| --- | --- |
-| 关掉注释剥离 | ✘ 4 条 |
-| 注释剥离改成朴素 `split(separator: "#")` | ✘ `a hash inside a quoted binding is kept` |
-| 只 trim 不拒绝中间换行 | ✘ `an escape-decoded newline does not become a multi-line binding` |
-
-第一轮注入验证（三条都能红）：
-
-| 注入 | 结果 |
-| --- | --- |
-| 关掉多行续接 | ✘ `a multi-line array binding is not dropped` |
-| 括号计数忽略引号 | ✘ `a bracket inside a quoted binding is not a bracket` |
-| `scalar` 重新拒绝内部引号 | ✘ `an escaped quote inside a binding is resolved, not rejected` |
-
----
-
-## 13. 线协议里的 `0` 是「默认」，不是调色板第 0 项
-
-自绘 path 的第一版把每个 cell 的颜色直接按 `TerminalColor.named(n)` 查表，于是
-面板渲染出来是**一整块黑**——只有光标可见。不是没画，是黑字画在黑底上。
-
-根因在编号约定，两边都自洽，只是不是同一套：
-
-| 写法 | 含义 |
-| --- | --- |
-| `named(0)` | **默认前景/默认背景**（`SurfaceANSIRenderer` 发 `39`/`49`） |
-| `named(1)` | 黑（SGR `30`） |
-| `named(8)` | 白（SGR `37`） |
-| `named(9)` | 亮黑（SGR `90`） |
-| `named(16)` | 亮白（SGR `97`） |
-
-也就是说它是 **1-based 的 SGR 编号**，而且 `0` 是"不带颜色"的哨兵。把 `0` 当成
-表项 0 会得到"终端普通文字 = 黑"，而终端的默认底色恰恰也是黑的。
-
-> 判据不是"颜色看起来对不对"，而是**这张表以谁为准**：`SurfaceANSIRenderer` 的
-> `colorParameter` 是本仓库唯一把 raw 值翻译成 SGR 的地方，它写了
-> `guard index != 0, index <= 16` + `30 + (index - 1)`，那就没什么可争的。
-
-同一轮还踩了配套的一个坑：**证据没出现 ≠ 功能没生效**。验证开关时加了一行
-`launch: cell painter=…`，位置在 `KraalLog.shared.rotate()` 之前，于是每次都被
-截断掉——查日志得到 0 条，读起来和"开关没传进来"一模一样，白查了半小时。
-日志的**第一条**是最容易被 rotate 吃掉的那条，需要留证据的行要写在 rotate 之后。
-
----
-
-## 14. 字体里有的字符，不代表终端应该用字体画
-
-自绘 path 一开，TUI 的盲文点阵（`⣿` 一类）看起来是"应该连续但断了"：点成对出现，
-**每个格子边界都有一道缝**。同一个界面在引擎里是均匀点阵。
-
-第一反应是"等宽字体的 advance 不对"，于是去量：`NSFont.monospacedSystemFont` 在
-13.33 pt 报 advance 8.23 pt、cell 是 8.0，看着像 +3% 漂移。**这个结论是错的**——
-真正在画的是 SwiftUI 的 `design: .monospaced`，它正好 0.6 em：把 40 个字形画进
-1 点 = 1 像素的画布，取出墨迹位置，cell 8.0 和 8.5 两种宽度下都是整齐的 8.0/8.5
-间隔，一列不差。按那个"测出来"的 0.6182 改字号，只会把字缩小 3%。
-
-真正的差别在**谁来画这些字符**：
-
-| 码位段 | 引擎 | 字体 |
-| --- | --- | --- |
-| U+2500–257F 框线 | 画矩形（跨格相连） | 字形有侧边距，格子边界处断开 |
-| U+2580–259F 方块 | 画矩形（按 1/8 切分） | 同上 |
-| U+2800–28FF 盲文 | 画点阵（半格网格） | 字形比格子窄，剩下的宽度变成缝 |
-
-所以任何要画这些码位的渲染器都必须自己做几何，`Sources/KraalUI/CellGlyphShapes.swift`
-就是这件事：单位方格里的矩形和圆点，由调用方乘上自己的格子尺寸。
-
-> 判据是**周期性**，不是"看起来还行"：一排 `⣿` 里，格子内部的点间距和跨格子的
-> 点间距必须相等（`CellGlyphShapesTests.brailleGridIsEven` 量最大/最小间隙之差，
-> 关掉几何 path 它立刻失败）。"断"和"连续"之间没有中间态，差的就是那一道缝。
-
----
-
-## 15. 屏幕上可能有两个同名的 app，按面积取最大会抓到别人的
-
-驱动 GUI 自测时用"找 Kraal 的最大窗口"取窗口号，某次抓到的却是**正在用的那个
-Kraal**（1434x848），而不是被测进程的窗口（1180x760）——两个进程同名、同一套
-bundle id，按面积排序时被测的那个只是恰好更小。
-
-后果不是截错图那么轻：那台窗口里有别人的会话，截图里就带出了 `pi` 的启动横幅和
-机器名。只读截图没造成破坏，但如果下一步是"点一下"，就会点进别人的工作区。
-
-> 窗口识别的第一关键字是 **owner PID**，不是名字、不是面积。`CGWindowListCopyWindowInfo`
-> 给了 `kCGWindowOwnerPID`，拿被测进程的 pid 过滤，再在剩下的里面取最大。
-
-配套的一条：**收集完证据先确认"这是谁的窗口"**。这次是通过截图内容里的
-`herdr-home` / pi 横幅反推出来的，属于事后追认；应该在看图之前就核对
-（`winid <pid>` 输出为空就说明没有窗口，而不是"随便来一个"）。
-
----
-
-## §16 鼠标上报的行号整体偏 2 行：先量出来，再谈原因（2026-10-30）
-
-用户报告：「TUI 下面选中的位置好像传递不对，我看选中会有两个地方」。截图里同一个 pane 有
-两条高亮带：上面一条棕色 `#413725`（≈ gruvbox dark 的 `selection_background`），下面一条
-浅灰 `#939B9F`。Kraal 自己**从不画选中高亮**（`Palette.selectionBackground` 只有定义，
-没有任何 view 用它），所以两条带子里必有一条是那个 TUI 自己按「程序被告知的行」画的。
-
-于是先量「程序被告知的行」对不对，而不是猜。做法：把探针起在一个**鼠标上报**的 pane 里，
-用**已知行**去点它（`pane_cell_point`：容器原点、格大小、以及 daemon 自己给的 `WxH@x,y`
-终端矩形全部取自 app 的 `layout: container=` 日志行），然后读程序收到的 SGR 行号。
-
-`./Scripts/gui.sh run mouse-tui-row`（**故意不进 `all_cases`**，它现在是红的）：
-
-```
-clicked rows 1,8,15, program got 3,10
-```
-
-- 点第 1 行 → 程序收到 `\e[<0;20;3M`
-- 点第 8 行 → 收到 `;10M`
-- 点第 15 行 → **什么也没收到**（算出来是第 17 行，而 pane 只有 16 行，被引擎丢掉了）
-
-三条数据共同指向一个**常量偏移 +2 行（36pt）**，而不是缩放：两个点完全一致，第三个点因为
-越界而消失。用户看到的「两个地方」正是这个：TUI 按被告知的行（+2）画它自己的高亮，而引擎
-自己的选中（棕色）画在指针真实所在的行。
-
-### 为什么这个偏移原来查不出来
-
-`mouse-tui` 只断言行号**落在 pane 内**（`row < pane_rows`）和「一次点击只有一次 press」。
-+2 行的偏移让这两个断言都通过 —— 文档里 §2 那句「样本要能区分对错」的另一个版本：断言
-的对象必须精确到「哪一行」，否则它测的不是这件事。
-
-### 已排掉的三个干扰
-
-1. **`--clicks 3` 不是三击**（合成事件没有 `mouseEventClickState`）——与本题无关，但
-   `mouse-selection` 一类的用例会因此假绿。
-2. **拖拽没有 motion 上报是正确行为**：`tui-mouse-probe.py` 只申请 `?1000h`（按下/抬起），
-   所以「drag=0」不是 bug。要测拖拽得先让探针申请 `?1002h`。
-3. **`pane_body_point` 的容器原点是错的**（它用 `window - container`，实际容器不是贴底，
-   差 25pt），这才是先前「看起来偏 3 行」的来源之一。`pane_cell_point` 改用日志里的
-   `containerOrigin` 与 `cell`，不再自算。
-
-### 现在的状态
-
-偏移**已复现、可重复**，`mouse-tui-row` 是它的门禁（红）。根因未定：36pt = 2 行，而引擎的
-surface 层是 928x288pt（16 行），说明**引擎自己的视图坐标系**与 pane 被绘制的矩形不是同一个
-原点（`PaneSurfaceHostView` 那段「SwiftUI 的 `.position` 不动 AppKit 视图」的注释正是这条路
-上）。下一步用临时日志把引擎 NSView 的 `frame/bounds`（窗口坐标）打出来，与 `pane.innerRect`
-的绘制矩形对比，定位那 36pt，再修 —— 修完 `mouse-tui-row` 应当变绿，然后把它加进
-`all_cases`。
-
-### §16 续：自己跑完那三个实验，偏移定位到「引擎认为 surface 是 18 行」
-
-**一、内容有没有放错位置** —— 没有。`probe-split-view` 往上下两个 pane 各灌 `seq`（上
-`1-40`、下 `100-140`）再截图：上半个 pane 是 26-40 + 提示符，下半个是 126-140 + 提示符，
-**各在各的格子里**，第一行文字落在 y≈97，和 `containerOrigin=221,71` + 居中 8 +
-内边距 1 行 = 97 完全一致。
-
-顺带纠正我上一节写错的一句话：`settled: origin=…` 是 **窗口左下原点**的坐标
-（p1 `375` → 顶部 = 760-375-288 = 97 ✓；p2 `51` → 421 ✓）。我先前把它当左上读，得出
-「视图偏了 46pt」的结论是**错的**，那是坐标翻转的老坑（`docs/DEBUGGING.md` §8 同源）。
-
-**二、app 交给引擎的坐标对不对** —— 对。临时在 `PaneSurfaceHostView` 的 `mouseDown` 里
-打点，并打开 `TerminalDebugLog` 的 `.input`：
-
-```
-mouse-in: window=385,338 local=152,287 flipped=false bounds=928x288 viewBL=233,51
-surface mousePos x=152.00 y=1.00
-surface mousePos x=152.00 y=127.00
-surface mousePos x=152.00 y=253.00      ← 这三下分别点的是第 1、8、15 行
-```
-
-288pt 高、18pt 一格 → `1/127/253` 正好是第 1/8/15 行 **顶部附近**，所以翻转换算这一层
-是对的（`bounds.height - local.y` 在这条 `flipped=false` 的视图上成立）。
-
-**三、程序收到什么** —— 第 3、10、什么都没收到。
-
-三条合起来，我当时写下的结论是：「偏移发生在 Ghostty 内部把 y 换成单元格的那一步」，
-模型是「引擎认为 surface 是 324pt（18 行）、内容贴底」。**这个结论是错的**，虽然它把三个
-数据点都拟合上了。错在第一步：我以为那条 SGR 序列是引擎写的。
-
-**四、谁写了那串 SGR** —— 是我们自己。把 `AppStore.sendMouse`（`pane.mouse` 那条 wire）
-临时短路掉再跑一次同一用例：程序**一个事件都收不到**。也就是说 TUI 收到的那条
-`\e[<0;20;3M` 是 daemon 按 Kraal 发过去的 `ClientMousePosition` 写进 pty 的，引擎自己
-并不产生它（程序的 stdin/stdout 就是 daemon 的 pty，只有 daemon 能写）。于是问题从「引擎
-内部」缩回到**本仓库自己算的那对 (column,row)**。
-
-**五、那对坐标错在哪** —— 临时在 `MouseForwarder.paneLocation` 里打点，把命中矩形和
-pane-relative 坐标打出来：
-
-```
-pane-hit: pane=w1:p2 topDown=385,548 rect=232,375 928x288 point=152,173 contentH=760
-```
-
-`point.y=173` / 18pt = 第 10 行 —— 正是程序收到的那一行（那一击点的是第 8 行，真实
-`point.y` 应为 127）。多出来的 46pt 来自 `rect.minY=375`：下半个 pane 的真实槽位是
-`containerOrigin 71 + 8 + 19*18 = 421`，命中矩形比它**高了 46pt**。
-
-根因和 §8 是同一个错误的第二次出现，只是换了个函数：`contentView` 是
-`NSHostingView`，`isFlipped == true`，`contentView.convert(bounds, from: self)` 给出的
-`container` **已经是自上而下**，而 `PaneFrameMath.rect` 又按「AppKit 自下而上」算了
-`contentHeight - (minY + height)`，于是翻转了两次：
-
-```
-错：760 - (71 + 664) + 350 = 375
-对：      71          + 350 = 421
-```
-
-影响不止「TUI 高亮画错行」：命中矩形整体上移 46pt，意味着**每个 pane 底部 46pt 的点击
-根本不属于它**（`pane.mouse` 里越界的行被引擎丢弃，和用户「选中出现两个地方」的截图
-一一对应）。
-
-修法：`PaneFrameMath.rect` 增加 `isFlipped` 参数（flipped 时容器原点不再做减法），
-调用方传 `contentView.isFlipped`；`PaneFrameMath` 拆到 `Sources/KraalUI/PaneFrameMath.swift`
-（900 行限制）。A/B 注入：把参数改回常量 `false` → `program got 3,10` ✗；改回
-`contentView.isFlipped` → `program got 1,8,15` ✓。
-
-### 顺手挖出的第四个坑：`driver type` 会静默什么都不打
-
-第一次跑 `probe-split-view` 时两个 pane 都是空的、截图字节数一模一样。原因不是 app：
-`kraal-gui type --text` 走「取 AX 焦点元素 → 设 `AXValue`」这条路，而**终端视图会接受
-`AXValue` 然后什么也不做**，于是它打印 `typed via AX` 就退出了 —— 后面真正可用的合成
-键盘事件永远不会执行。
-
-修法是把写入读回来核对，不匹配就走合成事件（`Sources/KraalGUIDriver/main.swift`）。这
-意味着**在这之前，任何靠 `type` 往终端里打字的用例都可能是在测空气**。
-
-## §17 `\r\n` 在 Swift 里是一个 Character（2026-10-30）
-
-`kraal capture --format html` 的第一版把 `^M` 写进了 HTML。原因不是转义逻辑写错，而是循环
-**遍历的对象**选错了：
-
-```swift
-for character in text {           // Character
-    if character == "\r" { continue }   // 永远不成立
-}
-```
-
-Swift 的 `Character` 是**字素簇**，`"\r\n"` 是一个字符。所以那段代码既不匹配 `"\r"`、也不
-匹配 `"\n"`（后者同样不是单独的字素簇），两个字符被当成一个整体塞进了输出。改成遍历
-`unicodeScalars` 之后立刻正确。
-
-可复用的教训（同 §3「探针要测对对象」）：**先问「我遍历的是什么单位」**。`String` 的
-`count`、`index(_:offsetBy:)`、`==` 都是按字素簇走的，任何逐字节/逐码点的处理
-（ANSI 解析、列宽计算、`
-` 归一化）都必须显式走 `unicodeScalars` 或 `utf8`。
-
-顺带一条同一轮的：**引号会被吃掉不止一次**。`herdr pane run` 会 shell-split 自己的参数；
-`gui.sh` 的 vm 后端还会把参数拼进 `tart exec bash -lc "…"` 再解析一次。`printf '\033[31mX…'`
-经过这两层变成 `zsh: bad pattern: 033[31mX033[0m`。要测「终端里有颜色」，选一个**不需要
-引号**的命令（`ls -G /`），比研究几层引用更省时间。
-
-## §18 关闭连接时不能丢掉还没注册通道的帧（2026-11-02）
-
-`terminal.attach` 的回复和一帧 CLOSE 可以先后到达，而调用方在**回复之后**才拿到
-channel id 去注册。读线程若在注册前读到 CLOSE，会把它放进 `earlyFrames`；如果这时
-对端刚好关闭、`finish` 把 `earlyFrames` 清空，那么随后注册的通道永远等不到结束——
-测试里表现为 15 秒超时，真实窗口里是 pane 永远停在最后一帧。
-
-同一轮还有两个同源问题：
-
-- `finish` 由**写失败**触发时，会比读线程先处理完，导致对端已发的 CLOSE（带
-  exit_code）被当成链路丢失。写失败只记录原因，让读线程读到 EOF；1 秒看门狗只负责
-  半开连接。
-- `hello` 回复和第一帧可能在同一次 `read` 里到达；读线程先 `read` 再解码
-  `initialBytes`，对端已关闭时 `read` 返回 nil，缓冲里的帧被丢掉。
-
-三条都遵守同一个顺序：**先解码已到的字节，再处理结束**；结束不能清掉尚未交付的
-字节。回归测试在 `HcConnectionTests`（late registration / handshake coalescing）与
-`HcAttachStreamTests`；`HcLateChannelTests/lateAttachClose` 在修复前会稳定超时。
-
-## §19 「终端列表是空的」不等于「终端都没了」（2026-11-03）
-
-布局文档和事件快照是两条独立的 RPC。连接后 `doc.get` 可能先于
-`events.subscribe` 返回：这时 `terminals` 还是空的，但文档里已有 pane。如果
-`reconcile` 直接按「地址不在列表里 = 终端结束」删 pane，就会在文档刚加载完时
-把整份布局删空并写回核心——看起来像「打开窗口布局没了」。
-
-修法是给事件层一个显式的 `hasSnapshot`：快照到达前，空列表的含义是「还没读到」，
-不是「没有终端」；`reconcile` 在它为 false 时直接返回。第二层是关闭竞态：pane
-节点删掉后 `terminal.kill` 还在路上，标签仍然写着原 space，下一次 reconcile 会把
-它重新收养回来。所以关闭先记进 `closingTerminals`，直到终端不再 live 才移除；
-kill 失败则撤销记录，让终端继续可见。
-
-验证分两层：`HcWorkspaceModelTests/beforeSnapshot` 在 `terminals` 为空、
-`hasSnapshot=false` 时直接调用 `reconcile`，pane 必须还在（去掉守卫就红）；
-`LiveHcOwnershipTests/checkReload` 再用真实 core 开第二个窗口，读回第一个窗口
-落盘的 space 和 pane。
+**socket 路径长度。** macOS `sun_path` 103 字节；测试临时目录也要短，不要用
+长 UUID 拼多层路径。

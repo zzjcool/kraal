@@ -4,10 +4,9 @@
 
 import PackageDescription
 
-/// Kraal is split so that the protocol kernel stays dependency-free: the
-/// `KraalProtocol`/`KraalTransport`/`KraalClient` targets build and test on any
-/// machine, while only `KraalTerminalView` pulls the (large) Ghostty
-/// xcframework.
+/// The Herdr 1 client (protocol/transport/client/UI) was removed; every target
+/// below talks to herdr-core only. `KraalSupport` is the small Foundation-only
+/// seam the app shares for logging and dev-session naming.
 let package = Package(
     name: "Kraal",
     platforms: [
@@ -15,12 +14,8 @@ let package = Package(
         .iOS(.v17),
     ],
     products: [
-        .library(name: "KraalProtocol", targets: ["KraalProtocol"]),
-        .library(name: "KraalTransport", targets: ["KraalTransport"]),
-        .library(name: "KraalClient", targets: ["KraalClient"]),
-        .library(name: "KraalSidebar", targets: ["KraalSidebar"]),
-        .library(name: "KraalUI", targets: ["KraalUI"]),
-        .library(name: "KraalTerminalView", targets: ["KraalTerminalView"]),
+        .library(name: "KraalSupport", targets: ["KraalSupport"]),
+        .library(name: "KraalHC", targets: ["KraalHC"]),
         .executable(name: "KraalMac", targets: ["KraalMac"]),
         .executable(name: "kraal", targets: ["KraalCLI"]),
     ],
@@ -29,47 +24,20 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "KraalProtocol",
+            name: "KraalSupport",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
             name: "KraalSocket",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        .target(
-            name: "KraalTransport",
-            dependencies: ["KraalProtocol", "KraalSocket"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        .target(
-            name: "KraalClient",
-            dependencies: ["KraalProtocol", "KraalTransport", "KraalSocket"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
         // herdr-core (`hc`) client: JSON-RPC over the core socket, framed streams
-        // after `hello`. Deliberately independent of the Herdr 1 modules above;
-        // they are deleted once the migration lands (docs/HERDR2.md).
+        // after `hello`.
         .target(
             name: "KraalHC",
             dependencies: ["KraalSocket"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        .target(
-            name: "KraalSidebar",
-            dependencies: ["KraalProtocol"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        .target(
-            name: "KraalUI",
-            dependencies: ["KraalProtocol", "KraalTransport", "KraalClient", "KraalSidebar"],
-            // Ghostty's theme files, copied verbatim (see Resources/themes/ATTRIBUTION.md).
-            // Resources rather than a generated table: 51 files of six lines each are
-            // easier to diff against upstream than 51 structs of 23 hex literals.
-            resources: [.copy("Resources/themes")],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        // The client's spaces/tabs/panes: pure values and tree operations, no
-        // AppKit or Ghostty, so the rules are testable on their own.
         // The app action contract: names, arguments and validation. Shared by
         // the window (menus/palette) and by `kraal commands|do`.
         .target(
@@ -77,6 +45,8 @@ let package = Package(
             dependencies: ["KraalHC"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // The client's spaces/tabs/panes: pure values and tree operations, no
+        // AppKit or Ghostty, so the rules are testable on their own.
         .target(
             name: "KraalModel",
             dependencies: ["KraalHC"],
@@ -92,19 +62,9 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        .target(
-            name: "KraalTerminalView",
-            dependencies: [
-                "KraalClient",
-                "KraalSidebar",
-                "KraalUI",
-                .product(name: "GhosttyTerminal", package: "libghostty-spm"),
-            ],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
         .executableTarget(
             name: "KraalCLI",
-            dependencies: ["KraalActions", "KraalHC", "KraalProtocol", "KraalTransport", "KraalClient"],
+            dependencies: ["KraalActions", "KraalHC"],
             path: "Sources/KraalCLI",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
@@ -121,14 +81,13 @@ let package = Package(
         .executableTarget(
             name: "KraalMac",
             dependencies: [
-                "KraalClient", "KraalSidebar", "KraalUI", "KraalTerminalView", "KraalHC", "KraalHCTerminal",
+                "KraalHC", "KraalHCTerminal", "KraalSupport",
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
-            name: "KraalProtocolTests",
-            dependencies: ["KraalProtocol"],
-            resources: [.copy("Fixtures")],
+            name: "KraalSupportTests",
+            dependencies: ["KraalSupport"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
@@ -155,17 +114,6 @@ let package = Package(
         .testTarget(
             name: "KraalCLITests",
             dependencies: ["KraalCLI"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        .testTarget(
-            name: "KraalTransportTests",
-            dependencies: ["KraalTransport"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
-        .testTarget(
-            name: "KraalClientTests",
-            dependencies: ["KraalClient", "KraalSidebar", "KraalUI", "KraalTerminalView"],
-            resources: [.copy("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

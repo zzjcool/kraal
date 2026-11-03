@@ -1,146 +1,86 @@
-<!--
-SPDX-License-Identifier: Apache-2.0
-SPDX-FileCopyrightText: 2026 zzjcool
--->
+# 路线图（HC-only）
 
-# 实施路线：从 Herdr 1 客户端切到 herdr-core
+目标：Kraal 是 herdr-core（`hc`）的原生 Swift 客户端，行为对齐官方
+`herdr-app`；只保留 Swift/SwiftUI/AppKit + Ghostty 的差异。Herdr 1 栈已删除。
 
-> 决策：2026-11-02 · 目标与架构见 [HERDR2.md](HERDR2.md)
->
-> 旧路线（Herdr 1 daemon / bincode endpoint / 服务端布局）的里程碑与完成记录
-> 已作废：代码保留到 M3 清理，文档在 `docs/archive/`。
+状态以代码和 `Scripts/verify.sh` 为准，不以文档为准。
 
 ---
 
-## 0. 一句话
+## M0 协议与渲染 ✅
 
-服务端只认 `hc`；布局归客户端；终端字节直接进 Ghostty；行为对齐官方
-`herdr-app`。我们保留 Swift + Ghostty + 不做 JS mods。
+- JSON-RPC 明文 + framed streams（9 字节帧头）
+- hello 版本/方法门禁
+- attach 原始 PTY 字节 → Ghostty
+- CREDIT 反压、RESIZE/FOCUS、mode-2048 尺寸报告过滤
+- M0 窗口能列终端、attach、显示
 
----
-
-## 1. 里程碑
-
-| 里程碑 | 交付 | 判据（必须能跑） |
-|---|---|---|
-| **M0 协议与渲染** | JSON-RPC 明文/帧、hello 门禁、attach 原始字节、CREDIT、RESIZE/FOCUS、重连 | 真实终端在 Kraal 里显示；改窗口大小后 `hc get` 的 cols/rows 跟着变 |
-| **M1 布局与文档** | space/tab/pane 树、共享 `herdr-app` 文档读写、私有 view 状态 | 官方 app 建的布局 Kraal 原样显示；Kraal 的 split 官方 app 能看到；未知节点不丢 |
-| **M2 客户端对齐** | 原生 chrome、命令面/按键/面板/设置、OSC 7501 侧栏、Ghostty 终端 UX | HERDR2.md §6 的表格逐项过，gui.sh 有对应用例 |
-| **M3 交付与清理** | `kraal` 控制 CLI、gui.sh 重写、性能基线、旧代码/文档清理、iOS | `verify.sh` 全绿；注入缺陷时 gui.sh 会红；iOS 连远端 core 可显示输入 |
+判据：`HcWireTests` / `HcHelloTests` / `HcAttachStreamTests` /
+`HcTerminalAPITests` 全绿；VM 能 attach 到真实 core。
 
 ---
 
-## 2. 工程约定（迁移期）
+## M1 布局与文档 ✅
 
-- **不双栈。** 不写 Herdr 1 兼容分支；旧实现要么还在用（UI 外壳），要么删除。
-- **协议事实以运行中的 `hc` 为准。** 文档滞后过：`hc schema` / `hc --version` /
-  实际 JSON 回复高于任何 md。
-- **实验必须隔离。** `HC_SESSION` + 临时 `XDG_STATE_HOME`/`XDG_CONFIG_HOME`；
-  绝不碰本机真实 core（它可能正跑着别人的 agent）。
-- **UI 改动仍要端到端证据。** 断言对象从 Herdr 1 daemon 换成
-  `hc get/list/read --json`；`swift test` 绿不算修好。
-- **删除也是交付。** 每删一层旧实现，先在 issue 里写清「删了什么、为什么不再需要」，
-  再动 `git rm`；`git diff --stat` 要能对上预期。
+- 客户端 space/tab/pane 树（`KraalModel`）
+- 官方共享文档 `herdr-app`：CAS、冲突最新胜出、未知字段透传
+- 私有 `view.json`：focus/zoom/settled/recent/active
+- 新 space/tab/split 收养真实 core id（事件可能先于 reply）
+- `herdr.space` / `herdr.tab` / `herdr.seen` 标签
+
+判据：`KraalDocumentModelTests`、`HcLayoutDocumentTests`、
+`HcLayoutTreeTests`、`LiveHcDocumentTests` 全绿。
 
 ---
 
-## 3. 当前状态
+## M2 客户端对齐 ✅（#232 仍有 UX 尾项）
 
-目标已冻结（[HERDR2.md](HERDR2.md)），issue 按 M0–M3 重建；旧 issue（#1–#219）
-全部关闭，理由写在各条评论里。
+- 原生 chrome：侧栏、标签栏、分隔条拖动、命令面板、设置、help、rename
+- 69 条动作目录 + keys.json（global/terminal/send 语义）
+- OSC 7501 agents 侧栏、toast/peek/pin/unread、done 判定
+- Ghostty 终端 UX：选择/复制/粘贴/滚动、右键菜单、focus 同步
+- 字号缩放、侧栏开关、设置即时生效
+- `kraal commands/ls/status/do/shot` 控制面
 
-- **#223 已完成**：`KraalHC`（JSON-RPC、帧、路径、hello 门禁、重连）。
-  46 个测试 + 真实 `hc` 冒烟。
-- **#224 已完成**：`HcAttachStream` / `HcTerminalSession`，原始字节进 Ghostty；
-  M0 窗口 `make run-hc`（终端列表 + 一个 pane）。实测窗口的网格
-  98×38 已写回核心，截图可见重放内容；真实 core 的 headless 测试同时验证
-  输入回显与 RESIZE。
-- **#225 已完成**：`HcStateStore` + `HcEventSubscription`（事件通道按行解码）；
-  M0 窗口改为事件驱动（快照 + 归约，`missed` 换快照，heartbeat 缺失显示失联）。
-  真实事件流录制在 `Tests/KraalHCTests/Fixtures/events.ndjson`。
-- **#226 已完成**：`machine.list` 轮询（core 无机器事件）、侧栏按机器分组、
-  `temporary` 隐藏、add/rename/rm/reconnect，`needs_login`/`needs_update` 开
-  真实终端跑 `hc machine login|update`。直连 ssh → #242，SSH 专项 fixture → #243。
-- **#227 文档层已完成**：`doc.get/set` 的 CAS、conflict 后重读并最新胜出、
-  `herdr-app` 原始 JSON 编辑（split 只改 `children`/`size`，未知节点/外观字段
-  原样保留）、1 MiB 本地检查、`doc` 事件触发重读。M0 窗口启动时读一次并打日志。
-- **#228 模型层已完成**：`KraalModel`（纯 Swift，无 AppKit/Ghostty）/ `KraalOperations`
-  / `KraalView`：space/tab/pane 值与规则、命名（worktree 优先、跳 mod）、焦点历史
-  上限 32、关 pane 回退、split 同轴复用/跨轴包容器、close 权重归还、
-  swap/move、zoom/settle（next/prev 跳过 settled）、recent 上限 20、机器前缀
-  限定与 `view.json`。29 个模型测试 + 8 个树操作测试；官方布局 fixture
-  加载→编辑→投影不丢未知字段。文档读写仍由 #227 的 `HcDocumentSync` 负责。
-- **#229 终端归属已完成**：`terminal.run/get/kill/label/keep/rm` 客户端 API；
-  `KraalModel.adopt` 按 `herdr.space`/`herdr.tab` 安放终端；未标标签的 worker
-  不进布局/侧栏。新 tab/split/close 由窗口发起：`terminal.run` 写标签，
-  客户端落文档，关闭走 `terminal.kill`（级联未标标签的子终端；组关闭先确认）。
-  `keep:true` 的终端丢程序后由 core 换新 shell，窗口自动重新 attach；`park`
-  清标签把 pane 退回 worker。真实 core 的端到端测试 `LiveHcOwnershipTests`
-  覆盖建 tab、split、关闭、外部收养、keep 重启与文档持久化。
-- **#230 agents 侧栏已完成**：状态只认 OSC 7501（`working`/`blocked|error`/`turn > seen`
-  的 `done`/其余 `idle`），子 agent 的 `done→idle`、`error→blocked`；pinned 置顶，
-  priority 与按 space 分组两种视图；子 agent 树、点击 peek（不是 focus）、
-  `herdr.seen` 只升不降且同 turn 只写一次、mark unread 写 `turn-1`；blocked 或
-  busy→quiet 且没在看时 toast + 系统通知 + 声音（子 agent 与无 space 终端不告警）。
-  `LiveHcAgentTests` 用真实 core + PTY 覆盖 working→blocked→done、seen、pin、
-  后台不写、子 agent peek 与 mark unread；截图见 `/tmp/km-ui-agent2/`。
-- **#231 进行中（动作目录 + 第一批 chrome）**：`KraalActions` 单一表冻结
-  `herdr-app` 的 69 个 action 名/参数/必填和上游错误文案；48 个 native，21 个
-  显式 `unsupported(reason)`（mods/JS、chrome 布局文件、updater、copy/paste 等）。
-  `kraal commands [--json]` 直接由该表生成，输出上游的 `[{name,args,about}]` 形状，
-  不需要连接 daemon。窗口侧 `HcWorkspaceModel.performAction` 统一校验与分发，
-  菜单（Kraal/File/Edit/View/Window/Help）和 ⌘K 命令面板都走同一个 runner；
-  面板支持模糊匹配、分组、上下键与回车，只列当前能执行的 action。
-  实测：`File > New Space` 后 `hc ls` 出现 live t1；`Split Right/Down` 增加
-  pane；面板搜 `split` 只剩 `pane.split`，执行后 `t3` 被 kill；布局保存
-  v1→v2 不再出现假 conflict（每机器 save 串行化）。
-- **#231 keys（第二批）**：`KraalKeymap` 解析官方 macOS 默认 `keys.json`
-  （`global`/`terminal`/`layout:<name>`/`mod:<name>`；后两者已校验但 Kraal
-  还没有对应运行时，先不生效）。用户文件是 `~/.config/kraal/keys.json`
-  （`KRAAL_KEYS` 可覆盖），缺失时写入默认；1 秒轮询修改时间，坏文件保留上一份
-  可用绑定。`HcKeymapController` 把 NSEvent 归一到 `cmd/ctrl/alt/shift + 物理键`
-  （`cmd-+`、`cmd-shift-]` 等按物理键匹配），`send:` 直接写入聚焦终端；
-  `ctrl-alt-shift-escape` 恢复默认键位。帮助浮层现在同时列 KEYS 和 COMMANDS。
-  `pane.go`/`pane.swap` 已实现并接入 `cmd-alt-arrow` 默认键位；
-  `layout.toggle:sidebar` 也走同一 runner（`cmd-b`）。
-- **#231 分隔条/tab 拖动（第三批）**：`HcLayoutTree.resizing` 只改
-  `size.weight`，`HcSplitHandle` 的拖动按两兄弟的权重和守恒、每侧至少 36pt；
-  7pt 视觉线 + 两侧扩展命中区，指针悬停显示 resize cursor；AX
-  `accessibilityAdjustableAction` 以 5% 步长调整 ratio；松手才写共享文档。
-  tab 条支持 drag & drop，落到目标 tab 时调用 `tab.move`（1-based）。
-- **#231 设置（第四批）**：`HcSettingsView`（工具栏齿轮 / `⌘,` / 命令面板）：
-  App system/light/dark、侧栏 Density（comfortable/compact）、字体 8–32pt、
-  水平/垂直 padding、背景透明度、最小对比度、agent 通知声音；core socket 与
-  keys 路径只读展示、`option_as_alt`；值存 `UserDefaults`，改一项立即
-  `setTerminalConfiguration` 到所有 live surface（含 peek），不需要重启。
-  `app.zoom_in/out/reset` 改字号（8–32），F2/shift-F2 打开 tab/space rename sheet。
-- **#231 还差**：`mod.open`（Kraal 不做 JS mods）、`layout.*` 的其他节点操作。
-- **#232 终端 UX（第一刀）**：`terminal.copy`/`terminal.paste` 从 unsupported
-  改为 native（都走 Ghostty 的 `copy_to_clipboard`/`paste(text:)`，不自己拼
-  bracketed-paste 框）；Focused pane 右键菜单（Copy/Paste/Select All/Clear/
-  Split Right/Split Down/Peek/Close Pane）由 `HcTerminalPlatformView` 提供，
-  所有条目复用 `performAction` 或绑定 action；scrollback 上限设为 **10,000 行 /
-  10 MB 先到为准**，并开启 `copy-on-select`；`send:` 绑定修掉用 terminal id
-  查 pane-keyed 字典的静默失效。
-  VM 实测：`seq 1 1 12000` 后 scrollback total=9345（10 MB 先到），滚轮一格
-  offset 9305→9302（3 行）；右键无选区仍出现菜单；菜单 Split Right 后
-  `kraal ls` 从 3 个终端变 4 个；菜单 Select All→Copy 后剪贴板是终端文本；
-  `kraal do terminal.paste` 在另一 pane 得到文本；无选区 `terminal.copy`
-  exit 1；点击左/右 pane 的 `focused_pane` 真的切换（之前 AppKit 收到了
-  点击、模型没收到）。焦点绑定打开后 ⌘K 输入 `rename` 仍得到
-  `AXTextField value=rename`，命令面板没有被终端抢回 first responder。
-  **还没做**：链接 Cmd-click 的 t7/machine peek、hover、拖放、
-  kitty graphics 像素回归、IME 候选窗截图、alt-screen 滚轮探针。
-- **#233 控制面（第一阶段）**：app 内 `HcControlServer` 监听一行 JSON 的
-  Unix socket（`KRAAL_CONTROL_SOCKET` → `KRAAL_HC_VIEW` 同目录 `control.sock`
-  → `$XDG_CONFIG_HOME/kraal/control.sock`），一条连接只处理一个命令。
-  `kraal ls/status/do/commands/shot` 已可用：`ls` 输出 spaces/tabs/terminals
-  （含 pane、status、app、sub_agents、recent），`status` 输出 focus/zoom/
-  documents/errors/window，`do` 返回创建动作的 `space/tab/pane/terminal` id，
-  `shot` 用 `screencapture -l` 抓指定窗口。第二个实例只发 `raise`，不再开
-  第二个窗口。`commands --help` 不再被 JSON 短路。
-  实测（VM `kraal-agent`，隔离 core）：`space.new` 返回 `sp-…/tb-…/p-…/t1`，
-  `pane.split --direction right` 返回 t2，`ls` 能看到两个 pane；未知参数
-  exit 1，无窗口 exit 2；`shot` 生成非黑 1180×760 PNG；第二次启动只剩一个
-  client。**还没做**：gui.sh 断言迁移到这些命令（#235）。
-- `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。
+判据：`HcWorkspaceModelTests`、`KraalActionTests`、`HcSettingsTests`、
+`HcKeymapControllerTests`、`LiveHcPaneTests` 全绿；VM 截图 + control 断言。
+
+剩余（#232）：Cmd-click 打开 `pane/t7`、链接 hover、文件拖放、
+`terminal.paste_image`、kitty graphics 像素回归、IME 候选窗、
+alt-screen 滚轮、`terminal.right_click=program`。
+
+---
+
+## M3 交付与清理 🚧
+
+已完成：
+
+- Herdr 1 客户端/协议/测试/旧 CLI 子命令删除
+- `KraalMac` 单一 HC 入口；无 `KRAAL_HC` 开关
+- `KraalSupport`（日志/DevSession）独立
+- `kraal` 控制面 + 单实例 raise
+- 旧 `gui.sh` / `bench.sh` / 旧 probe 删除
+
+剩余：
+
+| 项 | 说明 |
+|---|---|
+| #235 GUI 自动化重写 | 44 个旧用例改成 `kraal ls/status/do` + AX；补回 GUI 门禁 |
+| #237 性能基线 | attach 吞吐、N pane 主线程占用、输入→回显；新基线 |
+| #236 iOS | 先把 `KraalModel`/`KraalHC` 抽成跨平台，再接 SwiftUI iOS |
+| #242/#243 | 直连 ssh、VM SSH fixture（core 能力验证） |
+
+验收：`./Scripts/verify.sh` 全绿；GUI 门禁恢复后能故意注入失败并变红。
+
+---
+
+## 不变量
+
+1. 单一协议：只支持 herdr-core generation 1。
+2. 客户端不解析终端网格；首帧 VT 重放后原始字节进 engine。
+3. 共享文档只写自己的子树；CAS 冲突不做三方合并。
+4. 私有状态不进共享文档。
+5. 版本门禁失败就明确报错，不做降级猜测。
+6. 控制面窗口是唯一写入者；一连接一命令。
+
+细节见 [HERDR2.md](HERDR2.md)。

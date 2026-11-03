@@ -1,45 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 zzjcool
 //
-// macOS app entry point.
-//
-// The window is an `NSWindow` hosting the SwiftUI `RootView`. The pane renderer
-// is injected here so the UI package stays free of the Ghostty xcframework, and
-// so a headless build can swap in a stub.
+// The macOS app: one herdr-core window, its persisted frame and the AppKit
+// chrome the SwiftUI tree cannot reach. There is no second client stack here;
+// the Herdr 1 window and its store were removed with the old targets.
 
 import AppKit
-import KraalClient
 import KraalHC
 import KraalHCTerminal
-import KraalProtocol
-import KraalTransport
-import KraalTerminalView
-import KraalUI
+import KraalSupport
 import SwiftUI
 
 @MainActor
 final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
-    /// Owns the copy-mode session for this window: its cursor, its visible bar and
-    /// the key monitor that drives it. Lives here rather than in the store because
-    /// it is per-window view state.
-    private var copyMode: CopyModeController?
-    /// Kept so the font commands can retire the models; the pool also reaches the
-    /// views as a parameter, which is not something a menu item can use.
-    private var terminalPool: PaneTerminalPool?
-    private let store = AppStore(target: KraalAppDelegate.initialTarget)
-    private var mouseForwarder: MouseForwarder?
-    /// Terminals, kept so the pane menu can reach a pane's selection and clipboard.
-    private var paneTerminalPool: PaneTerminalPool?
-    private let windowActions = WindowActions()
-    private var menuBar: MacMenuBar?
-    /// Owns the AppKit side of terminal events (pasteboard, title, bell).
-    /// Retained so the closure installed on the store does not have to capture
-    /// it strongly — see `onEffectsChanged` in `applicationDidFinishLaunching`.
-    private var terminalEffects: TerminalEffectsApplier?
-    /// Owns the resolved palette; every view reads it through `\.palette`.
-    private var themeStore: ThemeStore?
-    /// The herdr-core window's model, when this launch is in hc mode.
+    /// The herdr-core window's model.
     var hcWorkspace: HcWorkspaceModel?
     /// The local control socket that serves `kraal ls/status/do/shot`.
     var hcControl: HcControlServer?
@@ -52,436 +27,30 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     /// `.regular` activation policy that puts it in the Dock and the ⌘-Tab list.
     private let runsInBackground = DevSession.runsInBackground
 
-    /// The daemon to open on launch.
-    ///
-    /// Honours `KRAAL_HERDR_SOCKET` so a development build can be pointed at a
-    /// sandbox daemon. Without it the app talks to this Mac's herdr, which is the
-    /// normal case for a user — but it also means a UI experiment run without the
-    /// variable lands in their live session, so the override is checked first and
-    /// logged loudly.
-    private static var initialTarget: ConnectionSettings {
-        let environment = ProcessInfo.processInfo.environment
-        if let path = environment["KRAAL_HERDR_SOCKET"], !path.isEmpty {
-            kraalLog("launch: overriding daemon socket -> \(path)")
-            // The name is what the sidebar and the status bar show, so it has to
-            // describe the socket, not the fact that an override was used. Pointing
-            // the override at this Mac's own daemon is exactly how a developer asks
-            // for the real session; calling that "sandbox" made a live run look like
-            // fake data at a glance.
-            return ConnectionSettings(name: connectionName(forSocket: path), transport: .local)
-        }
-        kraalLog("launch: no socket override, using this Mac's herdr")
-        return .local
-    }
-
-    /// "This Mac" when the path is this Mac's own daemon, "sandbox" otherwise.
-    ///
-    /// Compared by canonical path so a symlinked or `~`-relative spelling of the
-    /// real socket still counts as real.
-    private static func connectionName(forSocket path: String) -> String {
-        let candidate = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-            .resolvingSymlinksInPath().standardizedFileURL.path
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let real = "\(home)/.config/herdr/herdr-client.sock"
-        return candidate == real ? "This Mac" : "sandbox"
-    }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // An accessory launch has no Dock tile and never activates, which is what
-        // keeps a second copy from pulling focus away from the first. It still
-        // has a menu bar while its window is key, so ⌘Q and ⌘W keep working when
-        // the user does bring it forward.
         NSApp.setActivationPolicy(runsInBackground ? .accessory : .regular)
         if !runsInBackground {
             NSApp.activate(ignoringOtherApps: true)
         }
-        // One renderer decision per process, taken before any pane exists. The *log line* has
-        // to come after `rotate()` below: anything written before it is truncated away, and a
-        // launch line that never appears is indistinguishable from a flag that never arrived.
-        CellPainterPolicy.apply()
         KraalLog.shared.rotate()
         kraalLog("launch: bundle=\(Bundle.main.bundleIdentifier ?? "none") bundlePath=\(Bundle.main.bundlePath)")
         kraalLog("launch: session=\(KraalLog.shared.sessionName ?? "(none)") "
             + "background=\(runsInBackground) log=\(KraalLog.shared.fileURL.path)")
         kraalLog("launch: screens=\(NSScreen.screens.map { "\($0.frame)" }.joined(separator: " | "))")
-        kraalLog("launch: cell painter=\(CellPainterPolicy.mode.rawValue)")
 
-        // herdr-core mode is a separate window, not a second stack: the Herdr 1
-        // store and its pane renderer are never constructed. `KRAAL_HC=1` uses the
-        // socket `HcPaths` resolves (same rules as `hc`); `KRAAL_HC_SOCKET` points
-        // at one explicitly for a scratch core.
-        if let socket = Self.hcSocketPath() {
+        do {
+            let socket = try Self.hcSocketPath()
             kraalLog("launch: mode=herdr-core socket=\(socket)")
             presentHcWindow(path: socket)
-            return
+        } catch {
+            kraalLog("launch: hc path resolution failed: \(error)")
+            let alert = NSAlert()
+            alert.messageText = "Cannot start Kraal"
+            alert.informativeText = "Could not resolve the herdr-core socket: \(error)"
+            alert.alertStyle = .critical
+            alert.runModal()
+            NSApp.terminate(nil)
         }
-
-        let theme = makeThemeStore()
-        let pool = makeTerminalPool(theme: theme)
-
-        let copyController = makeCopyModeController(store: store)
-
-        let root = RootView(
-            store: store,
-            windowActions: windowActions,
-            copyModeBanner: copyController.banner
-        ) { store, paneId, geometry in
-            self.paneView(
-                store: store, paneId: paneId, geometry: geometry,
-                pool: pool, palette: theme.palette
-            )
-        } popupPaneContent: { store, popup, _ in
-            self.popupView(store: store, popup: popup, pool: pool)
-        } onEnterCopyMode: { [weak self] paneId in
-            self?.copyMode?.enter(paneId: paneId)
-        } onAdjustFontSize: { [weak self] change in
-            self?.adjustFontSize(change)
-        }
-        // Injected on the view rather than on the hosting view, so sheets and
-        // popovers inherit it too.
-        .environment(\.palette, theme.palette)
-
-        let window = makeWindow(root: root)
-        self.window = window
-
-        wireTerminalEffects(store: store, window: window)
-
-        // Keep the pool in sync with the store: drop terminals for closed panes
-        // so their Ghostty surfaces are released.
-        store.onPaneSetChanged = { [weak self] paneIds in
-            _ = self
-            pool.prune(keeping: paneIds)
-        }
-
-        // Popups are not in `paneIds`, so they need their own sweep — keyed on the
-        // popup the surface currently carries. Without it every popup left a
-        // Ghostty surface behind: a prefixed `"popup:<id>"` key never matched
-        // `paneIds`, so `prune(keeping:)` skipped it forever.
-        store.onPopupSetChanged = { [weak self] terminalIds in
-            _ = self
-            pool.prunePopups(keeping: terminalIds)
-        }
-
-        // Mouse events are observed, not intercepted: Ghostty keeps its own
-        // selection and scroll behaviour, and panes that asked for mouse
-        // reporting additionally get semantic events on the daemon connection.
-        let forwarder = MouseForwarder(store: store, paneActions: self)
-        forwarder.attach(to: window)
-        mouseForwarder = forwarder
-        self.paneTerminalPool = pool
-
-        // Now that there is a window, the key monitor can attach to it.
-        copyController.attach(to: window)
-
-        // The menu bar is installed after the window exists so validation can
-        // consult a live store; a bare NSApplication has no main menu at all, so
-        // without this there is no ⌘Q, no Edit menu and no way to reach New Tab
-        // except the tab bar's "+" button.
-        let menu = MacMenuBar(
-            store: store,
-            actions: MacMenuBar.MenuActions(
-                toggleSidebar: { [windowActions] in windowActions.toggleSidebar() },
-                toggleStatusBar: { [windowActions] in windowActions.toggleStatusBar() },
-                showCommands: { [windowActions] in windowActions.showCommandPalette() },
-                showShortcuts: { [windowActions] in windowActions.showShortcuts() },
-                showSettings: { [windowActions] in windowActions.showSettings() },
-                showThemePicker: { [windowActions] in windowActions.showThemePicker() },
-                adjustFontSize: { [weak self] change in self?.adjustFontSize(change) },
-                toggleDensity: { [windowActions] in windowActions.toggleDensity() },
-                showDebugInfo: { [windowActions] in windowActions.showDebugInfo() },
-                enterCopyMode: { [weak self] paneId in self?.copyMode?.enter(paneId: paneId) }
-            )
-        )
-        menu.install()
-        menuBar = menu
-
-        store.loadDefaultSidebarConfig()
-        store.connect()
-    }
-
-    /// Sends Ghostty's encoded bytes to whichever daemon-side terminal produced
-    /// them.
-    ///
-    /// A popup's terminal id is not a pane id, and the two paths are not
-    /// interchangeable: sending a popup's keys down the pane path types them into
-    /// whatever is focused underneath, and focusing "pane \(terminalId)" would fail
-    /// and drop the focus the popup was opened over.
-    ///
-    /// `nonisolated` on purpose: Ghostty hands us these bytes from its own
-    /// output thread, not the main actor. The only work done before the hop
-    /// below is a log line, and `KraalLog` is locked and `@unchecked Sendable`.
-    /// Declaring this main-actor-isolated made that call an isolation
-    /// violation the compiler can only warn about in Swift 5 mode — and it
-    /// turns into a real data race the moment anything that reads `store`
-    /// moves above the hop.
-    nonisolated private func routeInput(target: String, data: Data) {
-        // The hex dump is the expensive half: one `String(format:)` and one
-        // allocation per byte, 103.7 us for a 200-byte paste (issue #56). It is a
-        // debug aid, so it waits until logging is on — `kraalLogLazy` checks
-        // `enabled` before the closure runs, which `@autoclosure` alone did not.
-        kraalLogLazy {
-            "input: target=\(target) bytes=\(data.count) "
-                + "raw=\(data.map { String(format: "%02x", $0) }.joined(separator: " "))"
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if self.store.hasPopup, self.store.activePopup?.terminalId == target {
-                self.store.sendPopupInput(data, terminalId: target)
-            } else {
-                self.store.sendInput(data, to: target)
-                self.store.focus(paneId: target)
-            }
-        }
-    }
-
-    /// One pane's view: the engine, with the cell painter over it when it is on.
-    ///
-    /// Extracted from the `RootView` closure because that closure had grown past the length
-    /// this file's other functions are held to, and because "which renderer draws this pane"
-    /// deserves a name of its own when it is the thing under test.
-    private func paneView(
-        store: AppStore,
-        paneId: String,
-        geometry: PaneSurfacePane,
-        pool: PaneTerminalPool,
-        palette: Palette
-    ) -> AnyView {
-        guard let surface = store.surface else {
-            return AnyView(Color(nsColor: .textBackgroundColor))
-        }
-        // Point the pool at whichever machine this surface came from before asking it for a
-        // model. Pane ids are only unique within one daemon (two machines can both have
-        // `w1:p1`), so the pool keys on the pair and drops everything when the machine
-        // actually changes.
-        pool.selectMachine(surface.bootId)
-        let model = pool.model(for: paneId)
-        model.onCellMetrics = { [weak store] cellSize in
-            guard let store else { return }
-            Task { @MainActor in
-                store.updateCellMetrics(cellSize)
-            }
-        }
-        let engine = GhosttyPaneView(
-            model: model,
-            surface: surface,
-            geometry: geometry,
-            onFocus: { store.focus(paneId: paneId) }
-        )
-        guard CellPainterPolicy.mode != .off else {
-            return AnyView(engine)
-        }
-        // The engine keeps running underneath — same writes, same input, same scrollback —
-        // and `PaneCellOverlay` decides when to draw the cells on top of it. In the shipped
-        // mode that is exactly while a divider is being dragged (see `CellPainterPolicy`).
-        return AnyView(
-            ZStack(alignment: .topLeading) {
-                engine
-                PaneCellOverlay(
-                    store: store,
-                    frame: surface.frame,
-                    inner: geometry.innerRect,
-                    cellSize: SurfaceGeometry.points(for: store.terminalCellSize),
-                    palette: AnsiPalette.from(palette)
-                )
-            }
-        )
-    }
-
-    /// Builds the popup's terminal view.
-    ///
-    /// A popup is its own terminal on the daemon, so it gets its own model: reusing
-    /// a pane's would merge two independent cell streams into one screen. The pool is
-    /// keyed by `(machine, id)` and popup terminal ids live in a different namespace
-    /// from pane ids, so one pool holds both safely.
-    private func popupView(
-        store: AppStore,
-        popup: ClientShellPopupSurface,
-        pool: PaneTerminalPool
-    ) -> AnyView {
-        guard let surface = store.surface else {
-            return AnyView(Color(nsColor: .textBackgroundColor))
-        }
-        pool.selectMachine(surface.bootId)
-        let model = pool.model(for: popup.terminalId, isPopup: true)
-        model.onCellMetrics = { [weak store] cellSize in
-            guard let store else { return }
-            Task { @MainActor in store.updateCellMetrics(cellSize) }
-        }
-        // The daemon sends the popup's grid already cropped to its own frame, so it
-        // is painted straight in — no surface cropping, no diffing against the panes'
-        // stream.
-        //
-        // A popup has no revision of its own on the wire, so the parent surface's is
-        // used: the popup's grid only changes when the surface is re-projected, and
-        // repainting identical cells every frame would be wasteful at 60 Hz.
-        //
-        // One consequence worth naming: a patch the store *refused* still claims its
-        // frame number (issue #50 review), so `surfaceRevision` can advance with the
-        // popup's cells unchanged. `applyPopup` then does its full first-frame path —
-        // `renderer.reset()`, a `CSI 2J 3J H` clear and a whole-grid render
-        // (`PaneTerminal.applyPopup`) — once per refused frame. Note what `3J` means:
-        // the popup's scrollback goes with it, so this is a visible flash, not a
-        // repaint of a few hundred identical cells.
-        //
-        // Left unoptimised on purpose: `frameGrid` compares by value, so a guard could
-        // prove nothing changed only by scanning the grid and then comparing it cell by
-        // cell — and a refusal only reaches this branch for errors the daemon does not
-        // actually produce (a popup open on the daemon side, or a malformed row),
-        // so the path is unreachable in practice. If it ever becomes reachable, guard
-        // on `frameGrid == frame` *before* `lastRevision` instead of widening this.
-        model.applyPopup(
-            frame: popup.frame,
-            revision: surface.surfaceRevision,
-            scene: surface.graphics
-        )
-        return AnyView(GhosttyPopupView(model: model, terminalId: popup.terminalId))
-    }
-
-    /// Creates this window's copy-mode controller.
-    ///
-    /// Split out of `applicationDidFinishLaunching`, which the linter holds to 80
-    /// lines — and which is genuinely easier to read without a three-line aside in
-    /// the middle about where the banner goes.
-    private func makeCopyModeController(store: AppStore) -> CopyModeController {
-        // Created before the view so its banner can be handed to the status bar;
-        // attached to the window once there is one.
-        let controller = CopyModeController(store: store)
-        copyMode = controller
-        return controller
-    }
-
-    /// Builds and shows the main window.
-    ///
-    /// Split out of `applicationDidFinishLaunching` for length. The window has no
-    /// nib and no SwiftUI scene, so every attribute — frame restoration, on-screen
-    /// clamping, titlebar style — is set by hand here.
-    /// Terminal events (OSC 52 clipboard, pane title, bell, notification) are reduced
-    /// to a value by the store and applied here, which is the only code that touches
-    /// AppKit for them. Wired before `connect()` so no event from the first frame is
-    /// missed.
-    private func wireTerminalEffects(store: AppStore, window: NSWindow) {
-        let effects = TerminalEffectsApplier()
-        effects.attach(window: window)
-        terminalEffects = effects
-        store.onEffectsChanged = { [weak effects] pending in
-            guard let effects else { return }
-            let applied = effects.apply(pending)
-            guard !applied.isEmpty else { return }
-            kraalLog("effects: \(applied.joined(separator: " "))")
-        }
-    }
-
-    /// Resolves the theme once and keeps it following the system appearance.
-    ///
-    /// Split out of `applicationDidFinishLaunching`, which is at swiftlint's body
-    /// limit: the launch path already carries activation policy, log rotation, the
-    /// connection and the effect wiring.
-    /// Builds the terminal pool, on the theme's background.
-    ///
-    /// The colour has to be settled before any surface exists, because it is a
-    /// construction-time configuration command in libghostty. Left unset, libghostty
-    /// uses its own themes — `alabaster` `#F7F7F7` on light appearance, `afterglow`
-    /// `#212121` on dark — so a gruvbox client on a light Mac painted a
-    /// `(247,247,247)` band between two `(17,20,25)` panes wherever a terminal drew
-    /// its own background. The theme never crosses the wire, so this is the only
-    /// thing that can set it.
-    private func makeTerminalPool(theme: ThemeStore) -> PaneTerminalPool {
-        let pool = PaneTerminalPool(
-            onInput: { [weak self] target, data in
-                self?.routeInput(target: target, data: data)
-            },
-            background: theme.palette.terminalBackgroundHex,
-            selectionBackground: theme.palette.selectionBackgroundHex,
-            ghostty: theme.ghostty,
-            fontSize: Self.storedFontSize()
-        )
-        // Logged because it is the only evidence a GUI case can assert on: whether the
-        // terminals took the theme's background or libghostty's default is not visible
-        // in any view hierarchy, only in the pixels. Same reasoning as the `layout:`
-        // and `paint:` lines.
-        logTerminalBackground(theme.palette)
-        // The pool retires its models when this changes, so a theme reload or an
-        // appearance switch re-colours the terminals instead of leaving them on the
-        // previous build's background.
-        theme.onPaletteChange = { [weak self, weak pool] palette in
-            self?.logTerminalBackground(palette)
-            pool?.background = palette.terminalBackgroundHex
-            pool?.selectionBackground = palette.selectionBackgroundHex
-        }
-        // A picked theme carries the foreground, cursor and sixteen ANSI colours too.
-        // `nil` (the config.toml path) leaves them to the engine, which is what every
-        // version before the picker did.
-        theme.onTerminalTheme = { [weak self, weak pool] picked in
-            self?.logTerminalTheme(picked)
-            pool?.ghostty = picked
-        }
-        logTerminalTheme(theme.ghostty)
-        terminalPool = pool
-        return pool
-    }
-
-    /// The picked theme, in one line a GUI case can assert on.
-    ///
-    /// Not visible in any view hierarchy: the ANSI entries go straight into the
-    /// engine's configuration, and the only way to tell a gruvbox terminal from a
-    /// Catppuccin one without a screenshot is what was built here.
-    private func logTerminalTheme(_ theme: GhosttyTheme?) {
-        guard let theme else {
-            kraalLog("terminal theme: none (following config.toml)")
-            return
-        }
-        kraalLog("terminal theme: \(theme.name) fg=\(theme.foreground) bg=\(theme.background)"
-            + " ansi1=\(theme.ansi[1]) ansi4=\(theme.ansi[4])")
-    }
-
-    /// Records the colour the terminals were built with, for the GUI gate.
-    private func logTerminalBackground(_ palette: Palette) {
-        // Both colours in one line: a selection that keeps the engine's default is only
-        // visible in the pixels, so the GUI gate needs the value the app actually built
-        // the surfaces with.
-        kraalLog("terminal background: \(palette.terminalBackgroundHex ?? "nil")"
-            + " selection: \(palette.selectionBackgroundHex ?? "nil")")
-    }
-
-    // MARK: - Font size
-
-    /// The size saved by ⌘+ / ⌘- / ⌘0, or `nil` when the user has never pressed them.
-    ///
-    /// `nil` rather than 13 so a pane that was never resized keeps the engine's own
-    /// default — if libghostty's default ever changes, a user who never touched the
-    /// commands follows it.
-    static func storedFontSize() -> Float? {
-        guard UserDefaults.standard.object(forKey: fontSizeDefaultsKey) != nil else { return nil }
-        return FontScale.clamp(UserDefaults.standard.float(forKey: fontSizeDefaultsKey))
-    }
-
-    static let fontSizeDefaultsKey = "KraalFontSize"
-
-    /// Applies one of the three size commands.
-    ///
-    /// The size is written to defaults *and* to the pool: the pool is what rebuilds
-    /// the terminals, and writing only the defaults would make the next press read
-    /// the same value and do nothing until relaunch.
-    private func adjustFontSize(_ change: FontScale.Change) {
-        let current = Self.storedFontSize() ?? FontScale.base
-        let size = FontScale.next(current, change: change)
-        UserDefaults.standard.set(size, forKey: Self.fontSizeDefaultsKey)
-        terminalPool?.fontSize = size
-        windowActions.fontChanged()
-        // The gate asserts this line: the cell size is the only visible effect, and
-        // it lives in the `layout:` line the renderer already writes.
-        kraalLog("terminal font: \(FontScale.label(size)) (change=\(change))")
-    }
-
-    private func makeThemeStore() -> ThemeStore {
-        // Read once, here. Doing it in a view body would mean file I/O per frame, and
-        // doing it in several places would give "which theme am I on" several answers.
-        let theme = ThemeStore()
-        themeStore = theme
-        theme.followSystemAppearance()
-        store.themeStore = theme
-        kraalLog("theme: \(theme.themeName) (config name=\(theme.config.name ?? "-"))")
-        return theme
     }
 
     func makeWindow(root: some View) -> NSWindow {
@@ -601,21 +170,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         return window
     }
 
-    /// Puts a real material behind the titlebar strip.
-    ///
-    /// The window is non-opaque with a clear background (required for
-    /// `.behindWindow` vibrancy to reach the desktop) and hides its titlebar
-    /// (`titlebarAppearsTransparent`). Those two together leave the top strip
-    /// with nothing drawn in it: SwiftUI lays its content out below the titlebar's
-    /// safe area, and AppKit's own titlebar chrome was told to go away. The strip
-    /// therefore showed the desktop straight through — the traffic lights and the
-    /// toolbar buttons floating on raw wallpaper, with a hard edge where the
-    /// sidebar's material began 38pt lower.
-    ///
-    /// The material has to be installed as a sibling *below* the titlebar
-    /// container rather than as part of the SwiftUI tree, because the strip is
-    /// outside the hosting view's frame entirely: anything the view tree draws
-    /// there would be clipped away.
     private static func installTitlebarMaterial(in window: NSWindow) {
         guard let frameView = window.contentView?.superview else { return }
         let height = window.frame.height - window.contentLayoutRect.height
@@ -647,8 +201,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + "material=headerView blending=behindWindow")
     }
 
-    /// Logs every `NSVisualEffectView` in the window, with the properties that
-    /// decide whether it actually blurs the desktop.
     private static func logVibrancyTree(in window: NSWindow) {
         var found: [String] = []
         var stack: [NSView] = window.contentView.map { [$0] } ?? []
@@ -665,10 +217,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             + (found.isEmpty ? "NONE (chrome is flat!)" : found.joined(separator: " | ")))
     }
 
-    /// The frame from the previous session, if it was saved.
-    ///
-    /// Keyed by dev session so a background copy cannot restore itself onto the
-    /// frame the user left their own window at.
     static func savedFrame() -> NSRect? {
         let key = DevSession.windowFrameDefaultsKey(name: DevSession.name)
         guard let frame = UserDefaults.standard.string(forKey: key) else {
@@ -686,8 +234,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    /// Clamps a frame to the nearest on-screen area, or centres a default-size
-    /// window when the frame is unusable.
     static func onScreenFrame(for frame: NSRect) -> NSRect? {
         // Only screens that can actually show a window: a virtual or captured
         // display can report a frame far outside the physical layout, and
@@ -744,123 +290,8 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         saveFrame()
-        mouseForwarder?.detach()
         hcControl?.stop()
         hcWorkspace?.stop()
-        store.disconnect()
-    }
-}
-
-// MARK: - Pane context menu
-
-/// The pane menu reaches the app delegate for everything that is not already an
-/// `AppCommand`: the pane it acts on comes from the menu the click raised, and
-/// the two clipboard actions have to reach that pane's Ghostty surface.
-extension KraalAppDelegate: PaneContextMenuProviding, PaneContextTarget, PaneContextMenuValidating {
-    func showPaneContextMenu(for paneId: String, event: NSEvent) {
-        // Focus follows the click: a right-click is a deliberate act on one pane,
-        // and every item in the menu reads "the focused pane". Without this, a
-        // right-click in a background pane would silently act on another one.
-        store.focus(paneId: paneId)
-
-        // Commands go to the menu bar, not to `self`: `MacMenuBar` is the object
-        // that answers `validateMenuItem` and implements `runCommand`. Pointing
-        // them at the delegate instead left them greyed out, because AppKit
-        // disables an item whose target does not respond to its selector.
-        let menu = PaneContextMenuBar.menu(
-            paneId: paneId,
-            rightClickPassthrough: store.rightClickPassthrough(paneId: paneId),
-            target: self,
-            commandTarget: menuBar ?? self,
-            commandSelector: #selector(MacMenuBar.runCommand(_:))
-        )
-        // Anchor the menu to the click, not to the view's origin: this is what
-        // makes it open where the user right-clicked.
-        let location = event.locationInWindow
-        if let view = window?.contentView {
-            NSMenu.popUpContextMenu(menu, with: event, for: view)
-        } else {
-            menu.popUp(positioning: nil, at: location, in: nil)
-        }
-        kraalLog("contextmenu: pane=\(paneId) at=\(Int(location.x)),\(Int(location.y))")
-    }
-
-    func paneHasSelection(_ paneId: String) -> Bool {
-        paneTerminalPool?.model(for: paneId).state.surface?.hasSelection() == true
-    }
-
-    /// Runs Ghostty's own `copy_to_clipboard` binding, so what lands on the
-    /// pasteboard is exactly what the user would get from ⌘C inside the pane.
-    func copySelection(in paneId: String) {
-        guard let surface = paneTerminalPool?.model(for: paneId).state.surface else { return }
-        _ = surface.performBindingAction("copy_to_clipboard")
-    }
-
-    // MARK: PaneContextTarget
-
-    func focusPane(_ sender: NSMenuItem) {
-        guard let paneId = sender.menu?.owningPaneId else { return }
-        store.focus(paneId: paneId)
-    }
-
-    func copySelection(_ sender: NSMenuItem) {
-        guard let paneId = sender.menu?.owningPaneId else { return }
-        copySelection(in: paneId)
-    }
-
-    /// Paste is sent as a *paste* event, not as keystrokes.
-    ///
-    /// The daemon owns the pane's content, so the text has to go back over the
-    /// connection — but as `.paste(text)` (wire tag 3), not as raw bytes through
-    /// the key decoder. Sending bytes made a paste indistinguishable from typing:
-    /// every newline arrived as Enter, so pasting a three-line command ran all
-    /// three (issue #20).
-    func pasteIntoPane(_ sender: NSMenuItem) {
-        guard let paneId = sender.menu?.owningPaneId else { return }
-        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
-        store.sendPaste(text, to: paneId)
-    }
-
-    func renamePane(_ sender: NSMenuItem) {
-        guard let paneId = sender.menu?.owningPaneId else { return }
-        presentPaneRename(paneId: paneId)
-    }
-
-    /// Flips this pane's right-click routing via `pane.input.set`.
-    ///
-    /// Deliberately does not flip a local flag: the daemon owns this setting and
-    /// reports it back as `right_click_passthrough` in the next snapshot. A local
-    /// flip would put a checkmark on screen that the daemon never agreed to, and
-    /// the pane would keep opening the menu because `MouseForwarder` reads the
-    /// snapshot. Sending the request and letting the snapshot land is the only
-    /// version where the menu and the behaviour cannot disagree.
-    func toggleRightClickPassthrough(_ sender: NSMenuItem) {
-        guard let paneId = sender.menu?.owningPaneId else { return }
-        let current = store.rightClickPassthrough(paneId: paneId)
-        store.setRightClickPassthrough(paneId: paneId, passthrough: !current)
-        kraalLog("contextmenu: right_click pane=\(paneId) \(current) -> \(!current)")
-    }
-
-    /// The menu bar's rename flow, reused so a rename started from a pane looks
-    /// and behaves the same as one started from the menu.
-    private func presentPaneRename(paneId: String) {
-        let alert = NSAlert()
-        alert.messageText = CommandPrompt.renamePane(
-            paneId: paneId,
-            current: store.paneLabel(paneId) ?? ""
-        ).title
-        alert.informativeText = "Enter a new name."
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.stringValue = store.paneLabel(paneId) ?? ""
-        alert.accessoryView = field
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        store.rename(paneId: paneId, to: name)
     }
 }
 

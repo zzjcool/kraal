@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 zzjcool
 #
-# Runs every gate the repo has: build, tests, lint. This is the same set the
-# README documents, so CI and a local check cannot drift apart.
+# Runs every gate the repo has: build, tests, lint and the app bundle. This is
+# the same set the README documents, so CI and a local check cannot drift apart.
 #
-#   ./Scripts/verify.sh          # build + test + lint + app bundle + GUI
-#   ./Scripts/verify.sh --fast   # skip the app bundle and the GUI gate
-#
-# KRAAL_SKIP_GUI=1 disables only the GUI gate (needs an unlocked screen for
-# any case that posts synthetic events).
+#   ./Scripts/verify.sh          # build + test + lint + app bundle
+#   ./Scripts/verify.sh --fast   # skip the app bundle
 
 set -uo pipefail
 
@@ -44,16 +41,13 @@ section "build (all targets)"
 check "${PIPESTATUS[0]}" "swift build"
 
 section "tests"
-# `swift test` is red on purpose: the tests ported from herdr / herdr-gpui /
-# rootshell pin behaviour this client does not have yet (docs/archive/PORTED-TESTS.md).
-# The gate is "everything outside that known list stays green", which is what
-# test-baseline.sh asserts — otherwise a real regression is indistinguishable
-# from the expected failures.
+# test-baseline.sh runs the full suite; the old ported Herdr 1 benchmark
+# entries are gone, so the known-red list is empty and this is a plain test run.
 #
 # test-baseline.sh calls `swift` itself, so DEVELOPER_DIR exported above still
 # applies; if it ever grows a $SWIFT override, pass it through here.
 ./Scripts/test-baseline.sh 2>&1 | grep -E "✔ Test run|✘|error:" | tail -8
-check "${PIPESTATUS[0]}" "swift test (excluding known-ported reds)"
+check "${PIPESTATUS[0]}" "swift test"
 
 # Scratch files go under a per-user directory. A fixed /tmp name collides across
 # users (and with leftovers from a root debug run), and the failed redirect then
@@ -94,9 +88,9 @@ else
 fi
 
 section "shell lint"
-# The scripts are part of the product here: gui.sh is the GUI gate, so a broken
-# gui.sh is a broken gate. shellcheck is not installed by default, same policy as
-# swiftlint (missing tool = failure, not silence).
+# The scripts are part of the product here, and a broken script is a broken
+# gate. shellcheck is not installed by default, same policy as swiftlint
+# (missing tool = failure, not silence).
 if command -v shellcheck >/dev/null 2>&1; then
     SHELL_BAD=0
     for f in Scripts/*.sh; do
@@ -116,23 +110,6 @@ if [ "${1:-}" != "--fast" ]; then
     TAIL=$?
     tail -2 "$SCRATCH/app-build.log"
     check "$TAIL" "Kraal.app"
-fi
-
-if [ "${1:-}" != "--fast" ] && [ "${KRAAL_SKIP_GUI:-0}" != "1" ]; then
-    section "gui (real window, scratch daemon, vm backend)"
-    # The GUI gate drives a real window, so it runs in the VM by default: a local
-    # run takes the pointer and keyboard away from whoever is using the machine.
-    # Set KRAAL_GUI_BACKEND=local to run it here (interactive use only).
-    ./Scripts/gui.sh run > "$SCRATCH/gui.log" 2>&1
-    TAIL=$?
-    # Strip ANSI first: the ✓/✗ lines start with a colour escape, so anchoring the
-    # pattern at ^ matched nothing and the gate printed a green line with no
-    # evidence of what it actually checked.
-    sed 's/\[[0-9;]*m//g' "$SCRATCH/gui.log" | grep -E '^(  ✓|  ✗|ok:|FAILED)' | tail -14
-    check "$TAIL" "gui.sh run"
-    if [ "$TAIL" -ne 0 ]; then
-        printf '    full log: %s\n' "$SCRATCH/gui.log"
-    fi
 fi
 
 printf '\n'
