@@ -45,6 +45,11 @@ extension HcWorkspaceModel {
                         "name": .string(tab.displayName),
                         "active": .bool(space.activeTab == tab.id),
                         "settled": .bool(tab.settled != nil),
+                        // The pane the person is looking at, and the whole
+                        // arrangement, so a gate can assert the split it just
+                        // asked for without parsing the shared document.
+                        "focused": tab.focusedPane.map(JSONValue.string) ?? .null,
+                        "tree": tab.root.raw,
                         "terminals": .array(tab.root.panes.compactMap { pane in
                             guard let terminal = workspace.terminal(ofPane: pane.id) else { return nil }
                             return terminalListing(pane: pane.id, address: terminal)
@@ -89,6 +94,9 @@ extension HcWorkspaceModel {
         fields["overlays"] = .array(openOverlays.map(JSONValue.string))
         fields["errors"] = .array(errors.map(JSONValue.string))
         fields["connected"] = .bool(isConnected)
+        // The same flag `shareSeen` gates `herdr.seen` writes on; a gate can
+        // watch activation without reading the window.
+        fields["active"] = .bool(appActive)
         fields["heartbeat_stale"] = .bool(heartbeatStale)
         fields["snapshot_ready"] = .bool(hasSnapshot)
         fields["status"] = .string(state)

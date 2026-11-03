@@ -139,9 +139,20 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 `swift test` 覆盖 wire、事件归约、文档 CAS、布局树、动作目录、按键、
 设置兼容和 HC 终端 live 用例（live 用例需要 `KRAAL_LIVE_HC_TESTS=1`）。
 
-旧的 `Scripts/gui.sh` 和旧 Herdr 1 用例已随旧客户端删除；GUI 自动化重写
-仍在 [#235](https://github.com/zzjcool/kraal/issues/235)。UI 改动目前按
-`docs/AUTOMATION.md` 的 VM 手工流程取证据。
+UI 门禁是 `./Scripts/gui.sh`：三层断言（`client` = `kraal ls/status`，
+`core` = `hc get --json`，`pixels` = `KraalGUIDriver` 截图/拖动/AX），默认跑
+Tart VM `kraal-agent`。
+
+```bash
+./Scripts/gui.sh probe      # 环境自检（不跑用例）
+./Scripts/gui.sh list       # 用例与各自断言什么
+./Scripts/gui.sh run        # split-right / close-pane / resize / seen
+./Scripts/gui.sh verify     # build-app.sh + 全跑
+```
+
+Herdr 1 的 44 个旧用例已删除；这里先重建 4 个 HC 用例（[#235](https://github.com/zzjcool/kraal/issues/235)），其余 UI 改动仍按手工配方。
+隔离方式、`summary.json` 字段、退出码 0/1/2 与注入证据见
+`docs/AUTOMATION.md`；门禁没覆盖的 UI 改动仍按那里的 VM 手工配方取证据。
 
 ---
 
@@ -154,7 +165,8 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 VM 里跑 HC 的配方见 `docs/AUTOMATION.md`：隔离 `HC_SESSION` + 临时
 `XDG_STATE_HOME` / `XDG_CONFIG_HOME`，推入 `hc`、`Kraal.app` 和
-`KraalGUIDriver`，用 `tart exec` 驱动。
+`KraalGUIDriver`，用 `tart exec` 驱动。`./Scripts/gui.sh run` 已经把这套
+隔离做在每条用例里。
 
 宿主锁屏只挡 `local` 桌面自动化，不挡 VM：`tart exec` 落在 Aqua 会话里，
 仍可启动 HC 窗口、AXPress、合成键盘和窗口截图。
@@ -190,7 +202,7 @@ Tests/
 - **[目标与决策](docs/HERDR2.md)** —— HC 架构、已删除的旧实现、保留/放弃边界
 - **[实施路线](docs/ROADMAP.md)** —— M0–M3 与剩余工作
 - **[怎么跑起来](docs/RUNNING.md)** —— 新机器、依赖、make、VM
-- **[验证方法](docs/AUTOMATION.md)** —— VM HC 窗口 + control/daemon 断言
+- **[验证方法](docs/AUTOMATION.md)** —— 三层 GUI 门禁（client/core/pixels）+ VM 手工配方
 - **[开发环境](docs/ENVIRONMENT.md)** —— 版本、Tart、TCC、已知坑
 - **[排查原则](docs/DEBUGGING.md)** —— 怎么证明一件事是真的
 - **[性能方法](docs/PERFORMANCE.md)** —— 测量原则（旧渲染基线已作废）
