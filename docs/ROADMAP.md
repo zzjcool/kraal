@@ -102,7 +102,12 @@ SPDX-FileCopyrightText: 2026 zzjcool
   （`cmd-+`、`cmd-shift-]` 等按物理键匹配），`send:` 直接写入聚焦终端；
   `ctrl-alt-shift-escape` 恢复默认键位。帮助浮层现在同时列 KEYS 和 COMMANDS。
   `pane.go`/`pane.swap` 已实现并接入 `cmd-alt-arrow` 默认键位。
-- **#231 还差**：设置（字体/主题/透明度/内边距/core 路径）；分隔条拖动与 AX
-  ratio、tab 拖动重排；`app.zoom_*`/`layout.toggle`/`mod.open` 等尚未执行；
-  `kraal do` 需要 #233 的窗口控制 socket。
+- **#231 分隔条/tab 拖动（第三批）**：`HcLayoutTree.resizing` 只改
+  `size.weight`，`HcSplitHandle` 的拖动按两兄弟的权重和守恒、每侧至少 36pt；
+  7pt 视觉线 + 两侧扩展命中区，指针悬停显示 resize cursor；AX
+  `accessibilityAdjustableAction` 以 5% 步长调整 ratio；松手才写共享文档。
+  tab 条支持 drag & drop，落到目标 tab 时调用 `tab.move`（1-based）。
+- **#231 还差**：设置（字体/主题/透明度/内边距/core 路径）；`app.zoom_*`/
+  `layout.toggle`/`mod.open` 等尚未执行；`kraal do` 需要 #233 的窗口控制
+  socket。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

@@ -349,6 +349,20 @@ extension HcWorkspaceModel {
         await saveLayout(machine: space.machine)
     }
 
+    /// Live divider drag: update the tree now, persist only when the gesture
+    /// ends. `saveLayout` is serialized, so one write per drag is enough.
+    public func setSplitWeights(_ container: String, weights: [Double], persist: Bool) {
+        guard let tab = workspace.activeTab,
+              tab.root.find(container) != nil,
+              let space = workspace.space(of: tab.id),
+              layoutLoaded.contains(key(space.machine))
+        else { return }
+        guard workspace.setSplitWeights(container, weights: weights) else { return }
+        publish()
+        guard persist else { return }
+        Task { [weak self] in await self?.saveLayout(machine: space.machine) }
+    }
+
     public func settleTab(_ id: String? = nil) {
         guard let tab = id.flatMap({ workspace.tab($0) }) ?? workspace.activeTab else { return }
         guard workspace.settle(tab.id, at: UInt64(Date().timeIntervalSince1970 * 1000)) else { return }
