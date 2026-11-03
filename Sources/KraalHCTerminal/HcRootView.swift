@@ -15,16 +15,35 @@ public struct HcRootView: View {
         _keymap = StateObject(wrappedValue: HcKeymapController(workspace: model))
     }
 
+    private var colors: HcChromeColors { HcChromeColors(theme: model.resolvedTheme) }
+
     public var body: some View {
-        HSplitView {
-            if model.sidebarVisible {
-                HcSidebarView(model: model)
-                    .frame(minWidth: 220, idealWidth: 260, maxWidth: 360)
+        VStack(spacing: 0) {
+            HcTitlebarView(model: model)
+            HStack(spacing: 0) {
+                if model.sidebarVisible {
+                    HcSidebarView(model: model)
+                        .frame(width: HcChromeMetrics.sidebarWidth)
+                    Rectangle()
+                        .fill(colors.border)
+                        .frame(width: 1)
+                }
+                VStack(spacing: 0) {
+                    detail
+                        .frame(minWidth: 451, maxWidth: .infinity, maxHeight: .infinity)
+                    HcStatusBarView(model: model)
+                }
             }
-            detail
-                .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task { model.start() }
+        .background(colors.chrome)
+        // The window is `fullSizeContentView` + a transparent titlebar: the
+        // chrome is meant to start at y=0 so the traffic lights sit in the same
+        // 40pt row as the Kraal mark and the tabs (official layout `none`).
+        .ignoresSafeArea(.container, edges: .top)
+        .task {
+            model.start()
+            model.welcomeIfNeeded()
+        }
         .onAppear { keymap.attach() }
         .onDisappear { keymap.detach() }
         .overlay(alignment: .topTrailing) {
@@ -54,6 +73,28 @@ public struct HcRootView: View {
                 .transition(.opacity)
             }
         }
+        .overlay {
+            if model.pickerVisible {
+                ZStack {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.pickerVisible = false }
+                    HcSpaceTabPicker(model: model)
+                }
+                .transition(.opacity)
+            }
+        }
+        .overlay {
+            if model.showWelcome {
+                ZStack {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.dismissWelcome() }
+                    HcWelcomeView(model: model)
+                }
+                .transition(.opacity)
+            }
+        }
         .animation(.easeOut(duration: 0.2), value: model.agentToast)
         .animation(.easeOut(duration: 0.2), value: model.peekAddress)
         .sheet(item: $model.renameRequest) { request in
@@ -63,12 +104,12 @@ public struct HcRootView: View {
             HcSettingsView(model: model)
         }
         .sheet(isPresented: $model.showHelp) {
-            HcHelpView(workspace: model, keyBindings: keymap.bindings)
+            HcKeybindingsView(workspace: model, keyBindings: keymap.bindings)
         }
         .sheet(item: $model.machineSheet) { sheet in
             switch sheet {
             case .add:
-                HcAddMachineView(model: model)
+                HcAddMachineDialog(model: model)
             case let .rename(machine):
                 HcRenameMachineView(machine: machine, model: model)
             }
@@ -117,47 +158,9 @@ public struct HcRootView: View {
         } message: {
             Text(model.machineError ?? "")
         }
-        .toolbar {
-            ToolbarItem {
-                Button {
-                    model.showPalette.toggle()
-                } label: {
-                    Label("Commands", systemImage: "command")
-                }
-                .keyboardShortcut("k", modifiers: .command)
-            }
-            ToolbarItem {
-                Button {
-                    model.showSettings = true
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-            }
-            ToolbarItem(placement: .status) {
-                Text(statusText)
-                    .font(.caption)
-                    .foregroundStyle(model.heartbeatStale ? Color.red : Color.secondary)
-            }
-            ToolbarItem {
-                Button {
-                    model.machineSheet = .add
-                } label: {
-                    Label("Add machine", systemImage: "plus")
-                }
-                .disabled(!isReady)
-            }
-            ToolbarItem {
-                Button {
-                    Task {
-                        await model.refresh()
-                        await model.refreshMachines()
-                    }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(!isReady)
-            }
-        }
+        // Applied last: overlays and sheets are modifiers above this point, so the
+        // environment has to wrap the whole chain or they would paint the default.
+        .hcTheme(model.resolvedTheme)
     }
 
     @ViewBuilder
@@ -166,6 +169,8 @@ public struct HcRootView: View {
             HcLayoutView(model: model)
         } else if let session = model.session {
             HcTerminalPaneView(session: session, isFocused: model.terminalFocusAllowed)
+                .padding(HcChromeMetrics.workInset)
+                .background(colors.canvas)
                 .id(ObjectIdentifier(session))
         } else {
             VStack(spacing: 8) {
@@ -173,20 +178,15 @@ public struct HcRootView: View {
                 if let error = model.openError {
                     Text(error)
                         .font(.callout)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(colors.blocked)
                         .textSelection(.enabled)
                 } else {
-                    Text(statusText).foregroundStyle(.secondary)
+                    Text(statusText).foregroundStyle(colors.muted)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(colors.canvas)
         }
-    }
-
-    private var isReady: Bool {
-        if case .ready = model.status { return true }
-        return false
     }
 
     private var emptyTitle: String {

@@ -65,9 +65,10 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done
 `verify.sh` 当前门禁：`swift build` → `swift test` → `swiftlint` →
 `shellcheck` → `build-app.sh`。
 
-`Scripts/gui.sh` 已随 Herdr 1 测试套件删除。GUI 自动化重写在
-[#235](https://github.com/zzjcool/kraal/issues/235) 完成前，UI 改动按
-`docs/AUTOMATION.md` 的 VM 手工流程留证据。
+`Scripts/gui.sh` 是三层 GUI 门禁（`client` / `core` / `pixels`）：默认 Tart VM
+`kraal-agent`，`local` 必须 `KRAAL_GUI_ALLOW_HOST=1`。UI 改动先跑
+`./Scripts/gui.sh run`（或 `verify`），门禁没覆盖的部分按 `docs/AUTOMATION.md`
+的 VM 手工流程留证据。
 
 ### 已知误报
 

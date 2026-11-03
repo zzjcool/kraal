@@ -90,7 +90,8 @@ final class HcKeymapController: ObservableObject {
 
     private func handle(_ event: NSEvent) -> Bool {
         guard let workspace, workspace.isConnected,
-              !workspace.showPalette, !workspace.showHelp,
+              !workspace.showPalette, !workspace.showHelp, !workspace.showSettings,
+              !workspace.showWelcome, !workspace.pickerVisible,
               workspace.machineSheet == nil, workspace.closeRequest == nil
         else { return false }
         guard let (modifiers, key) = Self.combo(event) else { return false }
@@ -107,12 +108,27 @@ final class HcKeymapController: ObservableObject {
                 workspace.sendToFocused(String(binding.action.dropFirst(5)))
                 return true
             }
+            // Upstream's ⌘P is `mod.open:picker`, a mod entry. Kraal runs its
+            // own place picker for it, so the key does what the official app
+            // does without shipping a JS mod.
+            if binding.action == Self.pickerAction {
+                workspace.showPlacePicker()
+                return true
+            }
+            // A keys.json entry can name a command this window cannot run (a
+            // `mod.`/`layout.` action, or a catalog action whose phase has not
+            // landed). That is a skip, never a failure: the next candidate for
+            // the same combo still gets its turn and the keyboard keeps working.
             guard runnable(binding.action, workspace: workspace) else { continue }
             run(binding.action, workspace: workspace)
             return true
         }
         return false
     }
+
+    /// herdr-app's `Go to a space or tab…` entry point, routed to
+    /// `HcWorkspaceModel.showPlacePicker()` rather than to a mod loader.
+    nonisolated static let pickerAction = "mod.open:picker"
 
     /// The terminal section is the more specific context, so it must be tried
     /// before global; `layout:`/`mod:` have no Kraal equivalent yet.

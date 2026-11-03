@@ -152,7 +152,7 @@ extension HcWorkspaceModel {
                 session.close()
                 return
             }
-            session.apply(settings)
+            session.apply(settings, theme: resolvedTheme)
             peekSession = session
             peekAddress = address
             updateAgents()

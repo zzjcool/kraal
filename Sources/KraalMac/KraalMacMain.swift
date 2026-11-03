@@ -62,11 +62,15 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func makeWindow(root: some View) -> NSWindow {
+        let size = NSSize(
+            width: HcChromeMetrics.windowDefaultWidth,
+            height: HcChromeMetrics.windowDefaultHeight
+        )
         let hosting = NSHostingView(rootView: root)
-        hosting.frame = NSRect(x: 0, y: 0, width: 1180, height: 760)
+        hosting.frame = NSRect(origin: .zero, size: size)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -90,29 +94,25 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         window.title = DevSession.title(name: DevSession.name, background: runsInBackground)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        // Vibrancy detail that is easy to miss: an `NSVisualEffectView` with
-        // `blendingMode = .behindWindow` samples what is behind the *window*. If the
-        // window is opaque, AppKit composites the effect over the window's own
-        // background colour and the blur never reaches the desktop — which is
-        // exactly why the chrome looked flat before this change. The window has to
-        // be non-opaque with a clear background for real translucency.
-        //
-        // Safe here because every region is covered: the sidebar and both bars draw
-        // their own material, and the terminal area paints an opaque background
-        // (`PaneLayoutView` uses `.textBackgroundColor`) so glyph contrast is
-        // untouched.
+        // The chrome is flat, opaque colour now (official `paper`/`graphite`
+        // bars), so the window itself stays non-opaque and clear: that is what
+        // lets the transparent titlebar reveal the SwiftUI bar underneath instead
+        // of compositing a native grey band above it. Every region is covered by
+        // an opaque SwiftUI fill, so nothing samples the desktop through a gap.
         window.isOpaque = false
         window.backgroundColor = .clear
-        // A transparent window has no surface to composite the titlebar against,
-        // so the standard titlebar strip would paint its own opaque grey over the
-        // sidebar's material. Hiding it leaves one continuous glass surface from
-        // the traffic lights down, which is the look the rest of this change aims
-        // at. The traffic lights stay; only the bar behind them goes away.
+        // One continuous 40pt band from the traffic lights to the tabs: no native
+        // titlebar material and no native hairline under it; the bar draws its own
+        // 1pt border. The traffic lights stay where AppKit puts them.
         window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.styleMask.insert(.fullSizeContentView)
         window.contentView = hosting
-        window.setContentSize(NSSize(width: 1180, height: 760))
-        window.minSize = NSSize(width: 720, height: 420)
+        window.setContentSize(size)
+        window.minSize = NSSize(
+            width: HcChromeMetrics.windowMinWidth,
+            height: HcChromeMetrics.windowMinHeight
+        )
 
         // A bare executable has no restored frame to fall back on, so place the
         // window explicitly rather than relying on autosave.
@@ -137,19 +137,10 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
             kraalLog("window: moved on-screen to \(frame)")
         }
         kraalLog("window frame after layout: \(window.frame)")
-        // Recorded because translucency is invisible in a screenshot assertion:
-        // an opaque window silently downgrades every `.behindWindow` material to
-        // a flat colour, and that failure looks identical to "the material works"
-        // in pixel tests. Logging the flag makes the difference checkable in CI.
-        // Dump the mounted vibrancy views shortly after launch. A screenshot
-        // cannot prove a material exists (an opaque window renders it as flat
-        // grey and looks "fine"), so the live view tree is the real evidence that
-        // the chrome is backed by NSVisualEffectView and not a Material view.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak window] in
-            guard let window else { return }
-            Self.logVibrancyTree(in: window)
-        }
-        Self.installTitlebarMaterial(in: window)
+        // The window flags are logged because a screenshot cannot show them: a
+        // native titlebar band silently reappears if transparency or the
+        // full-size content mask regress, and the 40pt chrome then starts 28pt
+        // too low.
         kraalLog("window chrome: isOpaque=\(window.isOpaque) "
             + "backgroundColor=\(window.backgroundColor.alphaComponent) "
             + "titlebarTransparent=\(window.titlebarAppearsTransparent) "
@@ -176,53 +167,6 @@ final class KraalAppDelegate: NSObject, NSApplicationDelegate {
         // because the terminal is drawn by Metal and has no useful AX tree.
         kraalLog("window: number=\(window.windowNumber) pid=\(ProcessInfo.processInfo.processIdentifier)")
         return window
-    }
-
-    private static func installTitlebarMaterial(in window: NSWindow) {
-        guard let frameView = window.contentView?.superview else { return }
-        let height = window.frame.height - window.contentLayoutRect.height
-        guard height > 0 else { return }
-
-        let glass = NSVisualEffectView(
-            frame: NSRect(x: 0, y: frameView.bounds.height - height,
-                          width: frameView.bounds.width, height: height)
-        )
-        // Same role as the bars below it (`GlassLayer.bar`), so the seam between
-        // the titlebar and the tab bar is invisible: the two strips are the same
-        // system material, adjacent.
-        glass.material = .headerView
-        glass.blendingMode = .behindWindow
-        glass.state = .followsWindowActiveState
-        glass.autoresizingMask = [.width, .minYMargin]
-
-        // Below the titlebar container (which holds the traffic lights and the
-        // toolbar items) so those keep drawing on top, but above the frame view's
-        // own background.
-        if let titlebar = frameView.subviews.first(where: {
-            String(describing: type(of: $0)).contains("TitlebarContainer")
-        }) {
-            frameView.addSubview(glass, positioned: .below, relativeTo: titlebar)
-        } else {
-            frameView.addSubview(glass, positioned: .below, relativeTo: nil)
-        }
-        kraalLog("titlebar material: height=\(height) frame=\(glass.frame) "
-            + "material=headerView blending=behindWindow")
-    }
-
-    private static func logVibrancyTree(in window: NSWindow) {
-        var found: [String] = []
-        var stack: [NSView] = window.contentView.map { [$0] } ?? []
-        while let view = stack.popLast() {
-            if let effect = view as? NSVisualEffectView {
-                let blending = effect.blendingMode == .behindWindow ? "behind" : "within"
-                let state = effect.state == .followsWindowActiveState ? "follows" : "always"
-                found.append("\(effect.material.rawValue)/\(blending)/\(state)"
-                    + "/\(Int(effect.bounds.width))x\(Int(effect.bounds.height))")
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-        kraalLog("vibrancy: \(found.count) NSVisualEffectView(s) -> "
-            + (found.isEmpty ? "NONE (chrome is flat!)" : found.joined(separator: " | ")))
     }
 
     static func savedFrame() -> NSRect? {

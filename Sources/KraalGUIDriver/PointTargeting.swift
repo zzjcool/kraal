@@ -209,9 +209,7 @@ func commandScroll(_ args: Arguments) -> Never {
 /// still validated, so a coordinate computed in screen space fails here quoting the
 /// window frame, instead of dragging from 350pt below the divider.
 func commandDrag(_ args: Arguments) -> Never {
-    guard let app = TargetApp.find(name: args.string("app") ?? "Kraal") else {
-        fail(.harness, "no running app matching '\(args.string("app") ?? "Kraal")'")
-    }
+    let app = resolveClient(args)
     guard let window = primaryWindow(for: app.pid, title: args.string("title")) else {
         fail(.harness, "app '\(app.name)' has no window")
     }

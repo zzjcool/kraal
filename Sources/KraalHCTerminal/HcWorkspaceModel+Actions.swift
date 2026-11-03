@@ -58,8 +58,9 @@ extension HcWorkspaceModel {
     /// change and once when a pane attaches.
     public func applySettings() {
         NSApp?.appearance = settings.appearance.nsAppearance
-        for session in paneSessions.values { session.apply(settings) }
-        peekSession?.apply(settings)
+        refreshTheme()
+        for session in paneSessions.values { session.apply(settings, theme: resolvedTheme) }
+        peekSession?.apply(settings, theme: resolvedTheme)
     }
 
     /// Actions the runner can execute today. The palette and menus hide the
@@ -73,7 +74,7 @@ extension HcWorkspaceModel {
         "terminal.open", "terminal.keep", "terminal.park", "terminal.pin",
         "terminal.kill", "terminal.peek", "terminal.show", "terminal.copy", "terminal.paste",
         "agent.focus", "agent.next", "agent.prev",
-        "app.palette", "app.settings", "app.help", "app.quit", "app.hide",
+        "app.palette", "app.settings", "app.help", "app.theme", "app.quit", "app.hide",
         "app.zoom_in", "app.zoom_out", "app.zoom_reset", "layout.toggle",
         "app.hide_others", "app.show_all",
         "window.close", "window.minimize", "window.maximize",
@@ -122,6 +123,9 @@ extension HcWorkspaceModel {
         case "terminal": return await dispatchTerminal(name, values)
         case "agent": return await dispatchAgent(name, values)
         case "app", "window": return await dispatchSystem(name, values)
+        // Only `layout.toggle` has a Kraal meaning (the sidebar); the handler
+        // lives with the pane actions because it toggles chrome, not a layout.
+        case "layout": return await dispatchPane(name, values)
         default: return .fail("\(name) is not implemented in this window yet")
         }
     }
@@ -421,7 +425,26 @@ extension HcWorkspaceModel {
             showPalette.toggle()
             return .ok()
         case "app.settings":
+            if let raw = values["section"]?.stringValue {
+                guard let section = HcSettingsSection(rawValue: raw) else {
+                    return .fail("app.settings: unknown section \(raw)")
+                }
+                settingsSection = section
+            }
             showSettings = true
+            return .ok()
+        case "app.theme":
+            guard let raw = values["name"]?.stringValue else {
+                return .fail("app.theme needs a name")
+            }
+            guard let theme = HcThemeName(rawValue: raw) else {
+                return .fail("app.theme: no theme \(raw)")
+            }
+            if theme.isLight {
+                settings.themeLight = theme
+            } else {
+                settings.themeDark = theme
+            }
             return .ok()
         case "app.zoom_in":
             settings.fontSize = HcFontZoom.next(settings.fontSize, by: 1)

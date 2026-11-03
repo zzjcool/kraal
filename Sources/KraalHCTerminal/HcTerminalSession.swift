@@ -182,8 +182,11 @@ public final class HcTerminalSession {
 
     /// Applies the terminal look to this live surface. Ghostty reconfigures in
     /// place; the pane's stream and scrollback are untouched.
-    public func apply(_ settings: HcTerminalSettings) {
+    public func apply(_ settings: HcTerminalSettings, theme: HcTheme? = nil) {
         _ = state.controller.setTerminalConfiguration(settings.terminalConfiguration)
+        if let theme {
+            _ = state.controller.setTheme(settings.terminalTheme(theme))
+        }
         state.objectWillChange.send()
     }
 

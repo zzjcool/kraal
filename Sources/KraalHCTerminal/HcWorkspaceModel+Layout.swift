@@ -294,7 +294,7 @@ extension HcWorkspaceModel {
                     session.close()
                     return
                 }
-                session.apply(self.settings)
+                session.apply(self.settings, theme: self.resolvedTheme)
                 session.contextMenuProvider = { [weak self] in
                     self?.paneContextMenu(for: pane)
                 }
