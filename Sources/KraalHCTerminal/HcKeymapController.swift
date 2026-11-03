@@ -142,7 +142,10 @@ final class HcKeymapController: ObservableObject {
         if parts.count == 2, let first = catalog.args.first {
             return !first.required || !parts[1].isEmpty
         }
-        return !catalog.args.contains(where: \.required)
+        if catalog.args.contains(where: \.required) {
+            return workspace.canPromptAction(name)
+        }
+        return true
     }
 
     private func run(_ action: String, workspace: HcWorkspaceModel) {

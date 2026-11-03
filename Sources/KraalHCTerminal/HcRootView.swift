@@ -17,8 +17,10 @@ public struct HcRootView: View {
 
     public var body: some View {
         HSplitView {
-            HcSidebarView(model: model)
-                .frame(minWidth: 220, idealWidth: 260, maxWidth: 360)
+            if model.sidebarVisible {
+                HcSidebarView(model: model)
+                    .frame(minWidth: 220, idealWidth: 260, maxWidth: 360)
+            }
             detail
                 .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -54,6 +56,9 @@ public struct HcRootView: View {
         }
         .animation(.easeOut(duration: 0.2), value: model.agentToast)
         .animation(.easeOut(duration: 0.2), value: model.peekAddress)
+        .sheet(item: $model.renameRequest) { request in
+            HcRenameView(model: model, request: request)
+        }
         .sheet(isPresented: $model.showSettings) {
             HcSettingsView(model: model)
         }

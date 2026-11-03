@@ -55,6 +55,7 @@ public final class HcWorkspaceModel: ObservableObject {
             applySettings()
         }
     }
+    @Published public var sidebarVisible = true
     @Published public var showPalette = false
     @Published public var showHelp = false
     @Published public var showSettings = false
@@ -81,6 +82,7 @@ public final class HcWorkspaceModel: ObservableObject {
     @Published public internal(set) var layoutError: String?
     /// A close that needs confirmation because it would end several terminals.
     @Published public var closeRequest: HcCloseRequest?
+    @Published public var renameRequest: HcRenameRequest?
     /// A failed machine action, shown until dismissed. Add/rename keep their
     /// sheet open instead, so the typed values are not lost.
     @Published public var machineError: String?

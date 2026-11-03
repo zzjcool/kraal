@@ -60,6 +60,9 @@ public struct HcSettingsView: View {
                             .frame(width: 38, alignment: .trailing)
                     }
                 }
+                Section("Input") {
+                    Toggle("Option sends Alt (Esc prefix)", isOn: binding(\.optionAsAlt))
+                }
                 Section("Notifications") {
                     Toggle("Play a sound for agent alerts", isOn: binding(\.soundEnabled))
                 }
