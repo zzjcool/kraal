@@ -70,6 +70,13 @@ let package = Package(
         ),
         // The client's spaces/tabs/panes: pure values and tree operations, no
         // AppKit or Ghostty, so the rules are testable on their own.
+        // The app action contract: names, arguments and validation. Shared by
+        // the window (menus/palette) and by `kraal commands|do`.
+        .target(
+            name: "KraalActions",
+            dependencies: ["KraalHC"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .target(
             name: "KraalModel",
             dependencies: ["KraalHC"],
@@ -126,6 +133,11 @@ let package = Package(
         .testTarget(
             name: "KraalHCTerminalTests",
             dependencies: ["KraalHCTerminal", "KraalHC", "KraalModel"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "KraalActionsTests",
+            dependencies: ["KraalActions"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
