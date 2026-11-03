@@ -66,7 +66,7 @@ struct HcSidebarView: View {
         // The official rail keeps the Spaces/Agents split at the same place
         // whether one space or four: the agents header must not drift upward
         // when a second space appears.
-        .frame(height: 370)
+        .frame(height: 367)
     }
 
     private func spaceRow(_ space: KraalSpace, index: Int) -> some View {

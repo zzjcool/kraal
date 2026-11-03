@@ -255,7 +255,7 @@ public struct HcThemeSwatch: View {
                     }
                 }
                 .padding(7)
-                .frame(width: 112, height: 46, alignment: .topLeading)
+                .frame(width: 112, height: 37, alignment: .topLeading)
                 .background(shown.background.color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)

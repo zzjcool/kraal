@@ -182,7 +182,7 @@ private struct HcLookPage: View {
                 .foregroundStyle(themeMuted)
             HcSettingGap(12)
             HcSettingSubheading("Dark")
-            HcSettingGap(6)
+            HcSettingGap(19)
             HStack(spacing: 8) {
                 ForEach(HcThemeName.presets(isLight: false), id: \.self) { name in
                     HcThemeSwatch(name: name, selected: name == model.settings.themeDark) {
@@ -190,9 +190,8 @@ private struct HcLookPage: View {
                     }
                 }
             }
-            HcSettingGap(26)
+            HcSettingGap(27)
             HcSettingSubheading("Light")
-            HcSettingGap(6)
             HStack(spacing: 8) {
                 ForEach(HcThemeName.presets(isLight: true), id: \.self) { name in
                     HcThemeSwatch(name: name, selected: name == model.settings.themeLight) {
@@ -200,7 +199,7 @@ private struct HcLookPage: View {
                     }
                 }
             }
-            HcSettingGap(40)
+            HcSettingGap(57)
             HcPanelHeading("Size and fonts")
             HcSettingGap(4)
             zoomRow

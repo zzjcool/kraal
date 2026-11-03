@@ -44,6 +44,7 @@ struct HcTitlebarView: View {
                 .font(.system(size: 13.5, weight: .semibold))
                 .foregroundStyle(colors.foreground)
                 .lineLimit(1)
+                .layoutPriority(1)
             Spacer(minLength: 8)
             HStack(spacing: 4) {
                 HcTitlebarIconButton(symbol: "magnifyingglass", size: 15, help: HcChromeFormat.searchHint) {
@@ -57,7 +58,7 @@ struct HcTitlebarView: View {
         // The traffic lights are drawn by AppKit over this view; 78pt is where
         // the official window starts its own content.
         .padding(.leading, 78)
-        .padding(.trailing, 46)
+        .padding(.trailing, 34)
         .frame(width: HcChromeMetrics.sidebarWidth)
     }
 
@@ -77,7 +78,7 @@ struct HcTitlebarView: View {
                 Task { await model.newTab() }
             }
         }
-        .padding(.leading, HcChromeMetrics.tabContentInset)
+        .padding(.leading, HcChromeMetrics.tabContentInset + 4)
         .padding(.trailing, 10)
         .frame(maxWidth: .infinity)
     }
