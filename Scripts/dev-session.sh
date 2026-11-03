@@ -7,7 +7,7 @@
 # Two people (or a person and an agent) driving the same Mac collide in four
 # places, and only the first is about the daemon:
 #
-#   1. the daemon — handled by KRAAL_HERDR_SOCKET (Scripts/build-app.sh pins it);
+#   1. the control socket — handled by KRAAL_CONTROL_SOCKET (build-app.sh pins it);
 #   2. focus — a dev launch must not call `activate(ignoringOtherApps:)`;
 #   3. window position and log file — namespaced by KRAAL_DEV_SESSION;
 #   4. teardown — `pkill -f KraalMac` kills the *user's* app too.
@@ -43,7 +43,7 @@ die() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 # the built binary is deliberate: re-implementing DevSession's rule in shell is
 # how the two drift apart.
 session_name() {
-    local socket="${KRAAL_HERDR_SOCKET:-/tmp/kraal-mine/herdr-client.sock}"
+    local socket="${KRAAL_CONTROL_SOCKET:-/tmp/kraal-mine/control.sock}"
     if [ -n "${KRAAL_DEV_SESSION:-}" ]; then
         printf '%s' "$KRAAL_DEV_SESSION"
         return
@@ -96,7 +96,7 @@ cmd_start() {
         printf 'already running: session=%s pid=%s\n' "$SESSION" "$pid"
         return 0
     fi
-    # The bundle's own launcher sets KRAAL_DEV_BACKGROUND=1 and the socket. Only
+    # The bundle's own launcher sets KRAAL_DEV_BACKGROUND=1 and the control socket. Only
     # the session name is passed in, so this script cannot drift from the
     # launcher's other defaults.
     KRAAL_DEV_SESSION="$SESSION" \

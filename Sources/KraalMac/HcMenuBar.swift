@@ -7,7 +7,7 @@
 
 import AppKit
 import KraalHCTerminal
-import KraalUI
+import KraalSupport
 
 @MainActor
 final class HcMenuBar: NSObject, NSMenuItemValidation {

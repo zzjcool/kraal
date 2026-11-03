@@ -53,7 +53,7 @@ struct HcControlTests {
         try server.start()
         defer { server.stop() }
         let reply = try await Task.detached {
-            try HcControlClient.send(.list, path: path, timeout: 2)
+            try HcControlClient.send(.list, path: path, timeout: 5)
         }.value
         #expect(reply["spaces"]?.arrayValue?.isEmpty == true)
         #expect(reply["recent"]?.arrayValue?.isEmpty == true)

@@ -74,44 +74,40 @@ provision() {
             ok "grants written — re-run without --fix-tcc to confirm"
         else
             echo "  fix with: ./Scripts/vm-bootstrap.sh --fix-tcc"
-            echo "  (needs SIP disabled inside the guest; see docs/ENVIRONMENT.md §4.6)"
+            echo "  (needs SIP disabled inside the guest; see docs/ENVIRONMENT.md)"
         fi
     else
         ok "all three granted"
     fi
 
-    say "checking remote herdr (herdr machine add needs it)"
-    echo "  \`herdr machine add\` installs a matching herdr at the guest's"
-    echo "  ~/.local/bin/herdr — but only from an interactive terminal. A headless"
-    echo "  harness has none, and without the file every machines case dies at its"
-    echo "  fixture with 'matching remote herdr X is not installed'."
+    say "checking hc in the guest"
+    echo "  HC runs are started inside the guest by the app/docs, so the same"
+    echo "  herdr-core binary as the host must be available at ~/.local/bin/hc."
     WANT=""
-    if command -v herdr >/dev/null; then
-        WANT=$(herdr --version 2>/dev/null | head -1 | awk '{print $NF}')
+    if command -v hc >/dev/null; then
+        WANT=$(hc --version 2>/dev/null | awk '{print $2}' | head -1)
     fi
-    HAVE=$(tart exec "$VM" /bin/bash -lc '$HOME/.local/bin/herdr --version 2>/dev/null | head -1' 2>/dev/null \
-        | tr -d '\r' | awk '{print $NF}')
+    HAVE=$(tart exec "$VM" /bin/bash -lc '$HOME/.local/bin/hc --version 2>/dev/null' 2>/dev/null \
+        | tr -d '\r' | awk '{print $2}' | head -1)
     if [ -n "$WANT" ] && [ "$WANT" = "$HAVE" ]; then
-        ok "guest herdr $HAVE"
+        ok "guest hc $HAVE"
     elif [ -n "$WANT" ]; then
-        HOST_HERDR=$(command -v herdr)
-        tar czf - -C "$(dirname "$HOST_HERDR")" "$(basename "$HOST_HERDR")" \
+        HOST_HC=$(command -v hc)
+        tar czf - -C "$(dirname "$HOST_HC")" "$(basename "$HOST_HC")" \
             | tart exec -i "$VM" /bin/bash -lc \
-                "mkdir -p ~/.local/bin && tar xzf - -C ~/.local/bin && \
-                 mv ~/.local/bin/$(basename "$HOST_HERDR") ~/.local/bin/herdr && \
-                 chmod +x ~/.local/bin/herdr" >/dev/null 2>&1
-        HAVE=$(tart exec "$VM" /bin/bash -lc '$HOME/.local/bin/herdr --version 2>/dev/null | head -1' 2>/dev/null \
-            | tr -d '\r' | awk '{print $NF}')
+                "mkdir -p ~/.local/bin && tar xzf - -C ~/.local/bin && chmod +x ~/.local/bin/hc" >/dev/null 2>&1
+        HAVE=$(tart exec "$VM" /bin/bash -lc '$HOME/.local/bin/hc --version 2>/dev/null' 2>/dev/null \
+            | tr -d '\r' | awk '{print $2}' | head -1)
         if [ "$WANT" = "$HAVE" ]; then
-            ok "installed guest herdr $HAVE (was ${HAVE:-missing})"
+            ok "installed guest hc $HAVE (was ${HAVE:-missing})"
         else
-            printf '\033[33mwarning:\033[0m could not install herdr %s in the guest (have %s)\n' \
+            printf '\033[33mwarning:\033[0m could not install hc %s in the guest (have %s)\n' \
                 "$WANT" "${HAVE:-nothing}"
-            echo "  machines-* GUI cases will fail until it is there"
         fi
     else
-        printf '\033[33mwarning:\033[0m no herdr on the host; skipping the guest copy\n'
+        printf '\033[33mwarning:\033[0m no hc on the host; skipping the guest copy\n'
     fi
+
 }
 
 # ---------------------------------------------------------------- dispatch
@@ -129,8 +125,7 @@ export | import)
     provision "$@"
     say "next steps"
     echo "  ./Scripts/build-app.sh      # build the app on the host (VM has no Xcode)"
-    echo "  ./Scripts/gui.sh probe      # deploy + verify"
-    echo "  ./Scripts/gui.sh run        # all cases"
+    echo "  use tart exec for HC GUI checks (docs/AUTOMATION.md)"
     echo
     echo "  moving to another machine?"
     echo "    $0 export ~/kraal-agent.tvm     # ~22GB, ~32s (stops the VM first)"

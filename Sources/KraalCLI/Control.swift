@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 zzjcool
 //
-// The window control commands. They are intentionally parsed before the old
-// Herdr 1 endpoint flags: `--json` already means "a literal params object" to
-// `kraal call`, and reusing that parser here would turn `do --json` into a
-// different command.
+// The window control commands. `--json` is deliberately not a generic params
+// object here: `do` takes `--key value` pairs or one raw JSON object, because
+// the action arguments are typed per command.
 
 import Foundation
 import KraalActions
