@@ -9,14 +9,13 @@ import SwiftUI
 public struct HcRootView: View {
     @ObservedObject private var model: HcWorkspaceModel
     @StateObject private var keymap: HcKeymapController
-    @Environment(\.colorScheme) private var colorScheme
 
     public init(model: HcWorkspaceModel) {
         self.model = model
         _keymap = StateObject(wrappedValue: HcKeymapController(workspace: model))
     }
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: model.resolvedTheme) }
 
     public var body: some View {
         VStack(spacing: 0) {

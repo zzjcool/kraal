@@ -99,6 +99,41 @@ public struct HcTerminalSettings: Codable, Equatable, Sendable {
         defaults.set(data, forKey: Self.defaultsKey)
     }
 
+    /// The terminal palette the selected theme asks for. Chrome tokens alone
+    /// are not enough: a light theme must also repaint the terminal surface,
+    /// selection and cursor, or the pane keeps Ghostty's default colours.
+    public func terminalConfiguration(theme: HcTheme) -> TerminalConfiguration {
+        var config = terminalConfiguration
+            .background(theme.background.hex)
+            .foreground(theme.terminalForeground.hex)
+            .selectionBackground(theme.selection.hex)
+            .selectionForeground(theme.terminalForeground.hex)
+            .cursorColor(theme.cursor.hex)
+            .cursorText(theme.background.hex)
+        for (index, color) in theme.ansi.enumerated() where index < 16 {
+            config = config.palette(index, color: color.hex)
+        }
+        return config
+    }
+
+    /// Ghostty's `TerminalTheme` is the layer that owns background/foreground;
+    /// a `TerminalConfiguration` colour is overridden by the default theme. Both
+    /// halves get the selected palette so `Appearance` cannot flip it back.
+    public func terminalTheme(_ theme: HcTheme) -> TerminalTheme {
+        let colors = TerminalConfiguration()
+            .background(theme.background.hex)
+            .foreground(theme.terminalForeground.hex)
+            .selectionBackground(theme.selection.hex)
+            .selectionForeground(theme.terminalForeground.hex)
+            .cursorColor(theme.cursor.hex)
+            .cursorText(theme.background.hex)
+        var palette = colors
+        for (index, color) in theme.ansi.enumerated() where index < 16 {
+            palette = palette.palette(index, color: color.hex)
+        }
+        return TerminalTheme(light: palette, dark: palette)
+    }
+
     /// What the surface is actually built with. `fontSize` and padding are
     /// deliberately explicit: Ghostty's defaults differ from Kraal's old 13pt.
     public var terminalConfiguration: TerminalConfiguration {

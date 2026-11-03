@@ -11,9 +11,9 @@ import SwiftUI
 
 struct HcTitlebarView: View {
     @ObservedObject var model: HcWorkspaceModel
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
     private var tabs: [KraalTab] { model.workspace.activeSpace?.tabs ?? [] }
     private var activeTabID: String? { model.workspace.activeSpace?.activeTab }
 
@@ -90,10 +90,10 @@ private struct HcTitlebarTab: View {
     let tab: KraalTab
     let active: Bool
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hovering = false
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
     private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: HcChromeMetrics.tabRadius) }
 
     /// The first agent whose pane is inside this tab. Its `app` word picks the
@@ -209,10 +209,10 @@ private struct HcTitlebarIconButton: View {
     let help: String
     let action: () -> Void
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hovering = false
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     var body: some View {
         Button(action: action) {

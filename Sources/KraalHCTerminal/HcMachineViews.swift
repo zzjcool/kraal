@@ -14,14 +14,14 @@ import SwiftUI
 struct HcSidebarView: View {
     @ObservedObject var model: HcWorkspaceModel
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hoveredSpace: String?
     @State private var hoveredAgent: String?
     /// The clock the relative times are drawn against; refreshed every 30 s so a
     /// row goes `1m` → `2m` while nothing else in the window changes.
     @State private var now = HcSidebarView.clock()
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,8 +54,8 @@ struct HcSidebarView: View {
             }
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(model.workspace.spaces) { space in
-                        spaceRow(space)
+                    ForEach(Array(model.workspace.spaces.enumerated()), id: \.element.id) { index, space in
+                        spaceRow(space, index: index)
                     }
                 }
                 .padding(.horizontal, HcChromeMetrics.sidebarRowInset)
@@ -63,9 +63,13 @@ struct HcSidebarView: View {
             }
             .frame(maxHeight: .infinity)
         }
+        // The official rail keeps the Spaces/Agents split at the same place
+        // whether one space or four: the agents header must not drift upward
+        // when a second space appears.
+        .frame(height: 370)
     }
 
-    private func spaceRow(_ space: KraalSpace) -> some View {
+    private func spaceRow(_ space: KraalSpace, index: Int) -> some View {
         let active = space.id == model.workspace.activeSpace?.id
         let hovering = hoveredSpace == space.id
         return Button {
@@ -77,7 +81,7 @@ struct HcSidebarView: View {
                     .foregroundStyle(.white)
                     .frame(width: HcChromeMetrics.spaceAvatarSize, height: HcChromeMetrics.spaceAvatarSize)
                     .background(
-                        avatarColor(space.id),
+                        avatarColor(index),
                         in: RoundedRectangle(cornerRadius: HcChromeMetrics.spaceAvatarRadius)
                     )
                 Text(space.displayName)
@@ -126,8 +130,8 @@ struct HcSidebarView: View {
     }
 
     /// The space's stable palette color; the palette ships as hex strings.
-    private func avatarColor(_ id: String) -> Color {
-        let hex = HcSpacePalette.hex(for: id)
+    private func avatarColor(_ index: Int) -> Color {
+        let hex = HcSpacePalette.hex[index % HcSpacePalette.hex.count]
         let digits = hex.hasPrefix("#") ? hex.dropFirst() : Substring(hex)
         guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return colors.dim }
         return Color(
@@ -302,14 +306,16 @@ struct HcSidebarView: View {
     /// the detail; grouped-by-space rows already have the space as their header,
     /// so they name the tab instead.
     private func primaryName(_ agent: HcAgent) -> String {
-        if model.agentViewMode == .priority, !agent.spaceName.isEmpty {
-            return agent.spaceName
+        if model.agentViewMode == .priority {
+            let cwd = model.terminals.first { $0.address == agent.address }?.cwd ?? ""
+            let folder = HcChromeFormat.folder(cwd, home: model.workspace.home)
+            return folder.isEmpty ? (agent.spaceName.isEmpty ? agent.name : agent.spaceName) : folder
         }
         return agent.detail.isEmpty ? agent.name : agent.detail
     }
 
     private func secondaryName(_ agent: HcAgent) -> String {
-        model.agentViewMode == .priority ? agent.detail : ""
+        model.agentViewMode == .priority ? agent.address : ""
     }
 
     @ViewBuilder
@@ -356,7 +362,7 @@ struct HcSidebarView: View {
         .frame(height: HcChromeMetrics.sidebarHeaderHeight)
     }
 
-    /// 1pt border + 4pt top padding + two 28pt rows + 8pt bottom = the frozen 69.
+    /// 1pt border + 4pt top padding + two 28pt rows + 51pt bottom = the frozen 112.
     private var footer: some View {
         VStack(spacing: 0) {
             Rectangle()
@@ -372,7 +378,7 @@ struct HcSidebarView: View {
             }
             .padding(.horizontal, 8)
             .padding(.top, 4)
-            .padding(.bottom, 8)
+            .padding(.bottom, 51)
         }
         .frame(height: HcChromeMetrics.sidebarFooterHeight, alignment: .top)
     }
@@ -385,10 +391,10 @@ private struct IconButton: View {
     let help: String
     let action: () -> Void
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hovering = false
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     var body: some View {
         Button(action: action) {
@@ -409,10 +415,10 @@ private struct IconButton: View {
 private struct SortMenu: View {
     @ObservedObject var model: HcWorkspaceModel
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hovering = false
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     private var current: String {
         model.agentViewMode == .priority ? "Priority" : "Grouped by space"
@@ -448,10 +454,10 @@ private struct FooterRow: View {
     let dim: Bool
     let action: () -> Void
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hovering = false
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     var body: some View {
         Button(action: action) {
@@ -473,124 +479,6 @@ private struct FooterRow: View {
         .buttonStyle(.plain)
         .focusable(false)
         .onHover { hovering = $0 }
-    }
-}
-
-struct HcAddMachineView: View {
-    enum Reach: String, CaseIterable, Identifiable {
-        case ssh = "SSH"
-        case command = "Command"
-
-        var id: String { rawValue }
-    }
-
-    @ObservedObject var model: HcWorkspaceModel
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var reach: Reach = .ssh
-    @State private var target = ""
-    @State private var via = ""
-    @State private var name = ""
-    @State private var session = ""
-    @State private var temporary = false
-    @State private var submitting = false
-    @State private var error: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Add a machine").font(.headline)
-            Text("The core dials it and keeps it connected; its terminals join this list.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Picker("Reach it by", selection: $reach) {
-                ForEach(Reach.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-
-            if reach == .ssh {
-                labeled("SSH target", text: $target, prompt: "can@10.0.0.7:2222 or a Host from ~/.ssh/config")
-            } else {
-                labeled("Command", text: $via, prompt: "given a shell line as its last argument, like ssh")
-            }
-            labeled("Name (optional)", text: $name, prompt: "default: the target's host")
-
-            HStack(spacing: 12) {
-                labeled("Session (optional)", text: $session, prompt: "default: its default")
-                Toggle("Temporary", isOn: $temporary)
-                    .toggleStyle(.checkbox)
-                    .help("A sandbox for one task: hidden from the sidebar")
-            }
-
-            if let error {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-
-            HStack {
-                if error != nil {
-                    Button("Open a terminal instead…") {
-                        Task {
-                            await model.openAddTerminal(
-                                target: reach == .ssh ? target : nil,
-                                via: reach == .command ? via : nil,
-                                name: name,
-                                session: session,
-                                temporary: temporary
-                            )
-                            dismiss()
-                        }
-                    }
-                }
-                Spacer()
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button(submitting ? "Adding…" : "Add") { submit() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(submitting || !isValid)
-            }
-        }
-        .padding(20)
-        .frame(width: 460)
-    }
-
-    private var isValid: Bool {
-        if reach == .ssh {
-            return !target.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        return !via.trimmingCharacters(in: .whitespaces).isEmpty
-            && !name.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    private func submit() {
-        submitting = true
-        error = nil
-        Task {
-            do {
-                _ = try await model.addMachine(
-                    target: reach == .ssh ? target : nil,
-                    via: reach == .command ? via : nil,
-                    name: name.isEmpty ? nil : name,
-                    session: session.isEmpty ? nil : session,
-                    temporary: temporary
-                )
-                await model.refreshMachines()
-                dismiss()
-            } catch {
-                self.error = HcWorkspaceModel.describe(error)
-            }
-            submitting = false
-        }
-    }
-
-    private func labeled(_ title: String, text: Binding<String>, prompt: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            TextField(title, text: text, prompt: Text(prompt))
-                .textFieldStyle(.roundedBorder)
-        }
     }
 }
 

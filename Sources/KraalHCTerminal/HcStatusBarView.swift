@@ -11,10 +11,10 @@ import SwiftUI
 
 struct HcStatusBarView: View {
     @ObservedObject var model: HcWorkspaceModel
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hoveringHint = false
 
-    private var colors: HcChromeColors { .forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
     private var activeMachine: String? { model.workspace.activeSpace?.machine }
 
     /// The status bar counts what a person counts: one row per agent, not one
@@ -45,7 +45,7 @@ struct HcStatusBarView: View {
 
     private var machineLabel: some View {
         HStack(spacing: 6) {
-            Image(systemName: activeMachine == nil ? "monitor" : "server")
+            Image(systemName: activeMachine == nil ? "laptopcomputer" : "server")
                 .font(.system(size: 13))
             Text(activeMachine ?? "This computer")
                 .lineLimit(1)

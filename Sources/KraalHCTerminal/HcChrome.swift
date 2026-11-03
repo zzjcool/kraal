@@ -27,7 +27,7 @@ public enum HcChromeMetrics {
     public static let sidebarRowHeight: CGFloat = 30
     public static let sidebarRowInset: CGFloat = 8
     /// Two 28pt footer rows plus the top border and padding.
-    public static let sidebarFooterHeight: CGFloat = 69
+    public static let sidebarFooterHeight: CGFloat = 112
 
     public static let tabHeight: CGFloat = 29
     public static let tabRadius: CGFloat = 7
@@ -132,6 +132,27 @@ public struct HcChromeColors {
     public let blocked: Color
     public let done: Color
     public let idle: Color
+
+    /// The selected theme's tokens in the shell's vocabulary. Keeping this
+    /// initializer here means the shell and the themed dialogs cannot drift:
+    /// both read the same `HcTheme` resolved from the user's settings.
+    public init(theme: HcTheme) {
+        chrome = theme.chrome.color
+        canvas = theme.canvas.color
+        surface = theme.paneHeader.color
+        raised = theme.raised.color
+        hover = theme.hover.color
+        selected = theme.selected.color
+        border = theme.border.color
+        foreground = theme.foreground.color
+        muted = theme.muted.color
+        dim = theme.dim.color
+        accent = theme.accent.color
+        working = theme.working.color
+        blocked = theme.blocked.color
+        done = theme.done.color
+        idle = theme.idle.color
+    }
 
     public init(hex: HcChromeHex) {
         chrome = Self.parse(hex.chrome)
@@ -269,10 +290,27 @@ public enum HcSpacePalette {
 /// The SF Symbol for the OSC 7501 `app` word an agent reports. Unknown apps get
 /// a generic chip rather than nothing, so a row always has a leading glyph.
 public enum HcAgentAppIcon {
+    /// The human name the official app gives an agent app. The pane header
+    /// uses this, not the terminal's own short word: `claude` reads as the
+    /// product, `Claude Code`, just like the app's tab.
+    public static func displayName(for app: String?) -> String {
+        let word = app?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch word.lowercased() {
+        case "claude", "claude-code": return "Claude Code"
+        case "codex": return "Codex"
+        case "cursor": return "Cursor"
+        case "aider": return "Aider"
+        case "gemini": return "Gemini"
+        default:
+            guard !word.isEmpty else { return "" }
+            return word.prefix(1).uppercased() + word.dropFirst()
+        }
+    }
+
     public static func symbol(for app: String?) -> String {
         let word = app?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         switch word {
-        case "claude": return "sparkles"
+        case "claude": return "cpu"
         case "codex": return "chevron.left.forwardslash.chevron.right"
         case "cursor": return "cursorarrow.rays"
         case "aider": return "wand.and.stars"

@@ -53,6 +53,10 @@ struct HcWelcomeView: View {
             focused = true
         }
         .onExitCommand { model.dismissWelcome() }
+        .onKeyPress(.escape) {
+            model.dismissWelcome()
+            return .handled
+        }
         // Nothing on these pages takes text, so the arrows are always free.
         .onKeyPress(.leftArrow) {
             turn(to: page - 1)
@@ -87,6 +91,17 @@ struct HcWelcomeView: View {
             Text("Esc")
                 .font(.system(size: 11))
                 .foregroundStyle(theme.dim.color)
+            Button {
+                model.dismissWelcome()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.muted.color)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close")
         }
         .padding(.horizontal, 22)
         .frame(height: 52)
@@ -163,6 +178,23 @@ struct HcWelcomeView: View {
                 title: "Kraal is the window; herdr-core does the work",
                 detail: "Spaces, tabs and panes come from the core, so an agent sees the same layout."
             )
+            HcWelcomeHairline()
+                .padding(.vertical, 2)
+            HStack(spacing: 12) {
+                rowLabel("Appearance")
+                HcSegmented(
+                    items: HcAppearance.allCases.map { (value: $0, label: $0.title) },
+                    selection: $model.settings.appearance
+                )
+            }
+            HStack(spacing: 12) {
+                rowLabel("Size")
+                HcStepper(
+                    value: "\(Int(model.settings.fontSize)) pt",
+                    decrement: { zoom(by: -1) },
+                    increment: { zoom(by: 1) }
+                )
+            }
         }
     }
 

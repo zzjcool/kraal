@@ -66,7 +66,7 @@ struct HcChromeMetricsTests {
         #expect(HcChromeMetrics.sidebarHeaderHeight == 31)
         #expect(HcChromeMetrics.sidebarRowHeight == 30)
         #expect(HcChromeMetrics.sidebarRowInset == 8)
-        #expect(HcChromeMetrics.sidebarFooterHeight == 69)
+        #expect(HcChromeMetrics.sidebarFooterHeight == 112)
         #expect(HcChromeMetrics.paneGap == 8)
         #expect(HcChromeMetrics.workInset == 8)
         #expect(HcChromeMetrics.terminalInsetX == 14)
@@ -302,17 +302,19 @@ struct HcSpacePaletteTests {
 struct HcAgentAppIconTests {
     @Test("known OSC 7501 apps")
     func known() {
-        #expect(HcAgentAppIcon.symbol(for: "claude") == "sparkles")
+        #expect(HcAgentAppIcon.symbol(for: "claude") == "cpu")
         #expect(HcAgentAppIcon.symbol(for: "codex") == "chevron.left.forwardslash.chevron.right")
         #expect(HcAgentAppIcon.symbol(for: "cursor") == "cursorarrow.rays")
         #expect(HcAgentAppIcon.symbol(for: "aider") == "wand.and.stars")
         #expect(HcAgentAppIcon.symbol(for: "gemini") == "diamond")
+        #expect(HcAgentAppIcon.displayName(for: "claude") == "Claude Code")
+        #expect(HcAgentAppIcon.displayName(for: "codex") == "Codex")
     }
 
     @Test("unknown apps get a chip, missing apps the terminal")
     func fallback() {
         #expect(HcAgentAppIcon.symbol(for: "vim") == "cpu")
-        #expect(HcAgentAppIcon.symbol(for: "Claude") == "sparkles")
+        #expect(HcAgentAppIcon.symbol(for: "Claude") == "cpu")
         #expect(HcAgentAppIcon.symbol(for: nil) == "terminal")
         #expect(HcAgentAppIcon.symbol(for: "") == "terminal")
         #expect(HcAgentAppIcon.symbol(for: "   ") == "terminal")

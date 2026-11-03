@@ -12,13 +12,13 @@ import SwiftUI
 
 public struct HcLayoutView: View {
     @ObservedObject private var model: HcWorkspaceModel
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
 
     public init(model: HcWorkspaceModel) {
         self.model = model
     }
 
-    private var colors: HcChromeColors { HcChromeColors.forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -27,7 +27,8 @@ public struct HcLayoutView: View {
             }
             if let tab = model.workspace.activeTab {
                 HcPaneTreeView(node: tab.shown, model: model)
-                    .padding(HcChromeMetrics.workInset)
+                    .padding(.horizontal, HcChromeMetrics.workInset)
+                    .padding(.bottom, HcChromeMetrics.workInset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 emptyState
@@ -78,9 +79,9 @@ private struct HcSplitHandle: View {
     @State private var startWeights: [Double]?
     @State private var lastWeights: [Double]?
     @State private var hovering = false
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
 
-    private var colors: HcChromeColors { HcChromeColors.forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     var body: some View {
         Rectangle()
@@ -191,9 +192,9 @@ struct HcPaneTreeView: View {
     let node: KraalNode
     @ObservedObject var model: HcWorkspaceModel
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
 
-    private var colors: HcChromeColors { HcChromeColors.forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     /// The tab's focused pane: the card outline follows it, and so does the
     /// terminal's first responder.
@@ -356,7 +357,7 @@ private struct HcPaneHeader: View {
     let node: KraalNode
     let terminal: HcTerminal?
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.hcTheme) private var hcTheme
     @State private var hovering = false
 
     /// The programs the official app draws with its plain shell glyph.
@@ -365,7 +366,7 @@ private struct HcPaneHeader: View {
         "cmd", "elvish", "xonsh", "tcsh", "csh", "ksh", "ion",
     ]
 
-    private var colors: HcChromeColors { HcChromeColors.forScheme(colorScheme) }
+    private var colors: HcChromeColors { HcChromeColors(theme: hcTheme) }
 
     /// The agent reporting from this pane, when one does. Parents come before
     /// their children, so the first match is the one the pane belongs to.
@@ -384,6 +385,9 @@ private struct HcPaneHeader: View {
     }
 
     private var title: String {
+        if let agent, let app = agent.app, !app.isEmpty {
+            return HcAgentAppIcon.displayName(for: app)
+        }
         if let agent {
             let tab = agent.tabName
             if !tab.isEmpty, tab.first?.isNumber != true { return tab }

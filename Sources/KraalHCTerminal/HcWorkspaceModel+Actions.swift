@@ -59,8 +59,8 @@ extension HcWorkspaceModel {
     public func applySettings() {
         NSApp?.appearance = settings.appearance.nsAppearance
         refreshTheme()
-        for session in paneSessions.values { session.apply(settings) }
-        peekSession?.apply(settings)
+        for session in paneSessions.values { session.apply(settings, theme: resolvedTheme) }
+        peekSession?.apply(settings, theme: resolvedTheme)
     }
 
     /// Actions the runner can execute today. The palette and menus hide the
