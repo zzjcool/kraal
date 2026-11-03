@@ -104,7 +104,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "KraalCLI",
-            dependencies: ["KraalActions", "KraalProtocol", "KraalTransport", "KraalClient"],
+            dependencies: ["KraalActions", "KraalHC", "KraalProtocol", "KraalTransport", "KraalClient"],
             path: "Sources/KraalCLI",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

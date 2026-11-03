@@ -235,9 +235,17 @@ func printCommands() {
 
 func printUsage() {
     print("""
-    kraal — Herdr endpoint protocol probe
+    kraal — control a running Kraal window, or probe a Herdr endpoint
 
-    USAGE
+    CONTROL
+      kraal commands [--json]         print the app action catalog (no window)
+      kraal ls [--json]               spaces, tabs and terminal panes
+      kraal status [--json]           focus, zoom, documents and errors
+      kraal do ACTION [--arg value | '<json>']
+                                       run an action in the window
+      kraal shot [PATH]               save a PNG of the window
+
+    USAGE (Herdr 1 probe; being removed)
       kraal [options]                  handshake + snapshot + surface text
       kraal [options] screenshot       print the whole surface as text
       kraal [options] snapshot         print only the sidebar snapshot
@@ -251,7 +259,6 @@ func printUsage() {
                                        and, with --wait, exit with its status
       kraal events --type T …         stream daemon events as JSON lines
                                        (`kraal events --list` prints the kinds)
-      kraal commands [--json]         print the app action catalog as JSON
 
     TARGET
       --socket <path>     unix socket (default: this Mac's herdr-client.sock)
@@ -378,6 +385,7 @@ func wait(
 @main
 struct KraalCLI {
     static func main() async {
+        if runControlCommand(Array(CommandLine.arguments.dropFirst())) { return }
         let options = parse()
         // `capture` shells out to `herdr pane read`; it must not require the endpoint
         // socket the rest of this binary talks to, or it could not report on a pane

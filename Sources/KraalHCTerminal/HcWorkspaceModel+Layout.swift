@@ -73,6 +73,7 @@ extension HcWorkspaceModel {
             let parsed = try HcLayoutDocument(value: document.value)
             workspace.apply(parsed, for: machine)
             layoutLoaded.insert(key)
+            layoutVersions[key] = document.version
             layoutError = nil
             let tabs = parsed.spaces.reduce(0) { $0 + $1.tabs.count }
             let place = machine.map { " on \($0)" } ?? ""
@@ -115,10 +116,12 @@ extension HcWorkspaceModel {
         else { return }
         do {
             let saved = try await sync.save(document.value)
+            layoutVersions[key] = saved.version
             log?("hc: layout saved v\(saved.version)\(machine.map { " on \($0)" } ?? "")")
         } catch let HcDocumentError.conflict(latest) {
             layoutError = "The layout changed elsewhere; showing the latest version."
             log?("hc: layout conflict, latest v\(latest.version)")
+            layoutVersions[key] = latest.version
             if let parsed = try? HcLayoutDocument(value: latest.value) {
                 workspace.apply(parsed, for: machine)
                 publish()
@@ -436,19 +439,20 @@ extension HcWorkspaceModel {
         publish()
     }
 
+    @discardableResult
     public func newTab(
         name: String? = nil,
         tabName: String? = nil,
         folder: String? = nil,
         space spaceID: String? = nil,
         argv: [String] = []
-    ) async {
-        guard client.isConnected else { return }
+    ) async -> HcActionResources? {
+        guard client.isConnected else { return nil }
         let selected = spaceID.flatMap { workspace.space($0) } ?? workspace.activeSpace
         let machine = selected?.machine
         guard layoutLoaded.contains(key(machine)) else {
             layoutError = "This machine's layout is unavailable. Try again when it reconnects."
-            return
+            return nil
         }
         if let selected, selected.id != workspace.activeSpace?.id {
             workspace.setActiveSpace(selected.id)
@@ -463,7 +467,7 @@ extension HcWorkspaceModel {
             name: name,
             argv: argv,
             machine: machine
-        ) else { return }
+        ) else { return nil }
         guard let pane = workspace.adopt(
             terminal: terminal.address,
             space: space,
@@ -474,7 +478,7 @@ extension HcWorkspaceModel {
         ) else {
             layoutError = "The terminal started, but its tab could not be added."
             await killCascade(terminal.address)
-            return
+            return nil
         }
         // Adoption may have won the race while `terminal.run` was in flight and
         // created the tab with a guessed id/name. Keep its id, apply the name.
@@ -487,22 +491,31 @@ extension HcWorkspaceModel {
             // `tab.new` is the opposite: show the tab it just made.
             _ = workspace.selectTab(actual.id)
         }
+        let createdTab = workspace.tab(ofPane: pane)?.id ?? tab
+        let createdSpace = workspace.space(of: createdTab)?.id ?? space
         publish()
         await saveLayout(machine: machine)
+        return HcActionResources(
+            space: createdSpace,
+            tab: createdTab,
+            pane: pane,
+            terminal: terminal.address
+        )
     }
 
     /// Make a space with its first terminal; used by `space.new` and the empty
     /// window. `folder` empty means the machine's home.
+    @discardableResult
     public func newSpace(
         name: String? = nil,
         folder: String? = nil,
         tabName: String? = nil,
         argv: [String] = [],
         machine: String? = nil
-    ) async {
+    ) async -> HcActionResources? {
         guard client.isConnected, layoutLoaded.contains(key(machine)) else {
             layoutError = "This machine's layout is unavailable. Try again when it reconnects."
-            return
+            return nil
         }
         let spaceID = workspace.freshSpaceID(machine: machine)
         let tabID = workspace.freshTabID(machine: machine)
@@ -513,7 +526,7 @@ extension HcWorkspaceModel {
             cwd: cwd,
             argv: argv,
             machine: machine
-        ) else { return }
+        ) else { return nil }
         // `adopt` is the only path that survives the terminal event arriving
         // before `terminal.run`'s reply: it may already have made the space with
         // a fresh tab. Do not add a second one.
@@ -527,27 +540,36 @@ extension HcWorkspaceModel {
         ) else {
             layoutError = "The terminal started, but its space could not be added."
             await killCascade(terminal.address)
-            return
+            return nil
         }
+        let createdTab = workspace.tab(ofPane: pane)?.id ?? tabID
+        let createdSpace = workspace.space(of: createdTab)?.id ?? spaceID
         if let name, !name.isEmpty {
-            _ = workspace.renameSpace(spaceID, to: name)
+            _ = workspace.renameSpace(createdSpace, to: name)
         }
         if let tabName, !tabName.isEmpty,
            let actual = workspace.tab(ofPane: pane), actual.name != tabName {
             _ = workspace.renameTab(actual.id, to: tabName)
         }
-        workspace.setActiveSpace(spaceID)
+        workspace.setActiveSpace(createdSpace)
         publish()
         await saveLayout(machine: machine)
+        return HcActionResources(
+            space: createdSpace,
+            tab: createdTab,
+            pane: pane,
+            terminal: terminal.address
+        )
     }
 
-    public func splitFocusedPane(_ axis: KraalAxis, argv: [String] = []) async {
+    @discardableResult
+    public func splitFocusedPane(_ axis: KraalAxis, argv: [String] = []) async -> HcActionResources? {
         guard client.isConnected, let tab = workspace.activeTab,
               let target = tab.focusedPane, let space = workspace.space(of: tab.id)
-        else { return }
+        else { return nil }
         guard layoutLoaded.contains(key(space.machine)) else {
             layoutError = "This machine's layout is unavailable. Try again when it reconnects."
-            return
+            return nil
         }
         let paneID = workspace.freshPaneID(machine: space.machine)
         guard let terminal = await startTerminal(
@@ -556,7 +578,7 @@ extension HcWorkspaceModel {
             cwd: space.folder,
             argv: argv,
             machine: space.machine
-        ) else { return }
+        ) else { return nil }
         let placed = workspace.paneID(ofTerminal: terminal.address)
         let didPlace: Bool
         if let placed, placed != target {
@@ -574,10 +596,18 @@ extension HcWorkspaceModel {
         guard didPlace else {
             layoutError = "The terminal started, but the split failed."
             await killCascade(terminal.address)
-            return
+            return nil
         }
+        let actualPane = workspace.paneID(ofTerminal: terminal.address) ?? paneID
+        let actualTab = workspace.tab(ofPane: actualPane)?.id ?? tab.id
         publish()
         await saveLayout(machine: space.machine)
+        return HcActionResources(
+            space: space.id,
+            tab: actualTab,
+            pane: actualPane,
+            terminal: terminal.address
+        )
     }
 
     public func closeFocusedPane() async {
