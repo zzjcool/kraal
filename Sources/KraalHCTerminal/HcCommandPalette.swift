@@ -225,6 +225,14 @@ public struct HcCommandPalette: View {
             model.attach()
             queryFocused = true
         }
+        .task {
+            // The overlay and its TextField exist before AppKit gives the window
+            // a first responder. Setting the FocusState inside onAppear alone
+            // loses that race: ⌘K opened the palette but the terminal kept the
+            // keyboard, so typing filtered nothing (caught in the Tart VM).
+            try? await Task.sleep(for: .milliseconds(50))
+            queryFocused = true
+        }
         .onDisappear { model.detach() }
     }
 }
