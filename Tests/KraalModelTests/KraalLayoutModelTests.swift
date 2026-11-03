@@ -51,6 +51,34 @@ struct KraalLayoutModelTests {
         #expect(root.panes.map(\.id) == ["p3", "p2", "p1"])
     }
 
+    @Test("directional focus walks up to a shared axis")
+    func neighbors() throws {
+        var model = threePanes()
+        #expect(model.neighborPane(of: "p1", direction: .right) == "p2")
+        #expect(model.neighborPane(of: "p1", direction: .left) == nil)
+        #expect(model.neighborPane(of: "p2", direction: .bottom) == "p3")
+        #expect(model.neighborPane(of: "p3", direction: .top) == "p2")
+        #expect(model.neighborPane(of: "p3", direction: .left) == "p1")
+        #expect(model.neighborPane(of: "p1", direction: .top) == nil)
+        let didFocus = model.focusNeighbor("p1", direction: .right)
+        #expect(didFocus)
+        #expect(model.focusedPane == "p2")
+    }
+
+    @Test("swap with a neighbor keeps both panes and moves the terminals")
+    func swapNeighbor() throws {
+        var model = threePanes()
+        let didSwap = model.swapWithNeighbor("p1", direction: .right)
+        #expect(didSwap)
+        let tab = try #require(model.tab("tb1"))
+        #expect(tab.root.panes.map(\.id) == ["p2", "p1", "p3"])
+        #expect(tab.root.find("p1")?.terminal == "t1")
+        #expect(tab.root.find("p2")?.terminal == "t2")
+        #expect(model.focusedPane == "p1")
+        let missing = model.swapWithNeighbor("p2", direction: .left)
+        #expect(!missing)
+    }
+
     @Test("moving a tab uses 1-based positions and clamps at both ends")
     func moveTabs() throws {
         var model = modelWithOne()

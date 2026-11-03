@@ -217,6 +217,12 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > （`pane.go/swap`、`terminal.right_click`、主题/缩放等留给后续阶段）；不支持的
 > action 保留原因，帮助浮层按官方名字列出。命令面不引 JS mods，`layout.*`/
 > `mod.*`/`overlay.*` 永远不在 Kraal 的可执行集合里。
+>
+> #231 的键位：`keys.json` 与官方同构（`global`/`terminal`/`layout:<name>`/
+> `mod:<name>`），Kraal 只执行 global + terminal 两段；layout/mod 段会校验但
+> 没有运行时。文件默认在 `~/.config/kraal/keys.json`，坏文件不会覆盖上一份
+> 可用绑定；`ctrl-alt-shift-escape` 只恢复键位，不动共享布局。默认表来自
+> herdr-app 的 `defaults/keys.macos.json`，`pane.go`/`pane.swap` 已可用。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

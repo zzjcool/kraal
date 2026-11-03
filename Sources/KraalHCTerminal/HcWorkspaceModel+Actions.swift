@@ -42,7 +42,7 @@ extension HcWorkspaceModel {
         "space.next", "space.prev",
         "tab.new", "tab.close", "tab.rename", "tab.move", "tab.select",
         "tab.settle", "tab.unsettle", "tab.next", "tab.prev",
-        "pane.split", "pane.close", "pane.zoom", "pane.focus",
+        "pane.split", "pane.close", "pane.zoom", "pane.focus", "pane.go", "pane.swap",
         "terminal.open", "terminal.keep", "terminal.park", "terminal.pin",
         "terminal.kill", "terminal.peek", "terminal.show",
         "agent.focus", "agent.next", "agent.prev",
@@ -231,6 +231,27 @@ extension HcWorkspaceModel {
             }
             focusPane(pane)
             return .ok()
+        case "pane.go":
+            guard let pane = targetPane(values), let direction = edge(values["direction"]) else {
+                return .fail("pane.go needs direction")
+            }
+            guard workspace.focusNeighbor(pane, direction: direction) else {
+                return .fail("pane.go: no pane that way")
+            }
+            publish()
+            return .ok()
+        case "pane.swap":
+            guard let pane = targetPane(values), let direction = edge(values["direction"]) else {
+                return .fail("pane.swap needs direction")
+            }
+            guard workspace.swapWithNeighbor(pane, direction: direction) else {
+                return .fail("pane.swap: no pane that way")
+            }
+            publish()
+            if let space = workspace.tab(ofPane: pane).flatMap({ workspace.space(of: $0.id) }) {
+                await saveLayout(machine: space.machine)
+            }
+            return .ok()
 
         default:
             return .fail("\(name) is not implemented in this window yet")
@@ -355,8 +376,22 @@ extension HcWorkspaceModel {
 
     // MARK: Arguments and targets
 
+    /// Type into the terminal that owns the focused pane; `send:` bindings use
+    /// this instead of a synthetic key event.
+    public func sendToFocused(_ text: String) {
+        guard let pane = workspace.focusedPane,
+              let address = workspace.terminal(ofPane: pane),
+              let session = paneSessions[address]
+        else { return }
+        session.send(Data(text.utf8))
+    }
+
     private func argv(_ values: [String: JSONValue]) -> [String] {
         values["argv"]?.arrayValue?.compactMap(\.stringValue) ?? []
+    }
+
+    private func edge(_ value: JSONValue?) -> KraalEdge? {
+        value?.stringValue.flatMap(KraalEdge.init(rawValue:))
     }
 
     private func targetSpace(_ values: [String: JSONValue], id key: String) -> String? {
