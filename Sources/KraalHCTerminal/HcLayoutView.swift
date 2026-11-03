@@ -142,7 +142,7 @@ private struct HcLayoutToolbar: View {
                 Text(tab.displayName).lineLimit(1)
             }
             .padding(.horizontal, 7)
-            .padding(.vertical, 3)
+            .padding(.vertical, model.settings.density.tabPadding)
             .background(
                 RoundedRectangle(cornerRadius: 5)
                     .fill(tab.id == model.workspace.activeSpace?.activeTab

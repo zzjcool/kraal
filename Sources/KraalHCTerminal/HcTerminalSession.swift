@@ -167,6 +167,13 @@ public final class HcTerminalSession {
         stream.send(data)
     }
 
+    /// Applies the terminal look to this live surface. Ghostty reconfigures in
+    /// place; the pane's stream and scrollback are untouched.
+    public func apply(_ settings: HcTerminalSettings) {
+        _ = state.controller.setTerminalConfiguration(settings.terminalConfiguration)
+        state.objectWillChange.send()
+    }
+
     /// Detaches without killing the program.
     public func close() {
         stream.close()

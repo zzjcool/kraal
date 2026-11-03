@@ -48,6 +48,8 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
         [
             target(nil, "About Kraal", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
+            target(self, "Settings…", #selector(openSettings), "comma"),
+            .separator(),
             target(nil, "Services", nil).withSubmenu(NSMenu(title: "Services")),
             .separator(),
             target(nil, "Hide Kraal", #selector(NSApplication.hide(_:)), "h"),
@@ -174,6 +176,10 @@ final class HcMenuBar: NSObject, NSMenuItemValidation {
 
     @objc private func openPalette() {
         workspace?.showPalette = true
+    }
+
+    @objc private func openSettings() {
+        workspace?.showSettings = true
     }
 
     @objc private func openHelp() {

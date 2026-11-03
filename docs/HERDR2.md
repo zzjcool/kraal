@@ -228,9 +228,21 @@ JSON-RPC 明文/帧、hello 门禁、attach 原始字节进 Ghostty、CREDIT、R
 > 36pt；命中区比 1pt 线宽，AX 可每次调 5%；文档只在手势结束写一次。tab 条用
 > SwiftUI drag/drop，落到哪个 tab 就 `tab.move` 到它的 1-based 位置。
 >
+> #231 的设置只属于本机，不进共享布局：字体、padding、背景透明度、最小对比度
+> 走 `TerminalConfiguration` 推到所有 live surface；density 只改侧栏/tab 的
+> 垂直 padding；App appearance 改 `NSApp.appearance`；通知声音开关控制
+> `NSUserNotification.soundName`。core socket 与 keys 路径只读展示，避免设置页
+> 悄悄换掉正在用的 core。
+>
 > #231 的分隔条：拖动只改 JSON 的 `size.weight`，两兄弟权重和不变，每侧最小
 > 36pt；命中区比 1pt 线宽，AX 可每次调 5%；文档只在手势结束写一次。tab 条用
 > SwiftUI drag/drop，落到哪个 tab 就 `tab.move` 到它的 1-based 位置。
+>
+> #231 的设置只属于本机，不进共享布局：字体、padding、背景透明度、最小对比度
+> 走 `TerminalConfiguration` 推到所有 live surface；density 只改侧栏/tab 的
+> 垂直 padding；App appearance 改 `NSApp.appearance`；通知声音开关控制
+> `NSUserNotification.soundName`。core socket 与 keys 路径只读展示，避免设置页
+> 悄悄换掉正在用的 core。
 
 **M1 · 布局是自己的（模型 + 文档）**
 space/tab/pane 树、创建/关闭/拆分/缩放/移动、共享文档读写与透传、私有视图状态。

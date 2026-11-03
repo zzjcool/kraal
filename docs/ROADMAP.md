@@ -107,7 +107,12 @@ SPDX-FileCopyrightText: 2026 zzjcool
   7pt 视觉线 + 两侧扩展命中区，指针悬停显示 resize cursor；AX
   `accessibilityAdjustableAction` 以 5% 步长调整 ratio；松手才写共享文档。
   tab 条支持 drag & drop，落到目标 tab 时调用 `tab.move`（1-based）。
-- **#231 还差**：设置（字体/主题/透明度/内边距/core 路径）；`app.zoom_*`/
+- **#231 设置（第四批）**：`HcSettingsView`（工具栏齿轮 / `⌘,` / 命令面板）：
+  App system/light/dark、侧栏 Density（comfortable/compact）、字体 8–32pt、
+  水平/垂直 padding、背景透明度、最小对比度、agent 通知声音；core socket 与
+  keys 路径只读展示。值存 `UserDefaults`，改一项立即 `setTerminalConfiguration`
+  到所有 live surface（含 peek），不需要重启。
+- **#231 还差**：`option_as_alt`（Ghostty 输入层）、`app.zoom_*`/
   `layout.toggle`/`mod.open` 等尚未执行；`kraal do` 需要 #233 的窗口控制
-  socket。
+  socket；rename 的输入 UI 也还没接。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。
