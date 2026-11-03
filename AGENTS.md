@@ -191,6 +191,11 @@ for f in Scripts/*.sh; do shellcheck -S warning "$f"; done   # 必须零警告
    `loginwindow`，任何 app 都无法成为 frontmost，CGEvent 会落到不存在的窗口。
    这类用例声明 `requires() { echo focus; }`，`gui.sh` 会跳过并 exit 2（环境
    问题），不当成产品失败。
+   **锁屏只挡 `local`，不挡 VM。** 宿主锁着时 `kraal-agent` 里仍是 Aqua 会话，
+   `tart exec` 进去可以启动 HC core + `KRAAL_HC=1` 的 Kraal，用 driver 做
+   AXPress/键盘/截图。2026-11-03 实测：设置面板、字号步进、F2 rename
+   sheet、`⌘B` 侧栏、`⌘K` 搜索都在 VM 里验证过。不要因为宿主锁屏就把 UI
+   验证挂起。
 3. **断言要打印出来**。`summary.json` 带 `assertions[]`，一次通过的运行也应该
    能回答"到底验证了什么"。
 
