@@ -8,9 +8,11 @@ import SwiftUI
 
 public struct HcRootView: View {
     @ObservedObject private var model: HcWorkspaceModel
+    @StateObject private var keymap: HcKeymapController
 
     public init(model: HcWorkspaceModel) {
         self.model = model
+        _keymap = StateObject(wrappedValue: HcKeymapController(workspace: model))
     }
 
     public var body: some View {
@@ -21,6 +23,8 @@ public struct HcRootView: View {
                 .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
         }
         .task { model.start() }
+        .onAppear { keymap.attach() }
+        .onDisappear { keymap.detach() }
         .overlay(alignment: .topTrailing) {
             if let toast = model.agentToast {
                 HcAgentToastView(toast: toast) { model.agentToast = nil }
@@ -51,7 +55,7 @@ public struct HcRootView: View {
         .animation(.easeOut(duration: 0.2), value: model.agentToast)
         .animation(.easeOut(duration: 0.2), value: model.peekAddress)
         .sheet(isPresented: $model.showHelp) {
-            HcHelpView(workspace: model)
+            HcHelpView(workspace: model, keyBindings: keymap.bindings)
         }
         .sheet(item: $model.machineSheet) { sheet in
             switch sheet {

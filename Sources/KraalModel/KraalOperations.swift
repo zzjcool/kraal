@@ -306,6 +306,53 @@ extension KraalModel {
         return true
     }
 
+    /// The pane a directional move would land on. Walks up until an ancestor
+    /// shares the direction's axis, then takes the sibling on that side and
+    /// descends to the edge nearest the source.
+    public func neighborPane(of id: String, direction: KraalEdge) -> String? {
+        guard let tab = tab(ofPane: id), let path = panePath(id, in: tab.root) else { return nil }
+        for depth in stride(from: path.count - 2, through: 0, by: -1) {
+            let parent = path[depth]
+            guard parent.isContainer, parent.type == direction.axis.rawValue,
+                  let index = parent.children.firstIndex(where: { $0.id == path[depth + 1].id })
+            else { continue }
+            let next = direction == .left || direction == .top ? index - 1 : index + 1
+            guard parent.children.indices.contains(next) else { continue }
+            if let edge = edgePane(parent.children[next], from: direction) { return edge }
+        }
+        return nil
+    }
+
+    @discardableResult
+    public mutating func focusNeighbor(_ id: String, direction: KraalEdge) -> Bool {
+        guard let target = neighborPane(of: id, direction: direction) else { return false }
+        return focus(pane: target)
+    }
+
+    @discardableResult
+    public mutating func swapWithNeighbor(_ id: String, direction: KraalEdge) -> Bool {
+        guard let target = neighborPane(of: id, direction: direction) else { return false }
+        return movePane(id, to: target)
+    }
+
+    private func panePath(_ id: String, in node: KraalNode) -> [KraalNode]? {
+        if node.id == id { return [node] }
+        for child in node.children {
+            if let rest = panePath(id, in: child) { return [node] + rest }
+        }
+        return nil
+    }
+
+    private func edgePane(_ node: KraalNode, from direction: KraalEdge) -> String? {
+        var current = node
+        while current.isContainer, !current.children.isEmpty {
+            current = direction == .left || direction == .top
+                ? current.children[current.children.count - 1]
+                : current.children[0]
+        }
+        return current.isPane ? current.id : nil
+    }
+
     /// Closes a pane. Returns whether its tab and space closed with it.
     @discardableResult
     public mutating func removePane(_ pane: String) -> (tabClosed: Bool, spaceClosed: Bool) {

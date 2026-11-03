@@ -94,7 +94,15 @@ SPDX-FileCopyrightText: 2026 zzjcool
   实测：`File > New Space` 后 `hc ls` 出现 live t1；`Split Right/Down` 增加
   pane；面板搜 `split` 只剩 `pane.split`，执行后 `t3` 被 kill；布局保存
   v1→v2 不再出现假 conflict（每机器 save 串行化）。
-- **#231 还差**：`keys.json` 键位 + 帮助浮层 + 逃生键；设置（字体/主题/透明度/
-  内边距/core 路径）；分隔条拖动与 AX ratio、tab 拖动重排；`kraal do` 需要
-  #233 的窗口控制 socket。
+- **#231 keys（第二批）**：`KraalKeymap` 解析官方 macOS 默认 `keys.json`
+  （`global`/`terminal`/`layout:<name>`/`mod:<name>`；后两者已校验但 Kraal
+  还没有对应运行时，先不生效）。用户文件是 `~/.config/kraal/keys.json`
+  （`KRAAL_KEYS` 可覆盖），缺失时写入默认；1 秒轮询修改时间，坏文件保留上一份
+  可用绑定。`HcKeymapController` 把 NSEvent 归一到 `cmd/ctrl/alt/shift + 物理键`
+  （`cmd-+`、`cmd-shift-]` 等按物理键匹配），`send:` 直接写入聚焦终端；
+  `ctrl-alt-shift-escape` 恢复默认键位。帮助浮层现在同时列 KEYS 和 COMMANDS。
+  `pane.go`/`pane.swap` 已实现并接入 `cmd-alt-arrow` 默认键位。
+- **#231 还差**：设置（字体/主题/透明度/内边距/core 路径）；分隔条拖动与 AX
+  ratio、tab 拖动重排；`app.zoom_*`/`layout.toggle`/`mod.open` 等尚未执行；
+  `kraal do` 需要 #233 的窗口控制 socket。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。
