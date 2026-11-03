@@ -9,6 +9,7 @@
 // it stays useful for diagnosing a host that the app cannot reach.
 
 import Foundation
+import KraalActions
 import KraalClient
 import KraalProtocol
 import KraalTransport
@@ -45,6 +46,7 @@ struct Options {
         case capture
         case run
         case events
+        case commands
     }
 }
 
@@ -96,6 +98,13 @@ func parse() -> Options {
     guard !arguments.isEmpty else {
         printUsage()
         exit(0)
+    }
+
+    // `commands` is a standalone, windowless query: it must answer when the
+    // daemon is down and must not need the Herdr 1 socket.
+    if arguments[0] == "commands" {
+        options.command = .commands
+        return options
     }
 
     var index = 0
@@ -216,6 +225,14 @@ func parseModeFlag(
     return true
 }
 
+func printCommands() {
+    do {
+        print(try KraalActions.listingJSON())
+    } catch {
+        fail("cannot encode commands: \(error)")
+    }
+}
+
 func printUsage() {
     print("""
     kraal — Herdr endpoint protocol probe
@@ -234,6 +251,7 @@ func printUsage() {
                                        and, with --wait, exit with its status
       kraal events --type T …         stream daemon events as JSON lines
                                        (`kraal events --list` prints the kinds)
+      kraal commands [--json]         print the app action catalog as JSON
 
     TARGET
       --socket <path>     unix socket (default: this Mac's herdr-client.sock)
@@ -364,6 +382,10 @@ struct KraalCLI {
         // `capture` shells out to `herdr pane read`; it must not require the endpoint
         // socket the rest of this binary talks to, or it could not report on a pane
         // when the app is the thing that is broken.
+        if options.command == .commands {
+            printCommands()
+            return
+        }
         if options.command == .capture {
             runCapture(options)
         }
@@ -443,6 +465,8 @@ struct KraalCLI {
         connection: EndpointConnection
     ) async {
         switch options.command {
+        case .commands:
+            return
         case .snapshot, .probe:
             if options.command == .snapshot { return }
             await runSurfaceStep(options: options, collector: collector)

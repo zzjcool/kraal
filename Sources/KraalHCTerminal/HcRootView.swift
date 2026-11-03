@@ -37,8 +37,22 @@ public struct HcRootView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .overlay {
+            if model.showPalette {
+                ZStack {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.showPalette = false }
+                    HcCommandPalette(workspace: model)
+                }
+                .transition(.opacity)
+            }
+        }
         .animation(.easeOut(duration: 0.2), value: model.agentToast)
         .animation(.easeOut(duration: 0.2), value: model.peekAddress)
+        .sheet(isPresented: $model.showHelp) {
+            HcHelpView(workspace: model)
+        }
         .sheet(item: $model.machineSheet) { sheet in
             switch sheet {
             case .add:
@@ -92,6 +106,14 @@ public struct HcRootView: View {
             Text(model.machineError ?? "")
         }
         .toolbar {
+            ToolbarItem {
+                Button {
+                    model.showPalette.toggle()
+                } label: {
+                    Label("Commands", systemImage: "command")
+                }
+                .keyboardShortcut("k", modifiers: .command)
+            }
             ToolbarItem(placement: .status) {
                 Text(statusText)
                     .font(.caption)

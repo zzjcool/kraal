@@ -84,5 +84,17 @@ SPDX-FileCopyrightText: 2026 zzjcool
   busy→quiet 且没在看时 toast + 系统通知 + 声音（子 agent 与无 space 终端不告警）。
   `LiveHcAgentTests` 用真实 core + PTY 覆盖 working→blocked→done、seen、pin、
   后台不写、子 agent peek 与 mark unread；截图见 `/tmp/km-ui-agent2/`。
-- **下一步**：#231 的命令面与 chrome。
+- **#231 进行中（动作目录 + 第一批 chrome）**：`KraalActions` 单一表冻结
+  `herdr-app` 的 69 个 action 名/参数/必填和上游错误文案；47 个 native，22 个
+  显式 `unsupported(reason)`（mods/JS、chrome 布局文件、updater、copy/paste 等）。
+  `kraal commands [--json]` 直接由该表生成，输出上游的 `[{name,args,about}]` 形状，
+  不需要连接 daemon。窗口侧 `HcWorkspaceModel.performAction` 统一校验与分发，
+  菜单（Kraal/File/Edit/View/Window/Help）和 ⌘K 命令面板都走同一个 runner；
+  面板支持模糊匹配、分组、上下键与回车，只列当前能执行的 39 个 action。
+  实测：`File > New Space` 后 `hc ls` 出现 live t1；`Split Right/Down` 增加
+  pane；面板搜 `split` 只剩 `pane.split`，执行后 `t3` 被 kill；布局保存
+  v1→v2 不再出现假 conflict（每机器 save 串行化）。
+- **#231 还差**：`keys.json` 键位 + 帮助浮层 + 逃生键；设置（字体/主题/透明度/
+  内边距/core 路径）；分隔条拖动与 AX ratio、tab 拖动重排；`kraal do` 需要
+  #233 的窗口控制 socket。
 - `KRAAL_HC=1` 与旧入口是两个独立窗口；旧 cell 链路在 #234 随旧窗口一起删除。

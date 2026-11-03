@@ -51,6 +51,30 @@ struct KraalLayoutModelTests {
         #expect(root.panes.map(\.id) == ["p3", "p2", "p1"])
     }
 
+    @Test("moving a tab uses 1-based positions and clamps at both ends")
+    func moveTabs() throws {
+        var model = modelWithOne()
+        for index in 2 ... 3 {
+            model.addTab(
+                space: "sp1",
+                tab: KraalTabSeed(
+                    id: "tb\(index)", name: "tab \(index)", paneID: "p\(index)", terminal: "t\(index)"
+                )
+            )
+        }
+        let first = model.moveTab("tb3", to: 1)
+        #expect(first)
+        #expect(model.space("sp1")?.tabs.map(\.id) == ["tb3", "tb1", "tb2"])
+        let pastEnd = model.moveTab("tb3", to: 99)
+        #expect(pastEnd)
+        #expect(model.space("sp1")?.tabs.map(\.id) == ["tb1", "tb2", "tb3"])
+        let beforeStart = model.moveTab("tb2", to: -4)
+        #expect(beforeStart)
+        #expect(model.space("sp1")?.tabs.map(\.id) == ["tb2", "tb1", "tb3"])
+        let missing = model.moveTab("missing", to: 1)
+        #expect(!missing)
+    }
+
     @Test("cross-axis moves start the new split equal, not with the old slot")
     func crossAxisSizes() throws {
         var model = modelWithOne()

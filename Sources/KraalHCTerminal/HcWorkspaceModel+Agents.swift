@@ -93,6 +93,20 @@ extension HcWorkspaceModel {
         }
     }
 
+    /// Explicit pin state, for `terminal.pin {pinned}`. `togglePin` is the UI
+    /// shortcut; scripts know which state they want.
+    public func setPinned(_ address: String, pinned: Bool) async {
+        do {
+            _ = try await client.labelTerminal(
+                address,
+                labels: ["herdr.pinned": pinned ? "1" : ""]
+            )
+            log?("hc: \(pinned ? "pinned" : "unpinned") \(address)")
+        } catch {
+            showToast(title: "Could not pin", detail: String(describing: error), level: .error)
+        }
+    }
+
     /// Marks a finished agent unread by writing `turn - 1`; the next look at it
     /// writes the full turn again.
     public func markUnread(_ agent: HcAgent) async {
@@ -176,7 +190,7 @@ extension HcWorkspaceModel {
         NSUserNotificationCenter.default.deliver(notification)
     }
 
-    private func showToast(title: String, detail: String, level: HcAgentToast.Level) {
+    func showToast(title: String, detail: String, level: HcAgentToast.Level) {
         let toast = HcAgentToast(title: title, detail: detail, level: level)
         agentToast = toast
         toastTask?.cancel()
